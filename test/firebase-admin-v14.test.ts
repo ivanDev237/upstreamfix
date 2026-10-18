@@ -1,0 +1,532 @@
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { loadProject, runMigration } from '../src/core/runner.js';
+import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
+
+const temporaryDirectories: string[] = [];
+const lockfileNetworkTestEnabled = process.env.UPSTREAMFIX_RUN_LOCKFILE_NETWORK_TESTS === '1';
+
+async function makeProject(): Promise<string> {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-(firebase)-'));
+  temporaryDirectories.push(cwd);
+  await writeFile(
+    path.join(cwd, 'package.json'),
+    JSON.stringify({ name: 'fixture', dependencies: { 'firebase-admin': '^13.0.0' }, engines: { node: '>=22.0.0' } }, null, 2),
+  );
+  await writeFile(
+    path.join(cwd, 'server.ts'),
+    "import * as admin from 'firebase-admin';\nadmin.initializeApp();\nconst db = admin.firestore();\n",
+  );
+  return cwd;
+}
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+describe('firebase-admin v14 migration', () => {
+  it('warns about firebase-functions-test even when manual API findings block manifest updates', async () => {
+    const cwd = await makeProject();
+    const manifestPath = path.join(cwd, 'package.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { devDependencies?: Record<string, string> };
+    manifest.devDependencies = { 'firebase-functions-test': '^3.4.0' };
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+    await writeFile(path.join(cwd, 'server.ts'), "import * as admin from 'firebase-admin';\nadmin.instanceId();\n");
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.manual.length).toBeGreaterThan(0);
+    expect(outcome.manifestNotes.join(' ')).toContain('firebase-functions-test "^3.4.0" is installed');
+    expect(outcome.manifestNotes.join(' ')).toContain('the v14 typecheck failed because this package\'s declarations import firebase-admin exports removed in v14');
+  });
+
+  it('previews code and manifest changes without writing them', async () => {
+    const cwd = await makeProject();
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    const source = await readFile(path.join(cwd, 'server.ts'), 'utf8');
+    const manifest = JSON.parse(await readFile(path.join(cwd, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>;
+    };
+
+    expect(outcome.changes).toHaveLength(2);
+    expect(outcome.filesChanged).toEqual(['server.ts', 'package.json']);
+    expect(outcome.manifestNotes).toContain('`dependencies.firebase-admin`: `^13.0.0` → `^14.0.0`');
+    expect(source).toContain('admin.firestore()');
+    expect(manifest.dependencies['firebase-admin']).toBe('^13.0.0');
+  });
+
+  it('explains the Node.js prerequisite in a preview and proposes engines.node after explicit confirmation', async () => {
+    const cwd = await makeProject();
+    const manifestPath = path.join(cwd, 'package.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { engines?: { node: string } };
+    delete manifest.engines;
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+    const ordinary = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(ordinary.manifestNotes.join(' ')).toContain('--node-runtime 22');
+    expect(ordinary.proposedFiles.some((file) => file.relativePath === 'package.json')).toBe(false);
+
+    const confirmed = await runMigration(firebaseAdminV14, { cwd, dryRun: true, nodeRuntime: 22 });
+    const proposed = confirmed.proposedFiles.find((file) => file.relativePath === 'package.json');
+    expect(JSON.parse(proposed!.after).engines.node).toBe('>=22');
+    expect(JSON.parse(proposed!.after).dependencies['firebase-admin']).toBe('^14.0.0');
+    expect(confirmed.manifestNotes.join(' ')).toContain('explicit --node-runtime 22 confirmation');
+    expect(JSON.parse(await readFile(manifestPath, 'utf8')).engines).toBeUndefined();
+  });
+
+  it('does not override an incompatible declared Node.js range', async () => {
+    const cwd = await makeProject();
+    const manifestPath = path.join(cwd, 'package.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { engines: { node: string } };
+    manifest.engines.node = '>=18 <23';
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true, nodeRuntime: 22 });
+    expect(outcome.manual.some((item) => item.reason.includes('never overrides a declared range'))).toBe(true);
+    expect(outcome.proposedFiles.some((file) => file.relativePath === 'package.json')).toBe(false);
+  });
+
+  it('treats an empty engines.node declaration as manual instead of adding a duplicate key', async () => {
+    const cwd = await makeProject();
+    const manifestPath = path.join(cwd, 'package.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { engines: { node: string } };
+    manifest.engines.node = '';
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true, nodeRuntime: 22 });
+    expect(outcome.manual.some((item) => item.reason.includes('never overrides a declared range'))).toBe(true);
+    expect(outcome.proposedFiles.some((file) => file.relativePath === 'package.json')).toBe(false);
+  });
+
+  it('adds Node.js 22 to an existing engines object without rewriting unrelated manifest fields', async () => {
+    const cwd = await makeProject();
+    const manifestPath = path.join(cwd, 'package.json');
+    const original = '{\r\n  "name": "fixture",\r\n  "dependencies": { "firebase-admin": "^13.0.0" },\r\n  "engines": { "npm": ">=10" },\r\n  "scripts": { "test": "node -e 1" }\r\n}\r\n';
+    await writeFile(manifestPath, original);
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true, nodeRuntime: 22 });
+    const proposed = outcome.proposedFiles.find((file) => file.relativePath === 'package.json')?.after;
+    expect(proposed).toBeDefined();
+    expect(JSON.parse(proposed!).engines).toEqual({ npm: '>=10', node: '>=22' });
+    expect(proposed).toContain('\r\n  "scripts": { "test": "node -e 1" }');
+    expect(await readFile(manifestPath, 'utf8')).toBe(original);
+  });
+
+  it('shows the Node.js prerequisite even when manual API findings prevent a manifest update', async () => {
+    const cwd = await makeProject();
+    const manifestPath = path.join(cwd, 'package.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { engines?: { node: string } };
+    delete manifest.engines;
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    await writeFile(path.join(cwd, 'server.ts'), "import * as admin from 'firebase-admin';\nadmin.instanceId();\n");
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(outcome.manual.length).toBeGreaterThan(0);
+    expect(outcome.manifestNotes.join(' ')).toContain('--node-runtime 22');
+  });
+
+  it('blocks direct runner writes before changing source or package.json', async () => {
+    const cwd = await makeProject();
+
+    await expect(runMigration(firebaseAdminV14, { cwd, dryRun: false })).rejects.toThrow('Direct writes through runMigration are unavailable');
+    const source = await readFile(path.join(cwd, 'server.ts'), 'utf8');
+    const manifest = JSON.parse(await readFile(path.join(cwd, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>;
+    };
+
+    expect(source).toContain('admin.firestore()');
+    expect(manifest.dependencies['firebase-admin']).toBe('^13.0.0');
+  });
+
+  it('previews import additions without writing source', async () => {
+    const cwd = await makeProject();
+    await writeFile(
+      path.join(cwd, 'server.ts'),
+      "import * as admin from 'firebase-admin';\nimport { getFirestore as getDb } from 'firebase-admin/firestore';\nconst db = admin.firestore();\n",
+    );
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    const source = await readFile(path.join(cwd, 'server.ts'), 'utf8');
+
+    expect(source).toContain('const db = admin.firestore();');
+    expect(outcome.proposedDiff.join('\n')).toContain('const db = getFirestore();');
+  });
+
+  it('maps admin.app().firestore() to the modular service getter', async () => {
+    const cwd = await makeProject();
+    await writeFile(
+      path.join(cwd, 'server.ts'),
+      "import * as admin from 'firebase-admin';\nconst db = admin.app().firestore();\n",
+    );
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.manual).toHaveLength(0);
+    expect(outcome.proposedDiff.join('\n')).toContain('getFirestore()');
+    expect(outcome.proposedDiff.join('\n')).not.toContain('getApp().firestore()');
+  });
+
+  it('removes each namespace/default alias without leaving a bare firebase-admin import', async () => {
+    const cwd = await makeProject();
+    await writeFile(
+      path.join(cwd, 'server.ts'),
+      "import admin, * as ns from 'firebase-admin';\nadmin.firestore();\nns.auth();\n",
+    );
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    const diff = outcome.proposedDiff.join('\n');
+
+    expect(outcome.manual).toHaveLength(0);
+    expect(diff).not.toMatch(/^\+import ['\"]firebase-admin['\"];?$/m);
+    expect(diff).toContain('getFirestore()');
+    expect(diff).toContain('getAuth()');
+  });
+
+  it('reports inherited object property names as unsupported instead of crashing', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'server.ts'), "import * as admin from 'firebase-admin';\nadmin.toString();\nadmin.hasOwnProperty('x');\n");
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.manual).toHaveLength(2);
+    expect(outcome.changes).toHaveLength(0);
+  });
+
+  it('keeps a shebang and use strict before generated CommonJS requires', async () => {
+    const cwd = await makeProject();
+    await writeFile(
+      path.join(cwd, 'server.cjs'),
+      "#!/usr/bin/env node\n'use strict';\nfunction loadStore() { const admin = require('firebase-admin'); return admin.firestore(); }\n",
+    );
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    const diff = outcome.proposedDiff.join('\n');
+
+    expect(diff).toContain('#!/usr/bin/env node');
+    expect(diff.indexOf('#!/usr/bin/env node')).toBeLessThan(diff.indexOf("'use strict';"));
+    expect(diff.indexOf("'use strict';")).toBeLessThan(diff.indexOf("require('firebase-admin/firestore')"));
+  });
+
+  it('preserves license comments, shebangs, and CRLF line endings in source text', async () => {
+    const cwd = await makeProject();
+    const sourcePath = path.join(cwd, 'server.ts');
+    const original = "#!/usr/bin/env node\r\n'use strict';\r\n/** license header */\r\nimport * as admin from 'firebase-admin';\r\nadmin.firestore();\r\n";
+    await writeFile(sourcePath, original);
+
+    const project = loadProject(cwd);
+    const result = firebaseAdminV14.transform(project);
+    const transformed = result.fileUpdates?.find((update) => update.file === sourcePath)?.contents ?? '';
+
+    expect(transformed.startsWith("#!/usr/bin/env node\r\n'use strict';\r\n/** license header */")).toBe(true);
+    expect(transformed.replace(/\r\n/g, '')).not.toContain('\n');
+  });
+
+  it('reports unsupported root imports and local-name collisions before proposing a manifest update', async () => {
+    const cwd = await makeProject();
+    await writeFile(
+      path.join(cwd, 'server.ts'),
+      "import { app, apps } from 'firebase-admin';\nimport * as admin from 'firebase-admin';\nfunction getFirestore() { return null; }\nadmin.firestore();\n",
+    );
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.manual.length).toBeGreaterThan(0);
+    expect(outcome.manual.map((item) => item.reason).join('\n')).toMatch(/already declared|no longer exported/);
+    expect(outcome.filesChanged).not.toContain('package.json');
+  });
+
+  it('scans JavaScript in lib directories and reports it in the preview', async () => {
+    const cwd = await makeProject();
+    const lib = path.join(cwd, 'lib');
+    await mkdir(lib);
+    await writeFile(path.join(lib, 'server.js'), "const admin = require('firebase-admin');\nconst db = admin.firestore();\n");
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.filesChanged).toContain(path.join('lib', 'server.js'));
+    expect(outcome.proposedDiff.join('\n')).toContain('getFirestore()');
+  });
+
+  it('reports removed APIs for manual work instead of guessing', async () => {
+    const cwd = await makeProject();
+    await writeFile(
+      path.join(cwd, 'server.ts'),
+      "import * as admin from 'firebase-admin';\nadmin.instanceId().deleteInstanceId('id');\n",
+    );
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    const manifest = JSON.parse(await readFile(path.join(cwd, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>;
+    };
+
+    expect(outcome.manual).toHaveLength(1);
+    expect(outcome.manual[0].reason).toContain('Instance ID was removed in v14');
+    expect(outcome.changes).toHaveLength(0);
+    expect(outcome.manifestNotes.join('\n')).toContain('left unchanged because this migration has items requiring manual review');
+    expect(manifest.dependencies['firebase-admin']).toBe('^13.0.0');
+  });
+
+  it('preserves exported firebase-admin aliases and reports downstream compatibility work', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'server.ts'), 'export {};\n');
+    await writeFile(path.join(cwd, 'exported-admin.ts'), "export const admin = require('firebase-admin');\nadmin.firestore();\n");
+    const project = loadProject(cwd);
+
+    const result = firebaseAdminV14.transform(project);
+    const migrated = result.fileUpdates?.find((update) => update.file.endsWith('exported-admin.ts'))?.contents;
+
+    expect(result.manual.some((item) => item.reason.includes('namespace alias is exported'))).toBe(true);
+    expect(migrated).toBeUndefined();
+    expect(result.changes).toEqual([]);
+  });
+
+  it('keeps exact changed contents for paths that cannot safely round-trip through a text patch', async () => {
+    const cwd = await makeProject();
+    const file = path.join(cwd, 'legacy\tserver.ts');
+    const before = "import * as admin from 'firebase-admin';\nadmin.firestore();\n";
+    await writeFile(file, before);
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    const proposed = outcome.proposedFiles.find((change) => change.relativePath === 'legacy\tserver.ts');
+
+    expect(proposed?.before).toBe(before);
+    expect(proposed?.after).toContain('getFirestore()');
+    expect(proposed?.after).not.toContain('admin.firestore()');
+  });
+
+  it('flags destructured require and dynamic imports instead of treating them as analyzed', async () => {
+    const cwd = await makeProject();
+    await writeFile(
+      path.join(cwd, 'server.ts'),
+      "const { firestore } = require('firebase-admin');\nconst templated = require(`firebase-admin`);\nconst sdk = await import('firebase-admin');\nconst dynamicTemplate = await import(`firebase-admin`);\n",
+    );
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.manual.map((item) => item.reason).join('\n')).toContain('destructured require');
+    expect(outcome.manual.map((item) => item.reason).join('\n')).toContain('Dynamic import');
+    expect(outcome.manual).toHaveLength(4);
+  });
+
+  it('withholds manifest changes for unsupported lockfile types', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'npm-shrinkwrap.json'), '{"lockfileVersion": 3}\n');
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    const manifest = JSON.parse(await readFile(path.join(cwd, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>;
+    };
+
+    expect(outcome.filesChanged).not.toContain('package.json');
+    expect(outcome.manual.some((item) => item.reason.includes('lockfile'))).toBe(true);
+    expect(outcome.manifestNotes.join('\n')).not.toContain('→ `^14.0.0`');
+    expect(manifest.dependencies['firebase-admin']).toBe('^13.0.0');
+  });
+
+  it.skipIf(!lockfileNetworkTestEnabled)('regenerates a v3 npm package lock in a temporary directory for the preview', async () => {
+    const cwd = await makeProject();
+    const lockPath = path.join(cwd, 'package-lock.json');
+    const originalLock = JSON.stringify({
+      name: 'fixture',
+      version: '1.0.0',
+      lockfileVersion: 3,
+      requires: true,
+      packages: {
+        '': {
+          name: 'fixture',
+          version: '1.0.0',
+          dependencies: { 'firebase-admin': '^13.0.0' },
+        },
+      },
+    }, null, 2) + '\n';
+    await writeFile(lockPath, originalLock);
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    const reportDiff = outcome.proposedDiff.join('\n');
+
+    expect(outcome.manual).toHaveLength(0);
+    expect(outcome.filesChanged).toContain('package.json');
+    expect(outcome.filesChanged).toContain('package-lock.json');
+    expect(reportDiff).toContain('--- a/package-lock.json');
+    expect(reportDiff).toContain('"firebase-admin": "^14.0.0"');
+    expect(reportDiff).toMatch(/node_modules\/firebase-admin[\s\S]*?"version": "14\./);
+    expect(outcome.manifestNotes.join('\n')).toContain('preview requires registry access and install scripts were disabled');
+    expect(JSON.parse(await readFile(lockPath, 'utf8')).packages[''].dependencies['firebase-admin']).toBe('^13.0.0');
+  }, 180_000);
+
+  it('refuses npm lockfiles that require workspace-aware regeneration', async () => {
+    const cwd = await makeProject();
+    const manifestPath = path.join(cwd, 'package.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+    manifest.workspaces = ['packages/*'];
+    await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+    await writeFile(path.join(cwd, 'package-lock.json'), '{"lockfileVersion": 3}\n');
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.manual.some((item) => item.reason.includes('workspaces'))).toBe(true);
+    expect(outcome.filesChanged).not.toContain('package.json');
+    expect(outcome.filesChanged).not.toContain('package-lock.json');
+  });
+
+  it('refuses isolated lock regeneration when the project has an npmrc', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, '.npmrc'), 'registry=https://registry.example.invalid/\n');
+    await writeFile(path.join(cwd, 'package-lock.json'), '{"lockfileVersion": 3}\n');
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.manual.some((item) => item.reason.includes('.npmrc'))).toBe(true);
+    expect(outcome.filesChanged).not.toContain('package.json');
+    expect(outcome.filesChanged).not.toContain('package-lock.json');
+  });
+
+  it('refuses legacy npm lockfile versions instead of silently rewriting them', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'package-lock.json'), '{"lockfileVersion": 2}\n');
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.manual.some((item) => item.reason.includes('version 3'))).toBe(true);
+    expect(outcome.filesChanged).not.toContain('package.json');
+    expect(outcome.filesChanged).not.toContain('package-lock.json');
+  });
+
+  it('refuses nested npm lockfiles until workspace relationships are resolved', async () => {
+    const cwd = await makeProject();
+    const functions = path.join(cwd, 'functions');
+    await mkdir(functions);
+    await writeFile(
+      path.join(functions, 'package.json'),
+      JSON.stringify({ dependencies: { 'firebase-admin': '^13.0.0' }, engines: { node: '>=22' } }),
+    );
+    await writeFile(path.join(functions, 'package-lock.json'), '{"lockfileVersion": 3}\n');
+    await writeFile(path.join(functions, 'index.js'), "const admin = require('firebase-admin');\nadmin.firestore();\n");
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.manual.some((item) => item.reason.includes('Nested package manifests'))).toBe(true);
+    expect(outcome.filesChanged).not.toContain(path.join('functions', 'package.json'));
+    expect(outcome.filesChanged).not.toContain(path.join('functions', 'package-lock.json'));
+  });
+
+  it('updates every matching nested package manifest in the preview', async () => {
+    const cwd = await makeProject();
+    const functions = path.join(cwd, 'functions');
+    await mkdir(functions);
+    await writeFile(
+      path.join(functions, 'package.json'),
+      JSON.stringify({ dependencies: { 'firebase-admin': '^13.0.0' }, engines: { node: '>=22' } }, null, 2),
+    );
+    await writeFile(path.join(functions, 'index.js'), "const admin = require('firebase-admin');\nadmin.firestore();\n");
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.filesChanged).toContain(path.join('functions', 'package.json'));
+    expect(outcome.proposedDiff.join('\n')).toContain('--- a/functions/package.json');
+  });
+
+  it('does not bump a nested dependency when that package has no transformed source file', async () => {
+    const cwd = await makeProject();
+    const functions = path.join(cwd, 'functions');
+    await mkdir(functions);
+    const manifestPath = path.join(functions, 'package.json');
+    await writeFile(
+      manifestPath,
+      JSON.stringify({ dependencies: { 'firebase-admin': '^13.0.0' }, engines: { node: '>=22' } }, null, 2),
+    );
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.filesChanged).not.toContain(path.join('functions', 'package.json'));
+    expect(outcome.proposedDiff.join('\n')).not.toContain('functions/package.json');
+    expect(outcome.manifestNotes.join('\n')).toContain('no analyzed source file owned by this package');
+    expect(JSON.parse(await readFile(manifestPath, 'utf8')).dependencies['firebase-admin']).toBe('^13.0.0');
+  });
+
+  it('does not transform a nested project that declares firebase-admin v9', async () => {
+    const cwd = await makeProject();
+    const legacy = path.join(cwd, 'legacy');
+    await mkdir(legacy);
+    const manifestPath = path.join(legacy, 'package.json');
+    await writeFile(manifestPath, JSON.stringify({ dependencies: { 'firebase-admin': '^9.0.0' } }, null, 2));
+    const sourcePath = path.join(legacy, 'server.ts');
+    await writeFile(sourcePath, "import * as admin from 'firebase-admin';\nadmin.firestore();\n");
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.manual.some((item) => item.file === path.join('legacy', 'server.ts') && item.reason.includes('only analyzes major v13 ranges'))).toBe(true);
+    expect(outcome.filesChanged).not.toContain(path.join('legacy', 'server.ts'));
+    expect(outcome.proposedDiff.join('\n')).not.toContain('legacy/server.ts');
+    expect(await readFile(sourcePath, 'utf8')).toContain('admin.firestore()');
+    expect(JSON.parse(await readFile(manifestPath, 'utf8')).dependencies['firebase-admin']).toBe('^9.0.0');
+  });
+
+  it('does not transform SDK usage when no containing manifest declares firebase-admin', async () => {
+    const cwd = await makeProject();
+    const nested = path.join(cwd, 'unmanaged');
+    await mkdir(nested);
+    const sourcePath = path.join(nested, 'server.ts');
+    await writeFile(sourcePath, "import * as admin from 'firebase-admin';\nadmin.firestore();\n");
+    await rm(path.join(cwd, 'package.json'));
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.manual.some((item) => item.file === path.join('unmanaged', 'server.ts') && item.reason.includes('version is unknown'))).toBe(true);
+    expect(outcome.filesChanged).not.toContain(path.join('unmanaged', 'server.ts'));
+    expect(outcome.proposedDiff.join('\n')).not.toContain('unmanaged/server.ts');
+  });
+
+  it('preserves package.json BOM, CRLF, and formatting in the proposed manifest edit', async () => {
+    const cwd = await makeProject();
+    const manifestPath = path.join(cwd, 'package.json');
+    const original = `\uFEFF{\r\n\t"name": "fixture",\r\n\t"scripts": {"note": "\\\"dependencies\\\": {\\\"firebase-admin\\\": \\\"^13.0.0\\\"}"},\r\n\t"dependencies": {\r\n\t\t"firebase-admin": "^13.0.0"\r\n\t},\r\n\t"engines": {"node": ">=22.0.0"}\r\n}\r\n`;
+    await writeFile(manifestPath, original);
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(await readFile(manifestPath, 'utf8')).toBe(original);
+    expect(outcome.proposedDiff.join('\n')).toContain('"firebase-admin": "^14.0.0"');
+    expect(outcome.proposedDiff.join('\n').split('\n').some((line) => /^[+-].*scripts/.test(line))).toBe(false);
+    expect(outcome.proposedDiff.join('\n')).not.toContain('"name": "fixture"\n-');
+  });
+
+  it('reports invalid manifests and withholds all write plans', async () => {
+    const cwd = await makeProject();
+    const manifestPath = path.join(cwd, 'package.json');
+    const invalid = '{\n  "dependencies": { "firebase-admin": "^13.0.0"\n';
+    await writeFile(manifestPath, invalid);
+
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+
+    expect(outcome.manual.some((item) => item.reason.includes('invalid JSON'))).toBe(true);
+    expect(outcome.filesChanged).not.toContain('package.json');
+    expect(await readFile(manifestPath, 'utf8')).toBe(invalid);
+  });
+
+  it('does not update firebase-admin when the Node engine range is missing or too broad', () => {
+    for (const engine of [undefined, '>=18 <23']) {
+      const manifest = {
+        dependencies: { 'firebase-admin': '^13.0.0' },
+        ...(engine ? { engines: { node: engine } } : {}),
+      };
+
+      const notes = firebaseAdminV14.updateManifest!(manifest);
+
+      expect(manifest.dependencies['firebase-admin']).toBe('^13.0.0');
+      expect(notes.join('\n')).toContain('requires Node.js 22 or later');
+    }
+  });
+
+  it('does not downgrade a project that already uses a later major version', () => {
+    const manifest = { dependencies: { 'firebase-admin': '^15.1.0' } };
+
+    const notes = firebaseAdminV14.updateManifest!(manifest);
+
+    expect(manifest.dependencies['firebase-admin']).toBe('^15.1.0');
+    expect(notes.join('\n')).toContain('left unchanged to avoid downgrading');
+  });
+});

@@ -1,0 +1,51 @@
+{
+  "name": "upstreamfix",
+  "version": "0.1.2",
+  "description": "Preview supported migrations for breaking SDK changes.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ivanDev237/upstreamfix.git"
+  },
+  "homepage": "https://github.com/ivanDev237/upstreamfix#readme",
+  "bugs": {
+    "url": "https://github.com/ivanDev237/upstreamfix/issues"
+  },
+  "keywords": [
+    "migration",
+    "firebase-admin",
+    "codemod",
+    "sdk",
+    "typescript"
+  ],
+  "type": "module",
+  "bin": {
+    "upstreamfix": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "benchmark": "tsx scripts/benchmark.ts",
+    "new-migration": "tsx scripts/new-migration.ts",
+    "prepack": "npm run build"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^15.0.0",
+    "diff": "^9.0.0",
+    "ts-morph": "^28.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

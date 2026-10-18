@@ -1,0 +1,63 @@
+name: Public repository benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      migration:
+        description: Reviewed migration corpus to run
+        required: true
+        type: choice
+        default: stripe@23
+        options:
+          - firebase-admin@14
+          - stripe@22
+          - stripe@23
+      repository:
+        description: Optional exact repository name from the selected corpus; leave empty for all
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: ${{ inputs.migration }} public repositories
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install UpstreamFix without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Check Docker and available memory
+        run: |
+          docker info --format 'Docker server {{.ServerVersion}}'
+          free -m
+      - name: Run reviewed corpus in isolated containers
+        shell: bash
+        env:
+          BENCHMARK_MIGRATION: ${{ inputs.migration }}
+          BENCHMARK_REPOSITORY: ${{ inputs.repository }}
+          BENCHMARK_REPORT: ${{ runner.temp }}/upstreamfix-benchmark.md
+        run: |
+          args=(--migration "$BENCHMARK_MIGRATION" --memory-mb 4096 --report "$BENCHMARK_REPORT" --yes)
+          if [[ -n "$BENCHMARK_REPOSITORY" ]]; then
+            args+=(--only "$BENCHMARK_REPOSITORY")
+          fi
+          npm run benchmark -- "${args[@]}"
+      - name: Upload report, including partial results after failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-report-${{ github.run_id }}
+          path: ${{ runner.temp }}/upstreamfix-benchmark.md
+          if-no-files-found: warn
+          retention-days: 30

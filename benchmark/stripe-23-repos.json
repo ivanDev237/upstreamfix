@@ -1,0 +1,57 @@
+[
+  {
+    "name": "gtfsx",
+    "url": "https://github.com/GTFS-X/gtfsx",
+    "branch": "main",
+    "commit": "ee4275f6d41138c9ae604d68ce6e3462234a3b3a",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "No standalone typecheck: tsc -b is embedded in 'build' after node scripts that generate indexes; run 'npx tsc -b' manually (check tsconfig.*.json noEmit). 'test' = vitest run but vitest.config uses @cloudflare/vitest-pool-workers (Miniflare/workerd emulator + D1 migrations) - excluded per no-emulator rule. Already uses InstanceType<typeof Stripe.errors.X> (v22 style). deploy:prod uses wrangler - never run.",
+    "typecheckPath": ".",
+    "testPath": "."
+  },
+  {
+    "name": "kairos",
+    "url": "https://github.com/tuncheva/KAIROS",
+    "branch": "main",
+    "commit": "0c9f2e0ac29765bae8e772d53d666748464d7336",
+    "packageManager": "pnpm",
+    "reviewed": true,
+    "reviewNote": "Pure tsc typecheck. Default vitest config (jsdom, setup tests/setup.tsx) explicitly excludes tests/integration/** and *.live.test.ts; integration/eval/llm/stripe:* scripts load .env and hit real services - never run them. prepare installs git hooks (simple-git-hooks) on install; use --ignore-scripts. packageManager pnpm@10.28.2.",
+    "typecheckScript": "typecheck",
+    "typecheckScriptText": "tsc --noEmit",
+    "typecheckPath": ".",
+    "testScript": "test",
+    "testScriptText": "vitest run",
+    "testPath": "."
+  },
+  {
+    "name": "signet",
+    "url": "https://github.com/KenTaniguchi-R/signet",
+    "branch": "master",
+    "commit": "6aae309def8500dae9f60efc6e682a6fef9b169b",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Small repo (91 files). No typecheck script; run 'npx tsc --noEmit' manually. Tests use node:test with native TS stripping (needs recent Node); spend.test.ts tests simulateCard, but src/lib/stripe.ts does new Stripe(requireEnv('STRIPE_SECRET_KEY')) at import, so a dummy key is required; no .env.local in repo. Still uses Stripe.errors.StripeError as a type on ^22 (v22 stripe-error-type residue).",
+    "typecheckPath": ".",
+    "testScript": "test",
+    "testScriptText": "node --env-file-if-exists=.env.local --test \"src/**/*.test.ts\"",
+    "testPath": ".",
+    "env": {
+      "STRIPE_SECRET_KEY": "sk_test_fake"
+    }
+  },
+  {
+    "name": "kubeara-core",
+    "url": "https://github.com/kubeara/core",
+    "branch": "main",
+    "commit": "5d04f876ec0a375d781fec85d421038d9526360f",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "NestJS monorepo, 1235 files (under the 5k limit). No pure typecheck (build = nest build, emits); use 'npx tsc --noEmit -p tsconfig.build.json' manually. jest + ts-jest on *.spec.ts under apps/ and libs/; spec contents not inspected (TypeORM app - some may need DB). Many deploy/docker/hetzner e2e scripts - never run. console-app/ is a separate package.",
+    "typecheckPath": ".",
+    "testScript": "test",
+    "testScriptText": "jest",
+    "testPath": "."
+  }
+]

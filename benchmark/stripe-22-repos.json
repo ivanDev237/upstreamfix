@@ -1,0 +1,125 @@
+[
+  {
+    "name": "libera-donations",
+    "url": "https://github.com/Libera-Chat/donations",
+    "branch": "main",
+    "commit": "104ad74924d72a6c2cdd1e3529025a25187a20f3",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Small TS/ESM app, clean control case (already uses new Stripe; Stripe.errors.* only in instanceof value position). Pure tsc typecheck. Tests use node:test; src/services/stripe.test.ts only tests integeriseAmount, but importing stripe.js pulls config.ts (zod-validated env, STRIPE_SECRET_KEY required) so dummy env vars may be needed. No lifecycle scripts.",
+    "typecheckScript": "typecheck",
+    "typecheckScriptText": "tsc -b --noEmit",
+    "typecheckPath": ".",
+    "testScript": "test",
+    "testScriptText": "NODE_ENV=test tsx --test",
+    "testPath": ".",
+    "env": {
+      "STRIPE_SECRET_KEY": "sk_test_fake"
+    }
+  },
+  {
+    "name": "seventy-api",
+    "url": "https://github.com/Seventy-Hospitality/seventy",
+    "branch": "main",
+    "commit": "50cc99bb2c3bf3d87ea31a807c937e4618f8831d",
+    "packageManager": "npm",
+    "packageManagerPaths": {
+      "api": "npm"
+    },
+    "reviewed": true,
+    "reviewNote": "No pure typecheck script: build is 'tsc && tsc-alias --resolve-full-paths' (emits); use 'npx tsc --noEmit' manually, but Prisma client must be generated first ('prisma generate', downloads engines). Specs use fake keys and casted Stripe objects (stripe.gateway.spec.ts), no network seen; other specs (cron, webhooks, membership.service) not fully inspected. No root manifest; no lifecycle scripts.",
+    "typecheckPath": "api",
+    "testScript": "test",
+    "testScriptText": "vitest run",
+    "testPath": "api"
+  },
+  {
+    "name": "1940s-nyc-backend",
+    "url": "https://github.com/jboolean/1940s.nyc",
+    "branch": "master",
+    "commit": "62d0a729103c8b84184b4eb810008c98fc574825",
+    "packageManager": "npm",
+    "packageManagerPaths": {
+      "backend": "npm"
+    },
+    "reviewed": true,
+    "invalidReason": "Baseline npm installation fails at this pinned commit: eslint-config-jboolean@2.0.0 requires eslint 9.x, while the project resolves eslint 8.57.1. No Stripe migration was run.",
+    "reviewNote": "'types' script is plain 'tsc' but tsconfig has outDir .build and no noEmit, so it emits; use 'npx tsc --noEmit' instead. Typecheck may need generated code (tsoa routes, printful openapi-ts client) - risk. postinstall patch-package is local only; avoid root install (prepare runs submodule script). Jest suite contents not inspected - treat test as unverified. Serverless/AWS deploy scripts must not be run.",
+    "typecheckPath": "backend",
+    "testScript": "test",
+    "testScriptText": "jest",
+    "testPath": "backend"
+  },
+  {
+    "name": "aikinote-backend",
+    "url": "https://github.com/Tomoya-Sonok/aikinote",
+    "branch": "main",
+    "commit": "638e0c3c7c44fe0dcd192eef8e05de1a9222d25b",
+    "packageManager": "pnpm",
+    "packageManagerPaths": {
+      "backend": "pnpm"
+    },
+    "reviewed": true,
+    "reviewNote": "'build' is 'tsc' with outDir dist (emits), no noEmit script; run 'pnpm exec tsc --noEmit' manually. Use test:ci, not 'test' (plain vitest = watch mode). vitest config sets fake SUPABASE_URL=https://localhost:3000 and happy-dom; no external network seen, but individual tests not inspected. backend has its own pnpm-lock.yaml (root is a pnpm workspace); install inside backend only.",
+    "typecheckPath": "backend",
+    "testScript": "test:ci",
+    "testScriptText": "vitest run --silent",
+    "testPath": "backend"
+  },
+  {
+    "name": "humanlogs",
+    "url": "https://github.com/humanlogs/humanlogs.app",
+    "branch": "main",
+    "commit": "29c16cbd16482496023b0d83a1fafe6bcca40a03",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Pure tsc typecheck, but Prisma client types must be generated (npx prisma generate; downloads engines; 'migrate' script also runs db push - never run it). vitest runs tests/unit (pure) and tests/integration which binds a real Socket.io server on an ephemeral localhost port - local only, no external network. Stripe usage is via a Proxy wrapper around new Stripe.",
+    "typecheckScript": "typecheck",
+    "typecheckScriptText": "tsc --noEmit",
+    "typecheckPath": ".",
+    "testScript": "test",
+    "testScriptText": "vitest run",
+    "testPath": "."
+  },
+  {
+    "name": "flashcards-backend",
+    "url": "https://github.com/richardmachado/flashcards",
+    "branch": "main",
+    "commit": "eb73aff015612621a495813e0050f227495a991a",
+    "packageManager": "npm",
+    "packageManagerPaths": {
+      "backend": "npm"
+    },
+    "reviewed": true,
+    "reviewNote": "Tiny plain-JS CJS backend: no typecheck (JS, no tsconfig), test script is the npm placeholder that exits 1, so null. Only 'start: node server.js'. Useful as a minimal call-without-new constructor case; validate by diff only.",
+    "typecheckPath": "backend",
+    "testScriptText": "echo \"Error: no test specified\" && exit 1",
+    "testPath": "backend"
+  },
+  {
+    "name": "marketpanel-server",
+    "url": "https://github.com/sengervinicius/marketpanel",
+    "branch": "main",
+    "commit": "b8b0c8e7013deeab26cf5434ad71c618e31451d2",
+    "packageManager": "npm",
+    "packageManagerPaths": {
+      "server": "npm"
+    },
+    "reviewed": true,
+    "reviewNote": "server/package.json only has start/dev (node index.js / nodemon). Tests exist (server/__tests__/billing.verify-session.test.js, jobs/__tests__/subscriptionReconciler.test.js) but no test script in that manifest; runner not identified, so null. require('stripe')(...) inline call appears in billing.js, jobs/subscriptionReconciler.js and tests. Large server dir; no lifecycle scripts.",
+    "typecheckPath": "server",
+    "testPath": "server"
+  },
+  {
+    "name": "irishpubsign-server",
+    "url": "https://github.com/decokelly5446-lang/irishpubsign-server",
+    "branch": "main",
+    "commit": "d754d9455a5a7d454b9bcf9eb77aad206bb33d96",
+    "packageManager": "npm",
+    "reviewed": true,
+    "invalidReason": "Baseline npm ci fails at this pinned commit before migration; the committed package manifest and lockfile need repair. No Stripe migration was run.",
+    "reviewNote": "Very small Express server; only script is 'start: node index.js'. Two require('stripe')(key) call sites (routes/checkout.js, routes/webhooks.js). No typecheck/test; validate by diff/syntax only. Personal project, low activity.",
+    "typecheckPath": ".",
+    "testPath": "."
+  }
+]

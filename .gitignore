@@ -1,0 +1,12 @@
+node_modules/
+benchmark/.cache/
+dist/
+.env*
+!.env.example
+*.pem
+*service-account*.json
+*.log
+upstreamfix-report.md
+
+*.tgz
+TODO.md

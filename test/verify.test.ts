@@ -1,0 +1,360 @@
+import { execFile as execFileCallback, spawn } from 'node:child_process';
+import { mkdtemp, readFile, rm, stat, writeFile, mkdir, symlink } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
+import { afterEach, describe, expect, it } from 'vitest';
+import { applyProposedDiffs, applyProposedFiles, verifyProposedMigration, type VerificationOptions } from '../src/core/verify.js';
+
+const temporaryDirectories: string[] = [];
+const execFile = promisify(execFileCallback);
+
+async function makeProject(
+  scripts: Record<string, string> = { typecheck: 'tsc --noEmit', test: 'vitest run' },
+  packageManager?: string,
+): Promise<string> {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-verify-test-'));
+  temporaryDirectories.push(cwd);
+  await writeFile(path.join(cwd, 'package.json'), JSON.stringify({
+    name: 'fixture',
+    dependencies: { 'firebase-admin': '^14.0.0' },
+    scripts,
+    ...(packageManager ? { packageManager } : {}),
+  }));
+  await writeFile(path.join(cwd, 'server.js'), 'const original = true;\n');
+  await writeFile(path.join(cwd, '.env'), 'PRIVATE_VALUE=do-not-copy\n');
+  await writeFile(path.join(cwd, '.env.example'), 'PUBLIC_PLACEHOLDER=value\n');
+  await writeFile(path.join(cwd, '.gitignore'), 'ignored-secret.txt\n');
+  await writeFile(path.join(cwd, 'ignored-secret.txt'), 'ignored\n');
+  await writeFile(path.join(cwd, 'serviceAccountKey.json'), '{"private_key":"credential"}');
+  await writeFile(path.join(cwd, 'credentials.json'), '{"token":"credential"}');
+  await writeFile(path.join(cwd, 'credentials-prod.json'), '{"token":"credential"}');
+  await writeFile(path.join(cwd, 'firebase-adminsdk-demo.json'), '{"private_key":"credential"}');
+  await writeFile(path.join(cwd, 'privateKey.json'), '{"private_key":"credential"}');
+  await writeFile(path.join(cwd, 'deploy.pem'), 'private key');
+  await mkdir(path.join(cwd, '.aws'));
+  await writeFile(path.join(cwd, '.aws', 'credentials'), 'aws secrets');
+  await mkdir(path.join(cwd, 'secrets'));
+  await writeFile(path.join(cwd, 'secrets', 'database.json'), '{"password":"secret"}');
+  await symlink(os.tmpdir(), path.join(cwd, 'tmp-link'));
+  await execFile('git', ['init', '-q'], { cwd });
+  await execFile('git', ['add', '-f', '.env', '.env.example', '.gitignore', 'package.json', 'server.js', 'serviceAccountKey.json', 'credentials.json', 'credentials-prod.json', 'firebase-adminsdk-demo.json', 'privateKey.json', 'deploy.pem', '.aws/credentials', 'secrets/database.json', 'tmp-link'], { cwd });
+  return cwd;
+}
+
+const diff = [
+  '--- a/server.js',
+  '+++ b/server.js',
+  '@@ -1 +1 @@',
+  '-const original = true;',
+  '+const migrated = true;',
+].join('\n');
+
+afterEach(async () => {
+  delete process.env.UPSTREAMFIX_TEST_TOKEN;
+  await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+describe('migration verification', () => {
+  it('checks a patched temporary copy, strips secrets, and leaves the source untouched', async () => {
+    const cwd = await makeProject();
+    const fsmonitorMarker = path.join(cwd, 'fsmonitor-ran');
+    await execFile('git', ['config', 'core.fsmonitor', `!touch ${fsmonitorMarker}`], { cwd });
+    process.env.UPSTREAMFIX_TEST_TOKEN = 'must-not-leak';
+    const before = await readFile(path.join(cwd, 'server.js'), 'utf8');
+    let sawPatchedCopy = false;
+    let sawSecretFile = false;
+    let passedCleanEnv = false;
+    let separateNpmConfigs = false;
+    let copiedCredentials: string[] = [];
+
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args, commandCwd, env) => {
+        if (args[0] === 'install') {
+          expect(args).toContain('--ignore-scripts');
+          sawPatchedCopy = (await readFile(path.join(commandCwd, 'server.js'), 'utf8')).includes('const migrated = true;');
+          sawSecretFile = await readFile(path.join(commandCwd, '.env'), 'utf8').then(() => true, () => false);
+          copiedCredentials = await Promise.all(['serviceAccountKey.json', 'credentials.json', 'credentials-prod.json', 'firebase-adminsdk-demo.json', 'privateKey.json', 'deploy.pem', '.aws/credentials', 'secrets/database.json', 'ignored-secret.txt', 'tmp-link']
+            .map(async (file) => await readFile(path.join(commandCwd, file)).then(() => file, () => '')));
+          passedCleanEnv = env.UPSTREAMFIX_TEST_TOKEN === undefined && env.HOME !== os.homedir();
+          separateNpmConfigs = env.NPM_CONFIG_USERCONFIG !== env.NPM_CONFIG_GLOBALCONFIG;
+        }
+        return { stdout: 'ok' };
+      },
+    });
+
+    expect(result.status).toBe('passed');
+    expect(result.checks.map((check) => check.status)).toEqual(['passed', 'passed', 'passed']);
+    expect(sawPatchedCopy).toBe(true);
+    expect(sawSecretFile).toBe(false);
+    expect(passedCleanEnv).toBe(true);
+    expect(separateNpmConfigs).toBe(true);
+    expect(copiedCredentials.filter(Boolean)).toEqual([]);
+    await expect(readFile(fsmonitorMarker, 'utf8')).rejects.toThrow();
+    expect(await readFile(path.join(cwd, 'server.js'), 'utf8')).toBe(before);
+  });
+
+  it('refuses to verify a folder that is not a Git working tree', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-verify-not-git-'));
+    temporaryDirectories.push(cwd);
+    await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"firebase-admin":"^14.0.0"}}');
+    await expect(verifyProposedMigration(cwd, [diff])).resolves.toMatchObject({
+      status: 'failed', note: expect.stringContaining('requires a Git working tree'),
+    });
+  });
+
+  it('verifies projects using the migration package instead of assuming firebase-admin', async () => {
+    const cwd = await makeProject();
+    const manifestPath = path.join(cwd, 'package.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { dependencies: Record<string, string> };
+    delete manifest.dependencies['firebase-admin'];
+    manifest.dependencies.stripe = '^22.0.0';
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    let installRan = false;
+
+    const result = await verifyProposedMigration(cwd, [diff], {
+      packageName: 'stripe',
+      execute: async (_command, args) => {
+        if (args[0] === 'install') installRan = true;
+        return { stdout: 'ok' };
+      },
+    });
+
+    expect(result.status).toBe('passed');
+    expect(installRan).toBe(true);
+    expect(result.checks.some((check) => check.name.startsWith('Typecheck'))).toBe(true);
+  });
+
+  it('rejects packageManager URLs before invoking Corepack', async () => {
+    const cwd = await makeProject({}, 'yarn@https://attacker.invalid/yarn.tgz');
+    let commandRan = false;
+    const result = await verifyProposedMigration(cwd, [diff], {
+      packageName: 'firebase-admin',
+      execute: async () => {
+        commandRan = true;
+        return { stdout: 'unexpected' };
+      },
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.note).toContain('unsafe packageManager field');
+    expect(commandRan).toBe(false);
+  });
+
+  it('applies structured migration contents to filenames containing tabs', async () => {
+    const cwd = await makeProject();
+    const oddPath = path.join(cwd, 'src', 'x\ty.ts');
+    await mkdir(path.dirname(oddPath), { recursive: true });
+    await writeFile(oddPath, 'const original = true;\n');
+    await execFile('git', ['add', '--', 'src/x\ty.ts'], { cwd });
+    let sawExactTarget = false;
+
+    const result = await verifyProposedMigration(cwd, [diff], {
+      fileChanges: [{ relativePath: 'src/x\ty.ts', before: 'const original = true;\n', after: 'const migrated = true;\n' }],
+      execute: async (_command, args, commandCwd) => {
+        if (args[0] === 'install') {
+          sawExactTarget = await readFile(path.join(commandCwd, 'src', 'x\ty.ts'), 'utf8')
+            .then((contents) => contents === 'const migrated = true;\n');
+        }
+        return { stdout: 'ok' };
+      },
+    });
+
+    expect(result.status).toBe('passed');
+    expect(sawExactTarget).toBe(true);
+    expect(await readFile(oddPath, 'utf8')).toBe('const original = true;\n');
+  });
+
+  it('records typecheck and test failures separately', async () => {
+    const cwd = await makeProject();
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args) => {
+        if (args.includes('typecheck')) throw Object.assign(new Error('type errors'), { stdout: 'TS2322: invalid assignment' });
+        if (args.includes('test')) throw Object.assign(new Error('test failures'), { stdout: '1 failed, 4 passed' });
+        return { stdout: 'installed' };
+      },
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.checks.find((check) => check.name.startsWith('Typecheck'))?.output).toContain('TS2322');
+    expect(result.checks.find((check) => check.name.startsWith('Tests'))?.output).toContain('1 failed');
+  });
+
+  it('reports timeouts and continues to capture the test command result', async () => {
+    const cwd = await makeProject();
+    const result = await verifyProposedMigration(cwd, [diff], {
+      timeoutMs: 50,
+      execute: async (_command, args) => {
+        if (args.includes('typecheck')) throw Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' });
+        return { stdout: 'tests passed' };
+      },
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.checks.find((check) => check.name.startsWith('Typecheck'))?.output).toContain('Timed out');
+    expect(result.checks.find((check) => check.name.startsWith('Tests'))?.status).toBe('passed');
+  });
+
+  it('reports projects without typecheck or test commands as skipped', async () => {
+    const cwd = await makeProject({});
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async () => ({ stdout: 'installed' }),
+    });
+
+    expect(result.status).toBe('skipped');
+    expect(result.checks.filter((check) => check.status === 'skipped')).toHaveLength(2);
+  });
+
+  it('rejects patch paths that escape the copy on POSIX or Windows', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-patch-path-'));
+    temporaryDirectories.push(cwd);
+    const patch = (destination: string) => [
+      '--- a/safe.js', `+++ b/${destination}`, '@@ -1 +1 @@', '-before', '+after',
+    ].join('\n');
+    await expect(applyProposedDiffs(cwd, [patch('../../outside.js')])).rejects.toThrow('unsafe path');
+    await expect(applyProposedDiffs(cwd, [patch('..\\..\\outside.js')])).rejects.toThrow('unsafe path');
+    await expect(applyProposedDiffs(cwd, [patch('C:\\outside.js')])).rejects.toThrow('unsafe path');
+  });
+
+  it('rejects structured migration paths outside the temporary copy', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-structured-path-'));
+    temporaryDirectories.push(cwd);
+    await expect(applyProposedFiles(cwd, [{ relativePath: '../outside.js', before: '', after: 'changed' }]))
+      .rejects.toThrow('unsafe path');
+  });
+
+  it('runs real local npm scripts without network access', async () => {
+    const cwd = await makeProject({
+      typecheck: 'node -e "process.exit(0)"',
+      test: 'node -e "process.exit(0)"',
+    });
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args) => args[0] === 'install' ? { stdout: 'dependency install mocked for offline test' } : undefined,
+    });
+
+    expect(result.status).toBe('passed');
+    expect(result.checks.filter((check) => check.name.startsWith('Typecheck') || check.name.startsWith('Tests'))
+      .every((check) => check.status === 'passed')).toBe(true);
+  });
+
+  it('captures failure from a real local npm test script without network access', async () => {
+    const cwd = await makeProject({
+      typecheck: 'node -e "process.exit(0)"',
+      test: 'node -e "process.exit(7)"',
+    });
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args) => args[0] === 'install' ? { stdout: 'dependency install mocked for offline test' } : undefined,
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.checks.find((check) => check.name.startsWith('Tests'))?.status).toBe('failed');
+  });
+
+  it('uses pnpm to run scripts when the project declares pnpm', async () => {
+    const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"', test: 'node -e "process.exit(0)"' }, 'pnpm@10.0.0');
+    const commands: string[] = [];
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (command, args) => {
+        commands.push(`${command} ${args.join(' ')}`);
+        return { stdout: 'ok' };
+      },
+    });
+
+    expect(result.status).toBe('passed');
+    expect(commands).toContain('pnpm run typecheck');
+    expect(commands).toContain('pnpm run test');
+  });
+
+  it('uses Yarn to run scripts when the project declares Yarn', async () => {
+    const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"', test: 'node -e "process.exit(0)"' }, 'yarn@4.0.0');
+    const commands: string[] = [];
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (command, args) => {
+        commands.push(`${command} ${args.join(' ')}`);
+        return { stdout: 'ok' };
+      },
+    });
+
+    expect(result.status).toBe('passed');
+    expect(commands).toContain('yarn run typecheck');
+    expect(commands).toContain('yarn run test');
+  });
+
+  it('kills the timed out script process group, including its child process', async () => {
+    const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"' });
+    const marker = path.join(cwd, 'surviving-child.txt');
+    const childScript = `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "survived"), 4000)`;
+    const parentScript = `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(childScript)}], {stdio:"ignore"}); setTimeout(() => {}, 60000)`;
+    const manifest = JSON.parse(await readFile(path.join(cwd, 'package.json'), 'utf8')) as { scripts: Record<string, string> };
+    manifest.scripts.test = `node -e '${parentScript.replaceAll("'", "'\\''")}'`;
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify(manifest));
+
+    const result = await verifyProposedMigration(cwd, [diff], {
+      timeoutMs: 1500,
+      execute: async (_command, args) => args[0] === 'install' ? { stdout: 'offline install stub' } : undefined,
+    });
+
+    expect(result.status).toBe('failed');
+    expect(result.checks.find((check) => check.name.startsWith('Tests'))?.output).toContain('Timed out');
+    await new Promise((resolve) => setTimeout(resolve, 4500));
+    await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 10_000);
+
+  it('kills background descendants after a script exits successfully', async () => {
+    const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"' });
+    const marker = path.join(cwd, 'orphan-marker.txt');
+    const childScript = `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "survived"), 2500)`;
+    const parentScript = `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(childScript)}], {stdio:"ignore"}).unref()`;
+    const manifest = JSON.parse(await readFile(path.join(cwd, 'package.json'), 'utf8')) as { scripts: Record<string, string> };
+    manifest.scripts.test = `node -e '${parentScript.replaceAll("'", "'\\''")}'`;
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify(manifest));
+
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args) => args[0] === 'install' ? { stdout: 'offline install stub' } : undefined,
+    });
+    expect(result.status).toBe('passed');
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 10_000);
+
+  it('cleans temporary files and tracked process groups on SIGTERM', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-signal-test-'));
+    temporaryDirectories.push(root);
+    const temporary = path.join(root, 'sensitive-temp');
+    const marker = path.join(root, 'descendant-survived');
+    const ready = path.join(root, 'ready');
+    const cleanupModule = pathToFileURL(path.resolve('src/core/process-cleanup.ts')).href;
+    const script = `
+      import { trackProcessGroup, registerTemporaryCleanup } from ${JSON.stringify(cleanupModule)};
+      import { spawn } from 'node:child_process';
+      import { mkdir, writeFile, rm } from 'node:fs/promises';
+      await mkdir(${JSON.stringify(temporary)});
+      const child = spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'survived'), 2000)`)}], {detached:true,stdio:'ignore'});
+      trackProcessGroup(child.pid);
+      registerTemporaryCleanup(() => rm(${JSON.stringify(temporary)}, {recursive:true,force:true}));
+      await writeFile(${JSON.stringify(ready)}, String(child.pid));
+      setInterval(() => {}, 1000);
+    `;
+    const runner = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
+      cwd: process.cwd(), stdio: 'ignore',
+    });
+    try {
+      for (let attempt = 0; attempt < 100 && !(await readFile(ready, 'utf8').catch(() => '')); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const childPid = Number(await readFile(ready, 'utf8'));
+      expect(Number.isInteger(childPid)).toBe(true);
+      runner.kill('SIGTERM');
+      await new Promise<void>((resolve, reject) => {
+        runner.once('exit', (code) => code === 143 || code === null ? resolve() : reject(new Error(`cleanup subprocess exited with ${code}`)));
+      });
+      await expect(stat(temporary)).rejects.toMatchObject({ code: 'ENOENT' });
+      await new Promise((resolve) => setTimeout(resolve, 2200));
+      await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      if (runner.exitCode === null && !runner.killed) runner.kill('SIGKILL');
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
+});

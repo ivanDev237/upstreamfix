@@ -1,0 +1,168 @@
+#!/usr/bin/env node
+import { Command, CommanderError, InvalidArgumentError } from 'commander';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { renderMarkdownReport, renderTerminalReport } from './core/report.js';
+import { runMigration } from './core/runner.js';
+import { verifyProposedMigration } from './core/verify.js';
+import { writeMigrationOnBranch } from './core/write-branch.js';
+import { assertWritesEnabled } from './core/safety.js';
+import { findApplicableMigrations, migrations } from './migrations/index.js';
+
+function existingMigration(value: string): string {
+  if (!migrations.some((migration) => migration.id === value)) {
+    throw new InvalidArgumentError(`Unknown migration "${value}". Available: ${migrations.map((migration) => migration.id).join(', ')}`);
+  }
+  return value;
+}
+
+export function createProgram(): Command {
+  const program = new Command();
+  program
+    .name('upstreamfix')
+    .description('Prepare and review automated code migrations for breaking SDK changes.')
+    .showHelpAfterError()
+    .exitOverride();
+
+  program
+    .command('list')
+    .description('List the migrations included in this UpstreamFix release.')
+    .action(() => {
+      if (migrations.length === 0) {
+        console.log('No migrations are available in this release.');
+        return;
+      }
+      console.log('| Migration | Package | From → To | Released | Automated rules |');
+      console.log('|---|---|---:|---|---|');
+      for (const migration of migrations) {
+        console.log(`| ${migration.id} | ${migration.packageName} | ${migration.fromMajor} → ${migration.toMajor} | ${migration.releasedAt} | ${migration.rules.join(', ')} |`);
+      }
+    });
+
+  program
+    .command('migrate')
+    .description('Run a supported migration against a project.')
+    .argument('<migration>', 'migration identifier, for example firebase-admin@14', existingMigration)
+    .option('-C, --cwd <directory>', 'project directory to migrate', process.cwd())
+    .option('--write', 'apply verified changes in a new Git branch and create a commit')
+    .option('--allow-dirty', 'allow a dirty working tree; the migration branch is based on committed HEAD')
+    .option('--verify', 'verify proposed changes in a temporary project copy')
+    .option('--node-runtime <major>', 'confirm Firebase Admin v14 will run on Node.js 22+ and add engines.node when absent', parseNodeRuntime)
+    .option('--verify-timeout <seconds>', 'maximum time per verification command', parsePositiveInteger)
+    .option('--report <file>', 'write the Markdown report to this explicit path (relative paths use --cwd)')
+    .action(async (migrationId: string, options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 22 }) => {
+      const migration = migrations.find((candidate) => candidate.id === migrationId)!;
+      if (options.nodeRuntime && migration.id !== 'firebase-admin@14') throw new Error('--node-runtime 22 is supported only for firebase-admin@14.');
+      const cwd = path.resolve(options.cwd);
+      if (options.allowDirty && !options.write) throw new Error('--allow-dirty can only be used together with --write.');
+      let writeResult;
+      if (options.write) {
+        assertWritesEnabled(false);
+        writeResult = await writeMigrationOnBranch(migration, {
+          cwd,
+          allowDirty: options.allowDirty,
+          nodeRuntime: options.nodeRuntime,
+          timeoutMs: (options.verifyTimeout ?? 300) * 1000,
+        });
+      }
+      const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: options.nodeRuntime });
+      const verification = writeResult?.verification ?? (options.verify
+        ? await verifyProposedMigration(cwd, outcome.proposedDiff, { packageName: migration.packageName, fileChanges: outcome.proposedFiles, timeoutMs: (options.verifyTimeout ?? 300) * 1000 })
+        : undefined);
+      const report = renderMarkdownReport(migration, outcome, !options.write, verification);
+
+      console.log(renderTerminalReport(report));
+      if (options.report) {
+        const reportPath = path.resolve(cwd, options.report);
+        await mkdir(path.dirname(reportPath), { recursive: true });
+        await writeFile(reportPath, report, 'utf8');
+        console.log(`Report saved to ${path.relative(cwd, reportPath) || path.basename(reportPath)}`);
+      }
+
+      if (writeResult) console.log(`Committed on branch ${writeResult.branch}: ${writeResult.commit}`);
+
+      if (verification?.status === 'failed') process.exitCode = 1;
+
+      if (!options.write) console.log('Preview only. No project files were written.');
+    });
+
+  program
+    .command('scan')
+    .description('Run supported migrations that match dependencies declared in a project.')
+    .option('-C, --cwd <directory>', 'project directory to scan', process.cwd())
+    .option('--write', 'apply each verified migration in a new Git branch and create a commit')
+    .option('--allow-dirty', 'allow a dirty working tree; migration branches use committed HEAD')
+    .option('--verify', 'verify each proposed migration in a temporary project copy')
+    .option('--node-runtime <major>', 'confirm Firebase Admin v14 will run on Node.js 22+ and add engines.node when absent', parseNodeRuntime)
+    .option('--verify-timeout <seconds>', 'maximum time per verification command', parsePositiveInteger)
+    .option('--report <file>', 'write Markdown reports to this explicit path (relative paths use --cwd)')
+    .action(async (options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 22 }) => {
+      const cwd = path.resolve(options.cwd);
+      if (options.allowDirty && !options.write) throw new Error('--allow-dirty can only be used together with --write.');
+      const reports: string[] = [];
+      const commits: Array<{ branch: string; commit: string }> = [];
+      let verificationFailed = false;
+      const applicable = await findApplicableMigrations(cwd);
+      if (applicable.length === 0) {
+        console.log('No supported migration applies to the dependencies declared in this project.');
+        return;
+      }
+      for (const migration of applicable) {
+        let writeResult;
+        if (options.write) {
+          assertWritesEnabled(false);
+          writeResult = await writeMigrationOnBranch(migration, {
+            cwd,
+            allowDirty: options.allowDirty,
+            nodeRuntime: migration.id === 'firebase-admin@14' ? options.nodeRuntime : undefined,
+            timeoutMs: (options.verifyTimeout ?? 300) * 1000,
+          });
+          commits.push({ branch: writeResult.branch, commit: writeResult.commit });
+        }
+        const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: migration.id === 'firebase-admin@14' ? options.nodeRuntime : undefined });
+        const verification = writeResult?.verification ?? (options.verify
+          ? await verifyProposedMigration(cwd, outcome.proposedDiff, { packageName: migration.packageName, fileChanges: outcome.proposedFiles, timeoutMs: (options.verifyTimeout ?? 300) * 1000 })
+          : undefined);
+        if (verification?.status === 'failed') verificationFailed = true;
+        reports.push(renderMarkdownReport(migration, outcome, !options.write, verification));
+      }
+      const report = reports.join('\n---\n\n');
+      console.log(renderTerminalReport(report));
+      if (options.report) {
+        const reportPath = path.resolve(cwd, options.report);
+        await mkdir(path.dirname(reportPath), { recursive: true });
+        await writeFile(reportPath, report, 'utf8');
+        console.log(`Report saved to ${path.relative(cwd, reportPath) || path.basename(reportPath)}`);
+      }
+      for (const commit of commits) console.log(`Committed on branch ${commit.branch}: ${commit.commit}`);
+      if (verificationFailed) process.exitCode = 1;
+      if (!options.write) console.log('Preview only. No project files were written.');
+    });
+
+  return program;
+}
+
+function parsePositiveInteger(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error('Timeout must be a positive integer number of seconds.');
+  return parsed;
+}
+
+function parseNodeRuntime(value: string): 22 {
+  if (value !== '22') throw new InvalidArgumentError('Only --node-runtime 22 is supported for firebase-admin@14.');
+  return 22;
+}
+
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
+if (invokedPath === fileURLToPath(import.meta.url)) {
+  createProgram().parseAsync().catch((error: unknown) => {
+    if (error instanceof CommanderError && error.exitCode === 0) {
+      process.exitCode = 0;
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`upstreamfix: ${message}`);
+    process.exitCode = 1;
+  });
+}

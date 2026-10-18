@@ -1,0 +1,150 @@
+[
+  {
+    "name": "gravity-assist",
+    "url": "https://github.com/kennething/gravity-assist",
+    "commit": "fb1285e694a3fd5083f31df0dd9ae7b8c184e553",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Static review at pinned commit: root Nuxt TypeScript package has firebase-admin v13.0.1; postinstall nuxt prepare is disabled. vue-tsc may need generated .nuxt files. Network and Firestore touching Vitest suite deliberately excluded.",
+    "typecheckScript": "typecheck",
+    "typecheckScriptText": "vue-tsc --noEmit",
+    "typecheckPath": ".",
+    "branch": "main"
+  },
+  {
+    "name": "resell-backend",
+    "url": "https://github.com/cuappdev/resell-backend",
+    "commit": "7b813c1087dac1e8095fa10841cad356e04ae237",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Static review: root Express TypeScript package has firebase-admin v13.1.0. Jest requires PostgreSQL and is excluded; tsconfig-based typecheck is inferred.",
+    "branch": "main"
+  },
+  {
+    "name": "gaichu-tcg-database",
+    "url": "https://github.com/Gaichuuu/gaichu-tcg-database",
+    "commit": "58287b16bc8d53bc3d54e182751ef4f78ca171dc",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Static review: root package has firebase-admin v13.3.0; nested gaichu-api uses v12 and is outside this migration. Tests/build excluded because scripts include broader project behavior. Root tsconfig typecheck inferred.",
+    "branch": "main"
+  },
+  {
+    "name": "bagel-rescue",
+    "url": "https://github.com/GTBitsOfGood/bagel-rescue",
+    "commit": "ce1ec43f0ddcac80e6a8b25ef4899500d7cd7ea0",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Static review: root Next TypeScript package has firebase-admin v13.5.0. Secret-management scripts and application build are excluded; tsconfig-based typecheck is inferred.",
+    "branch": "main"
+  },
+  {
+    "name": "crowdcad",
+    "url": "https://github.com/crowdcad/crowdcad",
+    "commit": "96b47c9d74fc831613d4d9797195a6c8d62c013f",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Static review: root Next package has firebase-admin v13.10.0 and exact type-check command tsc --noEmit. Playwright/emulator behavior excluded; repository history is large.",
+    "typecheckScript": "type-check",
+    "typecheckScriptText": "tsc --noEmit",
+    "typecheckPath": ".",
+    "branch": "main"
+  },
+  {
+    "name": "fitpro",
+    "url": "https://github.com/Qasim-016/Fitpro",
+    "commit": "700ae450af7413f66da06088911f4a3bd7247629",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Static review: root and backend packages both declare firebase-admin v13; backend Jest script only exits with a placeholder failure and root Jest is watch mode, so tests excluded. Root and backend dependency installs are separate.",
+    "invalidReason": "Pinned commit has an inconsistent package-lock.json: npm ci rejects node-cron@3.0.3 in the lockfile because package.json requires node-cron@4.6.0. Excluded from migration-rate measurements as an invalid baseline.",
+    "branch": "master"
+  },
+  {
+    "name": "getspot",
+    "url": "https://github.com/amitrke/getspot",
+    "commit": "07b010a62cc427d43f19b8d17f00bc3bd8499adb",
+    "packageManager": "pnpm",
+    "reviewed": true,
+    "reviewNote": "Static review: Firebase Functions package is nested under functions/ and uses firebase-admin v13.10.0 with pnpm lockfile. Pure tsc build selected; emulator tests excluded.",
+    "typecheckScript": "build",
+    "typecheckScriptText": "tsc",
+    "typecheckPath": "functions",
+    "branch": "main"
+  },
+  {
+    "name": "riverchat",
+    "url": "https://github.com/hanzpo/riverchat",
+    "commit": "87f5d6b0ece9453d8f7e26d0771d4c830fe4c1a4",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Static review: functions/ package has firebase-admin v13.0.0. Selected build is pure tsc and test script is Vitest run without emulator startup; both execute in network-disabled Docker.",
+    "typecheckScript": "build",
+    "typecheckScriptText": "tsc",
+    "typecheckPath": "functions",
+    "testScript": "test",
+    "testScriptText": "vitest run",
+    "testPath": "functions",
+    "branch": "main"
+  },
+  {
+    "name": "wesplit",
+    "url": "https://github.com/dryaz/wesplit",
+    "commit": "8a5aa6ebc089752e035d1278e1d6aeb92831b60f",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Static review: functions/ package declares firebase-admin v13.2.0. Jest requires Firestore emulation and is excluded; pure JavaScript receives syntax-only migration checks.",
+    "branch": "main"
+  },
+  {
+    "name": "mapache",
+    "url": "https://github.com/rawkintrevo/mapache",
+    "commit": "e5d5253b36ab0f274324c324d9ce2c12760628dd",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Static review: functions and session-runner packages both declare firebase-admin v13.6.0. Dependency-injection usages need manual review; test/pretest execute application code and are excluded.",
+    "branch": "main"
+  },
+  {
+    "name": "neat",
+    "url": "https://github.com/firecmsco/neat",
+    "commit": "8633f351b1774197b7cc3409ca8d69ff21dc6818",
+    "packageManager": "pnpm",
+    "reviewed": true,
+    "reviewNote": "Static review: root pnpm workspace with nested functions package using firebase-admin v13.10.0. Functions build command is pure tsc; deploy and integration actions excluded.",
+    "typecheckScript": "build",
+    "typecheckScriptText": "tsc",
+    "typecheckPath": "functions",
+    "branch": "main",
+    "packageManagerPaths": {
+      "functions": "npm"
+    }
+  },
+  {
+    "name": "deliberate-lab",
+    "url": "https://github.com/PAIR-code/deliberate-lab",
+    "commit": "7e798c7523ce34e30e2eab2345416b825ae28067",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Static review: npm workspace functions package has firebase-admin v13.7.0. Selected functions typecheck and test:unit only; full test invokes Firestore/function emulators. Workspace install uses root lockfile.",
+    "typecheckScript": "typecheck",
+    "typecheckScriptText": "tsc --noEmit",
+    "typecheckPath": "functions",
+    "testScript": "test:unit",
+    "testScriptText": "npx jest --testPathIgnorePatterns=$npm_package_config_firestore_tests",
+    "testPath": "functions",
+    "branch": "main"
+  },
+  {
+    "name": "two-ais",
+    "url": "https://github.com/hughCulling/two-ais",
+    "commit": "c182f4d197720c9447bd9239962fdd7015bf6716",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Static review: root and functions packages both declare firebase-admin v13.2.0. Functions build is pure tsc and is selected; root Next build and tests are excluded.",
+    "typecheckScript": "build",
+    "typecheckScriptText": "tsc",
+    "typecheckPath": "functions",
+    "branch": "main"
+  }
+]
