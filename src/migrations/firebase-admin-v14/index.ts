@@ -245,9 +245,6 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
   }
 
   const textEdits: TextEdit[] = edits.map((edit) => ({ start: edit.start, end: edit.end, text: edit.text }));
-  for (const edit of edits) {
-    result.changes.push({ file, line: edit.line, rule: edit.rule, before: edit.before, after: edit.text } satisfies Change);
-  }
 
   const importMap = mergeImports(edits.flatMap((edit) => edit.imports));
   const kind: AliasKind = aliases.some((alias) => alias.kind === 'esm') ? 'esm' : 'cjs';
@@ -258,6 +255,22 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
   }
   textEdits.push(...aliasDeclarationRemovals(sourceFile, aliases, aliasesWithManualUses));
   const transformed = applyTextEdits(sourceFile.getFullText(), textEdits);
+  for (const alias of aliases) {
+    const name = alias.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (!aliasesWithManualUses.has(alias.name) && new RegExp(`\\b${name}\\s*(?:\\.|\\[)`).test(transformed)) {
+      result.manual.push({
+        file,
+        line: alias.nameNode.getStartLineNumber(),
+        reason: `The ${alias.name} namespace still has references after migration; its import cannot be removed safely. Review this file manually.`,
+        snippet: snippetOf(alias.nameNode),
+      });
+      sortManual(result.manual, manualBefore);
+      return false;
+    }
+  }
+  for (const edit of edits) {
+    result.changes.push({ file, line: edit.line, rule: edit.rule, before: edit.before, after: edit.text } satisfies Change);
+  }
   if (transformed !== sourceFile.getFullText()) result.fileUpdates?.push({ file, contents: transformed });
 
   if (result.manual.length > manualBefore) sortManual(result.manual, manualBefore);
