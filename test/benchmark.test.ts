@@ -19,6 +19,21 @@ describe('public repository benchmark helpers', () => {
     expect(report).toContain('| sample | `aaaaaaaaaaaa` | completed | 3 | 2 | 1 | pass | fail: TS error | fail: existing test | pass |  |');
   });
 
+  it('escapes hostile test output before writing a public Markdown table', () => {
+    const report = renderBenchmarkReport([{
+      name: 'sample', commit: 'a'.repeat(40), status: 'failed', usages: 0, migrated: 0, manual: 0,
+      typecheck: { before: 'pass', after: 'fail: </td>\n| forged | row | \u001b[31m' },
+      tests: { before: 'pass', after: 'fail: `code` [link](javascript:alert(1))' },
+      details: '<script>alert(1)</script>',
+    }]);
+    expect(report).not.toContain('</td>');
+    expect(report).not.toContain('<script>');
+    expect(report).not.toContain('\u001b');
+    expect(report).not.toContain('\n| forged | row |');
+    expect(report).toContain('&lt;script&gt;');
+    expect(report).toContain('&#124; forged &#124; row &#124;');
+  });
+
   it('rejects repositories that have not been reviewed', () => {
     expect(() => validateRepoEntry({
       name: 'sample', url: 'https://github.com/example/sample', branch: 'main', commit: 'a'.repeat(40),

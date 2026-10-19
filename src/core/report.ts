@@ -112,6 +112,16 @@ export function maskSecrets(value: string): string {
     .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, '[API key redacted]');
 }
 
+/** Escape third-party command output before placing it in a public Markdown table. */
+export function escapeUntrustedMarkdownCell(value: string): string {
+  return maskSecrets(value)
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/`/g, '&#96;').replace(/\[/g, '&#91;').replace(/\]/g, '&#93;')
+    .replaceAll('|', '&#124;').replace(/[\r\n\u2028\u2029]+/g, ' ').trim();
+}
+
 /** Keep the Markdown artifact intact while making prose readable in a terminal. */
 export function renderTerminalReport(markdown: string): string {
   let inFence = false;

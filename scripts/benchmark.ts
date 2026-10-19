@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { Project } from 'ts-morph';
 import type { Migration, PackageManifest } from '../src/core/types.js';
-import { maskSecrets } from '../src/core/report.js';
+import { escapeUntrustedMarkdownCell as cell, maskSecrets } from '../src/core/report.js';
 import { newTypeScriptDiagnostics, parseTypeScriptDiagnostics } from '../src/core/diagnostic-diff.js';
 import { runMigration } from '../src/core/runner.js';
 import { applyProposedFiles } from '../src/core/verify.js';
@@ -597,12 +597,6 @@ export function renderBenchmarkReport(
     '', `Project checks run only inside Docker image \`${nodeImage}\` with networking disabled. Dependency installation runs in Docker with no host credentials; lifecycle scripts are disabled.`, '',
   ];
   return lines.join('\n');
-}
-
-function cell(value: string): string {
-  return maskSecrets(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/`/g, '&#96;').replace(/\[/g, '&#91;').replace(/\]/g, '&#93;')
-    .replaceAll('|', '&#124;').replace(/[\r\n]+/g, ' ').trim();
 }
 
 async function main(): Promise<void> {
