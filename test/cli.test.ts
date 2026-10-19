@@ -1,5 +1,5 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { execFile as execFileCallback } from 'node:child_process';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFile as execFileCallback, spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -102,6 +102,22 @@ describe('UpstreamFix CLI', () => {
       cwd: projectRoot,
       timeout: 10_000,
     });
+  });
+
+  it('runs the compiled CLI through a bin symlink and prints its version', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-bin-link-'));
+    temporaryDirectories.push(cwd);
+    const bin = path.join(cwd, 'upstreamfix');
+    await symlink(path.join(projectRoot, 'dist', 'cli.js'), bin);
+    const help = spawnSync(process.execPath, [bin, '--help'], { cwd, encoding: 'utf8', timeout: 10_000 });
+    if (help.error && 'code' in help.error && help.error.code === 'EPERM') return;
+    expect(help.error).toBeUndefined();
+    expect(help.status).toBe(0);
+    expect(help.stdout).toContain('Usage: upstreamfix');
+    const version = spawnSync(process.execPath, [bin, '--version'], { cwd, encoding: 'utf8', timeout: 10_000 });
+    expect(version.error).toBeUndefined();
+    expect(version.status).toBe(0);
+    expect(version.stdout.trim()).toBe('0.1.2');
   });
 
   it('scans only migrations matching dependencies in the project', async () => {

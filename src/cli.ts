@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command, CommanderError, InvalidArgumentError } from 'commander';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { renderMarkdownReport, renderTerminalReport } from './core/report.js';
@@ -23,8 +24,10 @@ function existingMigration(value: string): string {
 
 export function createProgram(): Command {
   const program = new Command();
+  const packageVersion = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version;
   program
     .name('upstreamfix')
+    .version(packageVersion)
     .description('Prepare and review automated code migrations for breaking SDK changes.')
     .showHelpAfterError()
     .exitOverride();
@@ -211,8 +214,9 @@ function parseNodeRuntime(value: string): 22 {
   return 22;
 }
 
-const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
-if (invokedPath === fileURLToPath(import.meta.url)) {
+let invokedPath = '';
+try { invokedPath = process.argv[1] ? realpathSync(process.argv[1]) : ''; } catch { /* An unresolved argv path is not this CLI. */ }
+if (invokedPath === realpathSync(fileURLToPath(import.meta.url))) {
   createProgram().parseAsync().catch((error: unknown) => {
     if (error instanceof CommanderError && error.exitCode === 0) {
       process.exitCode = 0;
