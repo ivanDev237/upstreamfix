@@ -42,6 +42,13 @@ describe('firebase-admin v14 migration', () => {
     expect(outcome.manual.some((item) => item.reason.includes('arguments'))).toBe(true);
     expect(outcome.proposedFiles.some((file) => file.relativePath === 'server.ts')).toBe(false);
   });
+  it('flags services called on a stored admin.app() result', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'server.ts'), "import * as admin from 'firebase-admin';\nconst app = admin.app();\nconst bucket = app.storage().bucket('x');\n");
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(outcome.manual.some((item) => item.reason.includes('app.storage'))).toBe(true);
+    expect(outcome.proposedFiles.some((file) => file.relativePath === 'server.ts')).toBe(false);
+  });
   it('never leaves a dangling Firebase namespace type reference after removing its import', async () => {
     const cwd = await makeProject();
     await writeFile(path.join(cwd, 'server.ts'), "import * as admin from 'firebase-admin';\nadmin.initializeApp();\n/** @type {admin.auth.DecodedIdToken} */\nlet token;\n");

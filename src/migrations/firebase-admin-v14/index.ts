@@ -159,6 +159,29 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
   const aliases = findAliases(sourceFile);
   if (aliases.length === 0) return false;
 
+  const aliasNames = new Set(aliases.map((alias) => alias.name));
+  for (const declaration of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    const initializer = declaration.getInitializer();
+    const nameNode = declaration.getNameNode();
+    if (!Node.isCallExpression(initializer) || !Node.isIdentifier(nameNode)) continue;
+    const factory = initializer.getExpression();
+    if (!Node.isPropertyAccessExpression(factory) || factory.getName() !== 'app') continue;
+    const root = factory.getExpression();
+    if (!Node.isIdentifier(root) || !aliasNames.has(root.getText())) continue;
+    for (const reference of nameNode.findReferencesAsNodes()) {
+      if (reference === nameNode || reference.getSourceFile() !== sourceFile) continue;
+      const access = reference.getParent();
+      if (!Node.isPropertyAccessExpression(access) || access.getExpression() !== reference) continue;
+      const service = access.getName();
+      if (!Object.hasOwn(SERVICES, service) && !Object.hasOwn(REMOVED_SERVICES, service)) continue;
+      result.manual.push({ file, line: access.getStartLineNumber(), reason: `Stored admin.app() result calls app.${service}; choose the modular service getter manually.`, snippet: snippetOf(access) });
+    }
+  }
+  if (result.manual.length > manualBefore) {
+    sortManual(result.manual, manualBefore);
+    return false;
+  }
+
   const edits: Edit[] = [];
   const aliasesWithManualUses = new Set<string>();
 
