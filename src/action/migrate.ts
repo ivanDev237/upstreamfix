@@ -13,6 +13,17 @@ import { executeClientCommand } from './docker-execute.js';
 
 const execFile = promisify(execFileCallback);
 
+export async function boundProposalReport(output: string, migrationId: string, report: string): Promise<string> {
+  if (report.length <= 90_000) return report;
+  const name = `report-${migrationId.replace(/[^A-Za-z0-9._-]+/g, '-')}.md`;
+  await writeFile(path.join(output, name), report, { mode: 0o600 });
+  let prefix = report.slice(0, 88_000);
+  if (/[\uD800-\uDBFF]$/.test(prefix)) prefix = prefix.slice(0, -1);
+  const lastLine = prefix.lastIndexOf('\n');
+  if (lastLine > 80_000) prefix = prefix.slice(0, lastLine);
+  return `${prefix}\n\nReport truncated. The full report is in the ${name} file of the upstreamfix-proposals artifact.`;
+}
+
 export async function prepareProposals(projectRoot: string, outputRoot: string, base: string, eventName: string): Promise<Proposal[]> {
   if (!/^[0-9a-f]{40}$/.test(base)) throw new Error('The source commit must be an exact Git SHA.');
   const project = path.resolve(projectRoot);
@@ -77,6 +88,7 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
       });
     }
   }
+  for (const proposal of proposals) proposal.report = await boundProposalReport(output, proposal.migration, proposal.report);
   await writeFile(path.join(output, 'proposals.json'), `${JSON.stringify(proposals, null, 2)}\n`, { mode: 0o600 });
   return proposals;
 }

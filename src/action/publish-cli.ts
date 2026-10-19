@@ -175,7 +175,10 @@ for (const proposal of proposals) {
           try { await request(`/pulls/${opened.number}/requested_reviewers`, 'POST', { reviewers: item.reviewers }); }
           catch (error) { console.warn(`PR ${opened.number} was created, but reviewer assignment failed: ${String(error)}`); }
         }
-        if (item.labels.length) await request(`/issues/${opened.number}/labels`, 'POST', { labels: item.labels });
+        if (item.labels.length) {
+          try { await request(`/issues/${opened.number}/labels`, 'POST', { labels: item.labels }); }
+          catch (error) { console.warn(`PR ${opened.number} was created, but label assignment failed: ${sanitizeTerminalText(String(error))}`); }
+        }
         await dispatchClientChecks(item.branch);
       },
       updatePullRequest: async (number, body, item) => {

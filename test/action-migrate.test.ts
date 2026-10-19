@@ -4,11 +4,22 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, expect, it } from 'vitest';
-import { prepareProposals } from '../src/action/migrate.js';
+import { prepareProposals, boundProposalReport } from '../src/action/migrate.js';
 
 const execFile = promisify(execFileCallback);
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+
+it('bounds a 120k report without splitting a Unicode character and keeps the full artifact', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-long-report-'));
+  roots.push(root);
+  const original = `${'x'.repeat(87_999)}😀${'y'.repeat(32_000)}`;
+  const short = await boundProposalReport(root, 'openai@5', original);
+  expect(short.length).toBeLessThanOrEqual(90_000);
+  expect(short).toContain('artifact');
+  expect(short).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+  expect(await readFile(path.join(root, 'report-openai-5.md'), 'utf8')).toBe(original);
+});
 
 it('records migrations that no longer apply without writing inside the client checkout', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-action-migrate-'));
