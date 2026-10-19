@@ -78,7 +78,8 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
       proposals.push({
         ...common, status: 'ready', commit: result.commit, files: result.outcome.filesChanged,
         verification: result.verification.status,
-        report: renderMarkdownReport(migration, result.outcome, false, result.verification),
+        report: renderMarkdownReport(migration, result.outcome, false, result.verification,
+          process.env.UPSTREAMFIX_CONTAINER_VERIFY === '1' ? 'network-isolated-container' : 'restricted-host'),
       });
     } catch (error) {
       const reason = escapeUntrustedMarkdownCell(error instanceof Error ? error.message : String(error)).replace(/@/g, '&#64;');
