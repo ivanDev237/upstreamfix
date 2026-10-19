@@ -105,6 +105,26 @@ function make(obj: ClientOptions | OpenAI) {
     expect(outcome.fileUpdates?.[0]?.contents).toContain('client.chat.completions.parse(');
   });
 
+  it('T33 rewrites an OpenAI constructor property in a NestJS-style service', () => {
+    const outcome = migrate("import OpenAI from 'openai';\nclass Service { constructor(private readonly openai: OpenAI) {} run() { return this.openai.files.del('f'); } }\n");
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("this.openai.files.delete('f')");
+  });
+
+  it('T33 rewrites a declared class field and a nullable OpenAI value', () => {
+    const outcome = migrate("import OpenAI from 'openai';\nclass Service { client!: OpenAI; run() { return this.client.files.del('f'); } }\nlet maybe: OpenAI | undefined;\nmaybe?.files.del('g');\n");
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("this.client.files.delete('f')");
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("maybe?.files.delete('g')");
+  });
+
+  it('T33 reports destructured typed clients and bound runner methods instead of silently upgrading', () => {
+    const outcome = migrate("import OpenAI from 'openai';\nfunction run({ files }: OpenAI) { files.del('f'); }\nconst client = new OpenAI();\nconst runner = client.chat.completions.runTools({tools: []});\nrunner.finalFunctionCall.bind(runner);\nconst { finalFunctionCall } = runner;\n");
+    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual.map((item) => item.reason).join(' ')).toMatch(/valeur OpenAI non suivie/);
+    expect(outcome.manual.map((item) => item.reason).join(' ')).toContain('finalFunctionToolCall');
+  });
+
   it('withholds the removed fileFromPath export instead of moving it to an invalid module', () => {
     const outcome = migrate("import { fileFromPath } from 'openai/uploads';\nfileFromPath('/tmp/x');\n");
     expect(outcome.fileUpdates).toEqual([]);

@@ -95,10 +95,40 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       'OpenAI v5 removed fileFromPath; choose a supported upload helper manually. No edits were applied to this file.');
   }
   const clients = new Set<MorphSymbol>();
+  const complexClients = new Set<MorphSymbol>();
+  const classFields = new Map<Node, Set<string>>();
+  const isClientType = (type: Node | undefined): boolean => {
+    if (!type) return false;
+    const parts = type.getText().replace(/\s/g, '').split('|');
+    return parts.some((part) => imported.has(part))
+      && parts.every((part) => imported.has(part) || part === 'undefined' || part === 'null');
+  };
+  const rememberField = (node: Node, name: string): void => {
+    const owner = node.getFirstAncestor((ancestor) => Node.isClassDeclaration(ancestor) || Node.isClassExpression(ancestor));
+    if (!owner) return;
+    const fields = classFields.get(owner) ?? new Set<string>();
+    fields.add(name);
+    classFields.set(owner, fields);
+  };
   for (const parameter of file.getDescendantsOfKind(SyntaxKind.Parameter)) {
-    if (imported.has(parameter.getTypeNode()?.getText() ?? '')) {
+    const type = parameter.getTypeNode();
+    if (isClientType(type)) {
+      if (Node.isIdentifier(parameter.getNameNode())) {
+        const symbol = parameter.getNameNode().getSymbol();
+        if (symbol) clients.add(symbol);
+        if (parameter.getFirstAncestorByKind(SyntaxKind.Constructor) && parameter.getModifiers().length > 0)
+          rememberField(parameter, parameter.getName());
+      } else addManual(result, file, parameter, 'valeur OpenAI non suivie : déstructuration d’un paramètre client à revoir manuellement.');
+    } else if (type && [...imported].some((name) => new RegExp(`\\b${name}\\b`).test(type.getText()))) {
       const symbol = parameter.getNameNode().getSymbol();
-      if (symbol) clients.add(symbol);
+      if (symbol) complexClients.add(symbol);
+    }
+  }
+  for (const property of file.getDescendantsOfKind(SyntaxKind.PropertyDeclaration)) {
+    const type = property.getTypeNode();
+    if (isClientType(type)) rememberField(property, property.getName());
+    else if (type && [...imported].some((name) => new RegExp(`\\b${name}\\b`).test(type.getText()))) {
+      // Keep the field untracked; only an affected use below needs review.
     }
   }
   for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
@@ -110,11 +140,21 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     // A client may be assigned in branches after its declaration. Its explicit
     // imported OpenAI type still identifies the receiver without guessing from
     // an arbitrary property name.
-    if (Node.isIdentifier(variable.getNameNode()) && imported.has(variable.getTypeNode()?.getText() ?? '')) {
+    if (Node.isIdentifier(variable.getNameNode()) && isClientType(variable.getTypeNode())) {
       const symbol = variable.getNameNode().getSymbol();
       if (symbol) clients.add(symbol);
     }
   }
+  const clientParts = (node: Node): string[] | undefined => {
+    if (Node.isIdentifier(node)) return node.getSymbol() && clients.has(node.getSymbol()!) ? [] : undefined;
+    if (!Node.isPropertyAccessExpression(node)) return undefined;
+    if (node.getExpression().getKind() === SyntaxKind.ThisKeyword) {
+      const owner = node.getFirstAncestor((ancestor) => Node.isClassDeclaration(ancestor) || Node.isClassExpression(ancestor));
+      return owner && classFields.get(owner)?.has(node.getName()) ? [] : undefined;
+    }
+    const parent = clientParts(node.getExpression());
+    return parent ? [...parent, node.getName()] : undefined;
+  };
   const runners = new Set<MorphSymbol>();
   for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const initializer = variable.getInitializer();
@@ -122,7 +162,7 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     const runExpression = initializer.getExpression();
     if (!Node.isPropertyAccessExpression(runExpression)) continue;
     const root = rootIdentifier(runExpression);
-    if (runExpression.getName() === 'runTools' && root?.getSymbol() && clients.has(root.getSymbol()!)) {
+    if (runExpression.getName() === 'runTools' && clientParts(runExpression)) {
       const symbol = variable.getNameNode().getSymbol();
       if (symbol) runners.add(symbol);
     }
@@ -183,10 +223,15 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     } else if (onRunner && expression.getName().startsWith('finalFunctionCall')) {
       addManual(result, file, call, `OpenAI v5 renames ${expression.getName()} to ${expression.getName().replace('FunctionCall', 'FunctionToolCall')}; review the returned value manually.`);
     }
-    const parts = pathParts(expression);
-    const root = rootIdentifier(expression);
-    if (parts.length < 3 || !root?.getSymbol() || !clients.has(root.getSymbol()!)) continue;
-    const method = parts.slice(1).join('.');
+    const parts = clientParts(expression);
+    if (!parts || parts.length < 2) {
+      const root = rootIdentifier(expression);
+      if (root?.getSymbol() && complexClients.has(root.getSymbol()!)
+        && (expression.getName() === 'del' || expression.getText().includes('.beta.chat.')))
+        addManual(result, file, call, 'valeur OpenAI non suivie : vérifier la variante de ce client avant la migration.');
+      continue;
+    }
+    const method = parts.join('.');
     if (method.endsWith('.runFunctions')) {
       addManual(result, file, call, 'OpenAI v5 removes runFunctions; migrate function definitions and handling to runTools manually.');
     } else if (method === 'beta.threads.runs.poll' || method === 'beta.threads.runs.submitToolOutputsAndPoll') {
@@ -200,14 +245,25 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     }
   }
   for (const property of file.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)) {
+    if (property.getName().startsWith('finalFunctionCall')) {
+      const runner = rootIdentifier(property);
+      if (runner?.getSymbol() && runners.has(runner.getSymbol()!))
+        addManual(result, file, property, `OpenAI v5 renames ${property.getName()} to ${property.getName().replace('FunctionCall', 'FunctionToolCall')}; review bound or aliased methods manually.`);
+    }
     if (property.getName() !== 'chat') continue;
     const parent = property.getParentIfKind(SyntaxKind.PropertyAccessExpression);
     if (!parent || parent.getName() !== 'completions') continue;
     const beta = property.getExpression();
     if (!Node.isPropertyAccessExpression(beta) || beta.getName() !== 'beta') continue;
-    const root = pathParts(beta.getExpression());
-    const rootNode = rootIdentifier(beta.getExpression());
-    if (root.length === 1 && rootNode?.getSymbol() && clients.has(rootNode.getSymbol()!)) addEdit(edits, file, beta, root[0]!, 'beta-chat');
+    if (clientParts(beta.getExpression())?.length === 0)
+      addEdit(edits, file, beta, beta.getExpression().getText(), 'beta-chat');
+  }
+  for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    if (!Node.isObjectBindingPattern(variable.getNameNode())) continue;
+    const initializer = variable.getInitializer();
+    if (!initializer || !Node.isIdentifier(initializer) || !initializer.getSymbol() || !runners.has(initializer.getSymbol()!)) continue;
+    if (variable.getNameNode().getText().includes('finalFunctionCall'))
+      addManual(result, file, variable, 'OpenAI v5 renames destructured finalFunctionCall to finalFunctionToolCall; review the runner manually.');
   }
   for (const property of file.getDescendantsOfKind(SyntaxKind.PropertyAssignment)) {
     if (property.getName() !== 'httpAgent') continue;
