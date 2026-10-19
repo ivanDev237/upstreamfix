@@ -65,10 +65,16 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
     const sections = ['dependencies', 'devDependencies', 'optionalDependencies'];
     const section = sections.find((name) => typeof manifest[name]?.[packageName] === 'string');
     if (!section) return { ...base, status: 'unavailable', note: `${packageName} is not declared in the root package.json.` };
-    if (!await readFile(path.join(project, 'package-lock.json'), 'utf8').then(() => true, () => false)) {
+    const lockContents = await readFile(path.join(project, 'package-lock.json'), 'utf8').catch(() => undefined);
+    if (!lockContents) {
       return { ...base, status: 'unavailable', note: 'A root package-lock.json is required for a reproducible npm baseline.' };
     }
-    const currentVersion = manifest[section]![packageName]!;
+    const lock = JSON.parse(lockContents) as { packages?: Record<string, { version?: unknown }> };
+    const lockedVersion = lock.packages?.[`node_modules/${packageName}`]?.version;
+    if (typeof lockedVersion !== 'string' || !/^\d+\.\d+\.\d+/.test(lockedVersion)) {
+      return { ...base, status: 'unavailable', note: `The lockfile does not contain an exact installed ${packageName} version.` };
+    }
+    const currentVersion = lockedVersion;
     const env = sanitizedEnvironment(home);
     const run = async (phase: ProbePhase, command: string, args: string[]) => execute(phase, command, args, project, env);
     const baselineInstall = await run('baseline-install', 'npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund', '--prefer-offline']);

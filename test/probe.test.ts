@@ -12,7 +12,7 @@ it('reports a precise new Stripe diagnostic while preserving the original lockfi
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-probe-test-'));
   try {
     const manifest = JSON.stringify({ dependencies: { stripe: '22.5.0' }, devDependencies: { typescript: '5.9.0' } });
-    const lock = '{"lockfileVersion":3}';
+    const lock = JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/stripe': { version: '22.5.0' } } });
     await writeFile(path.join(cwd, 'package.json'), manifest);
     await writeFile(path.join(cwd, 'package-lock.json'), lock);
     await writeFile(path.join(cwd, 'tsconfig.json'), '{}');
@@ -35,6 +35,7 @@ it('reports a precise new Stripe diagnostic while preserving the original lockfi
       },
     });
     expect(result.status).toBe('available');
+    expect(result.currentVersion).toBe('22.5.0');
     expect(result.newDiagnostics).toMatchObject([{ file: 'src/pay.ts', line: 243, code: 2561 }]);
     expect(result.preexisting).toHaveLength(1);
     expect(await readFile(path.join(cwd, 'package.json'), 'utf8')).toBe(manifest);
