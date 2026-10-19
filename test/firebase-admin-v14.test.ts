@@ -359,9 +359,11 @@ describe('firebase-admin v14 migration', () => {
     expect(outcome.manual).toHaveLength(0);
     expect(outcome.filesChanged).toContain('package.json');
     expect(outcome.filesChanged).toContain('package-lock.json');
-    expect(reportDiff).toContain('--- a/package-lock.json');
+    expect(reportDiff).toContain('package-lock.json: lockfile summary');
+    expect(reportDiff).not.toContain('--- a/package-lock.json');
     expect(reportDiff).toContain('"firebase-admin": "^14.0.0"');
-    expect(reportDiff).toMatch(/node_modules\/firebase-admin[\s\S]*?"version": "14\./);
+    expect(outcome.proposedFiles.find((change) => change.relativePath === 'package-lock.json')?.after)
+      .toMatch(/node_modules\/firebase-admin[\s\S]*?"version": "14\./);
     expect(outcome.manifestNotes.join('\n')).toContain('preview requires registry access and install scripts were disabled');
     expect(JSON.parse(await readFile(lockPath, 'utf8')).packages[''].dependencies['firebase-admin']).toBe('^13.0.0');
   }, 180_000);
