@@ -1,0 +1,33 @@
+name: Type-derived SDK fixtures
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      - name: Compile generated fixtures against exact SDK versions
+        env:
+          UPSTREAMFIX_FIXTURE_REPORT: ${{ runner.temp }}/type-fixtures.md
+        run: npx tsx scripts/run-type-fixtures.ts
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: type-fixtures-${{ github.run_id }}
+          path: ${{ runner.temp }}/type-fixtures.md
+          if-no-files-found: warn
+          retention-days: 30

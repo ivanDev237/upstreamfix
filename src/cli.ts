@@ -12,6 +12,7 @@ import { assertWritesEnabled } from './core/safety.js';
 import { findApplicableMigrations, migrations } from './migrations/index.js';
 import { watchPackages } from './core/watch.js';
 import { diffPublishedApi } from './core/diff-api.js';
+import { generateTypeFixtures } from './core/type-fixtures.js';
 import { analyzeImpact } from './core/impact.js';
 import { probeProject } from './core/probe.js';
 
@@ -56,6 +57,17 @@ export function createProgram(): Command {
     .option('-C, --cwd <directory>', 'project directory to analyze', process.cwd())
     .action(async (options: { cwd: string }) => {
       console.log(JSON.stringify(await analyzeImpact(options.cwd), null, 2));
+    });
+
+  program
+    .command('type-fixtures')
+    .description('Generate compile-only fixtures from published SDK declaration differences.')
+    .argument('<package>', 'npm package name')
+    .argument('<old>', 'exact old version')
+    .argument('<new>', 'exact new version')
+    .action(async (packageName: string, oldVersion: string, newVersion: string) => {
+      const report = await diffPublishedApi(packageName, oldVersion, newVersion);
+      console.log(JSON.stringify(generateTypeFixtures(report), null, 2));
     });
 
   program
