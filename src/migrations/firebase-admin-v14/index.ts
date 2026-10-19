@@ -223,6 +223,22 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
     return false;
   }
 
+  const orderedEdits = [...edits].sort((a, b) => a.start - b.start || a.end - b.end);
+  for (let index = 1; index < orderedEdits.length; index++) {
+    const previous = orderedEdits[index - 1]!;
+    const current = orderedEdits[index]!;
+    if (current.start < previous.end) {
+      result.manual.push({
+        file,
+        line: current.line,
+        reason: 'Automatic Firebase edits overlap in this file; review the nested usage manually before migrating it.',
+        snippet: current.before,
+      });
+      sortManual(result.manual, manualBefore);
+      return false;
+    }
+  }
+
   const textEdits: TextEdit[] = edits.map((edit) => ({ start: edit.start, end: edit.end, text: edit.text }));
   for (const edit of edits) {
     result.changes.push({ file, line: edit.line, rule: edit.rule, before: edit.before, after: edit.text } satisfies Change);
