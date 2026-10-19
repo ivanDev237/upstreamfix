@@ -424,6 +424,17 @@ describe('migration verification', () => {
     expect(commands).toContain('pnpm run typecheck');
     expect(commands).toContain('pnpm run test');
   });
+  it('refuses an unreadable Yarn version before installation', async () => {
+    const cwd = await makeProject({ test: 'node -e "process.exit(0)"' });
+    await writeFile(path.join(cwd, 'yarn.lock'), '__metadata:\n  version: 8\n');
+    const commands: string[] = [];
+    const result = await verifyProposedMigration(cwd, [diff], { execute: async (command, args) => {
+      commands.push(`${command} ${args.join(' ')}`);
+      return { stdout: args[0] === '--version' ? 'unknown build' : 'ok' };
+    } });
+    expect(result.status).toBe('failed');
+    expect(commands).not.toContain('yarn install');
+  });
 
   it('uses Yarn to run scripts when the project declares Yarn', async () => {
     const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"', test: 'node -e "process.exit(0)"' }, 'yarn@4.0.0');

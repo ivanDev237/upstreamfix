@@ -36,3 +36,14 @@ it('reports conflicting nested versions instead of choosing one by directory ord
     expect(result[0]?.automatic).toBe(0);
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
+it('does not treat a peer compatibility range as a second installed SDK', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-impact-peer-'));
+  try {
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { stripe: '^21.0.0' }, peerDependencies: { stripe: '^21.0.0 || ^22.0.0' } }));
+    await writeFile(path.join(cwd, 'stripe.ts'), "import Stripe from 'stripe';\nconst stripe = Stripe('sk_test_fake');\n");
+    const result = await analyzeImpact(cwd, async () => '23.0.0');
+    expect(result[0]?.affected).toBeGreaterThan(0);
+    expect(result[0]?.migration).toBe('stripe@22');
+    expect(result[0]?.note ?? '').not.toContain('Multiple declared versions');
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});

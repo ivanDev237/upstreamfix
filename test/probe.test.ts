@@ -102,3 +102,26 @@ it('removes the named Docker container when an active probe is interrupted', asy
     expect(remove).toEqual(['rm', '-f', run?.[run.indexOf('--name') + 1]]);
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
+it('mounts a temporary project safely when TMPDIR contains a comma', async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix,probe-parent-'));
+  const previousTmpdir = process.env.TMPDIR;
+  try {
+    const cwd = path.join(parent, 'customer');
+    await (await import('node:fs/promises')).mkdir(cwd);
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { stripe: '22.5.0' } }));
+    await writeFile(path.join(cwd, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/stripe': { version: '22.5.0' } } }));
+    await execFile('git', ['init', '-q'], { cwd });
+    await execFile('git', ['add', '.'], { cwd });
+    process.env.TMPDIR = parent;
+    let dockerArgs: string[] = [];
+    await probeProject(cwd, 'stripe@23.0.0', { confirmed: true, execute: async (phase, command, args) => {
+      if (command === 'docker' && args[0] === 'run') { dockerArgs = args; return { code: 1, output: 'unavailable' }; }
+      return { code: 0, output: 'ok' };
+    } });
+    expect(dockerArgs).toContain('--volume');
+    expect(dockerArgs.some((arg) => arg.includes(':/workspace:ro') && arg.includes(','))).toBe(true);
+  } finally {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previousTmpdir;
+    await rm(parent, { recursive: true, force: true });
+  }
+});

@@ -22,3 +22,7 @@ it('parses route groups, spaces, and Windows drive paths', () => {
     'src/app/(auth)/my page.tsx', 'C:/Work Space/src/app.ts', 'src/components/My Card.ts',
   ]);
 });
+it('keeps a relative first directory that contains a space', () => {
+  expect(parseTypeScriptDiagnostics('my folder/src/pay.ts(3,2): error TS2561: changed')[0]?.file)
+    .toBe('my folder/src/pay.ts');
+});

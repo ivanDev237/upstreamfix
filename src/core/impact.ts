@@ -34,6 +34,7 @@ async function declaredVersions(root: string): Promise<{ found: Map<string, Set<
         for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
           for (const [name, version] of Object.entries(manifest[section] ?? {})) {
             if (typeof version !== 'string') continue;
+            if (section === 'peerDependencies' && ['dependencies', 'devDependencies', 'optionalDependencies'].some((runtime) => typeof manifest[runtime]?.[name] === 'string')) continue;
             const versions = found.get(name) ?? new Set<string>();
             versions.add(version);
             found.set(name, versions);

@@ -133,6 +133,12 @@ describe('firebase-admin v14 migration', () => {
     expect(result.manual.some((item) => item.reason.includes('syntax errors'))).toBe(false);
     expect(result.changes.some((item) => item.rule === 'app-lifecycle')).toBe(true);
   });
+  it('does not leave a blank line before replacement imports', async () => {
+    const cwd = await makeProject();
+    const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    const source = result.proposedFiles.find((file) => file.relativePath === 'server.ts')?.after;
+    expect(source).toMatch(/^import \{/);
+  });
   it('preserves a source BOM through proposed-file verification', async () => {
     const cwd = await makeProject();
     const source = "\uFEFFimport * as admin from 'firebase-admin';\nadmin.initializeApp();\n";

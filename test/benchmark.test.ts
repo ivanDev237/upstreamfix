@@ -128,6 +128,11 @@ describe('public repository benchmark helpers', () => {
     const args = buildBenchmarkInstallDockerArgs('/tmp/checkout', '/tmp/checkout', 'yarn', ['install'], '/tmp/cache/yarn', { memoryMb: 1024, tempMb: 128 });
     expect(args).toContain('COREPACK_ENABLE_UNSAFE_CUSTOM_URLS=0');
   });
+  it('uses a bind volume when a checkout path contains a comma', () => {
+    const args = buildBenchmarkInstallDockerArgs('/tmp/a,b', '/tmp/a,b', 'npm', ['install'], '/tmp/cache', { memoryMb: 2048, tempMb: 128 });
+    expect(args).toContain('--volume');
+    expect(args).toContain('/tmp/a,b:/workspace');
+  });
 
   it('loads the reviewed Stripe corpus as eight v22 repositories and four v23 repositories', async () => {
     const stripe22 = await readBenchmarkRepos(path.resolve('benchmark/stripe-22-repos.json'));

@@ -108,7 +108,7 @@ export async function verifyProposedMigration(
         const versionCheck = await runCheck('Check Yarn version', 'yarn', ['--version'], plan.cwd, env, timeoutMs, options.execute);
         checks.push(versionCheck);
         const actualMajor = Number(/^\s*(\d+)\./.exec(versionCheck.output)?.[1]);
-        if (versionCheck.status !== 'passed' || actualMajor < 2 || (plan.yarnExact && actualMajor !== plan.yarnMajor)) {
+        if (versionCheck.status !== 'passed' || !(actualMajor >= 2) || (plan.yarnExact && actualMajor !== plan.yarnMajor)) {
           return { status: 'failed', checks, note: `Yarn ${plan.yarnMajor} is required by this project, but the temporary copy resolved ${versionCheck.output || 'an unknown version'}. Dependency installation was refused.` };
         }
       }

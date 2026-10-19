@@ -679,7 +679,7 @@ function renderImports(
   const newline = fullText.includes('\r\n') ? '\r\n' : '\n';
   const before = fullText.slice(0, position);
   const after = fullText.slice(position);
-  const prefix = before.endsWith('\n') ? '' : newline;
+  const prefix = before.length === 0 || before.endsWith('\n') ? '' : newline;
   const suffix = after.startsWith('\n') ? '' : newline;
   return `${prefix}${lines.join(newline)}${suffix}`;
 }

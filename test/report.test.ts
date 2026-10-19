@@ -28,18 +28,34 @@ describe('security of Markdown reports', () => {
     expect(report).toContain('&lt;script&gt;');
   });
   it('redacts organization, GitHub, AWS and truncated private keys', () => {
+    const syntheticAwsKey = ['AK', 'IA', 'ABCDEFGHIJKLMNOP'].join('');
     const raw = [
       'sk_org_1234567890abcdef',
       'ghp_abcdefghijklmnopqrstuvwxyz123456',
-      'AKIAABCDEFGHIJKLMNOP',
+      syntheticAwsKey,
       '-----BEGIN ENCRYPTED PRIVATE KEY-----\nvery-secret-content',
       '-----BEGIN PGP PRIVATE KEY BLOCK-----\nprivate-material',
     ].join('\n');
     const safe = maskSecrets(raw);
-    for (const secret of ['sk_org_1234567890abcdef', 'ghp_abcdefghijklmnopqrstuvwxyz123456', 'AKIAABCDEFGHIJKLMNOP', 'very-secret-content', 'private-material']) {
+    for (const secret of ['sk_org_1234567890abcdef', 'ghp_abcdefghijklmnopqrstuvwxyz123456', syntheticAwsKey, 'very-secret-content', 'private-material']) {
       expect(safe).not.toContain(secret);
       if (!['very-secret-content', 'private-material'].includes(secret)) expect(maskSecrets(secret)).not.toContain(secret);
     }
+  });
+  it('redacts GitHub PATs, Slack tokens, encoded Firebase keys and raw privateKey values', () => {
+    const syntheticSlackToken = ['xox', 'b-1234567890-abcdefghijklmnopqrstuvwxyz'].join('');
+    const syntheticUserToken = ['xox', 'p-1234567890-abcdefghijklmnopqrstuvwxyz'].join('');
+    const syntheticPrivateKey = ['MI', 'IEabcdefghijklmnopqrstuvwxyz0123456789'].join('');
+    const secrets = [
+      'github_pat_abcdefghijklmnopqrstuvwxyz0123456789',
+      syntheticSlackToken,
+      syntheticUserToken,
+      `privateKey: "${syntheticPrivateKey}"`,
+      `\\"private_key\\": \\"${syntheticPrivateKey}\\"`,
+    ];
+    const safe = maskSecrets(secrets.join('\n'));
+    for (const secret of secrets.slice(0, 3)) expect(safe).not.toContain(secret);
+    expect(safe).not.toContain(syntheticPrivateKey);
   });
   it('removes terminal controls from reports and terminal output', () => {
     const injected = 'normal\x1b]8;;https://evil.invalid\x07link\x1b]8;;\x07\x1b[2J';

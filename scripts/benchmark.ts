@@ -3,6 +3,7 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { dockerBindArgs } from '../src/core/docker-mount.js';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { Project } from 'ts-morph';
@@ -355,8 +356,8 @@ export function buildBenchmarkInstallDockerArgs(checkout: string, packageDir: st
   const dockerArgs = [
     'run', '--rm', '--network=bridge', ...dockerMemoryArgs(limits, uid, gid), '--cpus=1', '--pids-limit=256',
     '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user', `${uid}:${gid}`,
-    '--mount', `type=bind,source=${checkout},target=/workspace`, '--mount', `type=bind,source=${path.join(checkout, '.git')},target=/workspace/.git,readonly`,
-    '--mount', `type=bind,source=${cacheDir},target=/cache`,
+    ...dockerBindArgs(checkout, '/workspace'), ...dockerBindArgs(path.join(checkout, '.git'), '/workspace/.git', true),
+    ...dockerBindArgs(cacheDir, '/cache'),
     '--workdir', `/workspace/${relativeDir}`, '--env', 'HOME=/home/benchmark', '--env', 'CI=1',
     '--env', 'NPM_CONFIG_USERCONFIG=/home/benchmark/npmrc.user', '--env', 'NPM_CONFIG_GLOBALCONFIG=/home/benchmark/npmrc.global',
     '--env', 'NPM_CONFIG_AUDIT=false', '--env', 'NPM_CONFIG_FUND=false', '--env', 'NPM_CONFIG_CACHE=/cache/npm',
@@ -426,7 +427,7 @@ async function runIsolatedDockerScript(
   const dockerArgs = [
     'run', '--rm', '--network=none', ...dockerMemoryArgs(limits, uid, gid), '--cpus=1', '--pids-limit=256', '--read-only',
     '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user', `${uid}:${gid}`,
-    '--mount', `type=bind,source=${checkout},target=/workspace`, '--mount', `type=bind,source=${path.join(checkout, '.git')},target=/workspace/.git,readonly`, '--workdir', `/workspace/${relativeDir}`,
+    ...dockerBindArgs(checkout, '/workspace'), ...dockerBindArgs(path.join(checkout, '.git'), '/workspace/.git', true), '--workdir', `/workspace/${relativeDir}`,
     '--env', 'HOME=/home/benchmark', '--env', 'CI=1', '--env', `NODE_OPTIONS=--max-old-space-size=${Math.max(256, limits.memoryMb - 256)}`, ...containerEnvArgs(env), nodeImage,
     ...(inferredTsc ? ['npm', 'exec', '--no', '--', 'tsc', '--noEmit'] : ['npm', 'run', '--ignore-scripts', selectedScript!]),
   ];

@@ -7,6 +7,10 @@ it('counts pnpm and Yarn package version changes in lockfile summaries', () => {
   expect(summarizeLockfile('yarn.lock', 'foo@^1.0.0:\n  version "1.0.0"\n', 'foo@^1.0.0:\n  version "2.0.0"\n'))
     .toContain('changed: 1');
 });
+it('counts pnpm peer-suffixed package upgrades as changes', () => {
+  expect(summarizeLockfile('pnpm-lock.yaml', 'packages:\n  foo@1.0.0(peer@1.0.0):\n', 'packages:\n  foo@2.0.0(peer@2.0.0):\n'))
+    .toContain('added: 0, removed: 0, changed: 1');
+});
 import { renderMarkdownReport, renderTerminalReport } from '../src/core/report.js';
 
 describe('migration report formatting', () => {

@@ -105,10 +105,13 @@ export function renderMarkdownReport(
 /** Redact common provider credentials and private-key material from every report field. */
 export function maskSecrets(value: string): string {
   return redactPrivateKeys(value)
+    .replace(/((?:\\?"private_key\\?"|private_key|privateKey)\s*:\s*)\\?"[^"\r\n]*\\?"/gi, '$1"[REDACTED]"')
     .replace(/((?:"|\b)private\\?_key(?:"|\b)\s*:\s*)(?:"(?:\\.|[^"\\])*"|'[^']*'|[^,\r\n}]+)/gi, '$1"[REDACTED]"')
     .replace(/\b(?:sk|rk|pk)\\?_(?:live|test)\\?_(?:[A-Za-z0-9-]|\\?_){8,}\b/gi, '[API key redacted]')
     .replace(/\bsk_org_[A-Za-z0-9_-]{8,}\b/g, '[API key redacted]')
     .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, '[GitHub token redacted]')
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '[GitHub token redacted]')
+    .replace(/\bxox[bp]-[A-Za-z0-9-]{20,}\b/g, '[Slack token redacted]')
     .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '[AWS key redacted]')
     .replace(/\bwhsec\\?_(?:[A-Za-z0-9-]|\\?_){8,}\b/gi, '[webhook secret redacted]')
     .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, '[API key redacted]');

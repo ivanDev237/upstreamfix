@@ -15,10 +15,8 @@ export function parseTypeScriptDiagnostics(output: string): TypeScriptDiagnostic
   for (const line of clean.split(/\r?\n/)) {
     const match = pattern.exec(line);
     if (!match) continue;
-    const rawPath = match[1]!.trim();
-    const pathStart = /(?:^|\s)([A-Za-z]:[\\/]|\/|\.{1,2}[\\/]|[\w.-]+[\\/])/.exec(rawPath);
-    const start = pathStart ? pathStart.index + pathStart[0].length - pathStart[1]!.length : 0;
-    const file = rawPath.slice(start).replaceAll('\\', '/').replace(/^\/workspace\//, '').replace(/^\.\//, '');
+    const rawPath = match[1]!.trim().replace(/^npm error\s+/, '');
+    const file = rawPath.replaceAll('\\', '/').replace(/^\/workspace\//, '').replace(/^\.\//, '');
     diagnostics.push({
       file,
       line: Number(match[2] ?? match[4]),

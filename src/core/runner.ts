@@ -955,7 +955,7 @@ function lockfilePackages(file: string, contents: string): Map<string, string> |
       if (/^[^\s#]/.test(line)) { section = ''; name = ''; }
       const entry = section === 'packages' ? /^  (['"]?)(.+?)\1:\s*$/.exec(line) : null;
       if (entry) {
-        const rawName = entry[2]!.replace(/^\//, '');
+        const rawName = entry[2]!.replace(/^\//, '').replace(/\(.*$/, '');
         const separator = rawName.lastIndexOf('@');
         name = separator > 0 ? rawName.slice(0, separator) : rawName;
         packages.set(name, separator > 0 ? rawName.slice(separator + 1).split('(')[0]! : rawName);

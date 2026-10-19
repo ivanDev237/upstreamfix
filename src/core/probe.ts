@@ -8,6 +8,7 @@ import { migrations } from '../migrations/index.js';
 import { registerTemporaryCleanup } from './process-cleanup.js';
 import { randomUUID } from 'node:crypto';
 import { parseManifest } from './manifest.js';
+import { dockerBindArgs } from './docker-mount.js';
 
 const nodeImage = 'node:24.22.0-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5';
 export type ProbePhase = 'baseline-install' | 'baseline-typecheck' | 'target-install' | 'target-typecheck';
@@ -110,7 +111,7 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
     const typeArgs = [
       'run', '--rm', '--init', '--name', containerName, '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
       '--memory=1536m', '--memory-swap=1536m', '--pids-limit=128', '--user=65534:65534',
-      '--tmpfs=/tmp:rw,nosuid,nodev,size=64m', '--mount', `type=bind,source=${project},target=/workspace,readonly`, '-w', '/workspace',
+      '--tmpfs=/tmp:rw,nosuid,nodev,size=64m', ...dockerBindArgs(project, '/workspace', true), '-w', '/workspace',
       nodeImage, 'node', '/workspace/node_modules/typescript/bin/tsc', '--noEmit', '--pretty', 'false',
     ];
     const before = await run('baseline-typecheck', 'docker', typeArgs);
