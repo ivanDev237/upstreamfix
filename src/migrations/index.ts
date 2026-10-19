@@ -5,9 +5,10 @@ import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from '../core/pro
 import { firebaseAdminV14 } from './firebase-admin-v14/index.js';
 import { stripeV22 } from './stripe-v22/index.js';
 import { stripeV23 } from './stripe-v23/index.js';
+import { openaiV5 } from './openai-v5/index.js';
 
 /** The shipped migration catalog. Adding a migration requires registering it here, not in core or the CLI. */
-export const migrations: readonly Migration[] = [firebaseAdminV14, stripeV22, stripeV23];
+export const migrations: readonly Migration[] = [firebaseAdminV14, stripeV22, stripeV23, openaiV5];
 
 export async function findApplicableMigrations(cwd: string): Promise<Migration[]> {
   const manifests = await readManifests(path.resolve(cwd));
