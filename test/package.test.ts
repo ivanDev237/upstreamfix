@@ -15,7 +15,7 @@ describe('package metadata', () => {
 
   it('uses only UpstreamFix-prefixed environment variables in the action', async () => {
     const action = await readFile(path.join(projectRoot, 'action.yml'), 'utf8');
-    expect(action).toContain('UPSTREAMFIX_REPORT_FILE');
+    expect(action).toContain('UPSTREAMFIX_OUTPUT_ROOT');
     expect(action).not.toContain('AUTOSCALEX_REPORT_FILE');
   });
 });
