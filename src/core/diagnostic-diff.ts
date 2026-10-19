@@ -10,17 +10,18 @@ export interface TypeScriptDiagnostic {
 /** Parse the ordinary, non-pretty `tsc` output without executing project code. */
 export function parseTypeScriptDiagnostics(output: string): TypeScriptDiagnostic[] {
   const diagnostics: TypeScriptDiagnostic[] = [];
+  const clean = output.replace(/\u001b\[[0-9;]*m/g, '');
   // A failed command can prepend text on the same line as the first tsc
   // diagnostic; begin at the source path, never at the command wrapper.
-  const pattern = /(?:^|\s)([^\s():]+\.(?:[cm]?tsx?|jsx?))\((\d+),(\d+)\): error TS(\d+): ([^\r\n]+)/g;
-  for (const match of output.matchAll(pattern)) {
+  const pattern = /(?:^|\s)([^\s():]+\.(?:[cm]?tsx?|jsx?))(?:\((\d+),(\d+)\):|:(\d+):(\d+)\s+-) error TS(\d+): ([^\r\n]+)/g;
+  for (const match of clean.matchAll(pattern)) {
     const file = match[1]!.replaceAll('\\', '/').replace(/^\/workspace\//, '').replace(/^\.\//, '');
     diagnostics.push({
       file,
-      line: Number(match[2]),
-      column: Number(match[3]),
-      code: Number(match[4]),
-      message: match[5]!.trim().replace(/\s+/g, ' '),
+      line: Number(match[2] ?? match[4]),
+      column: Number(match[3] ?? match[5]),
+      code: Number(match[6]),
+      message: match[7]!.trim().replace(/\s+/g, ' '),
     });
   }
   return diagnostics;

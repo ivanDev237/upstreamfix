@@ -170,7 +170,7 @@ async function copyRegularTree(source: string, destination: string): Promise<voi
   });
 }
 
-async function copyProject(source: string, destination: string): Promise<void> {
+export async function copyProject(source: string, destination: string): Promise<void> {
   let listing: string;
   try {
     ({ stdout: listing } = await execFile('git', [
@@ -400,7 +400,7 @@ async function runCheck(
   }
 }
 
-async function executeWithProcessGroup(
+export async function executeWithProcessGroup(
   command: string,
   args: string[],
   cwd: string,
@@ -475,7 +475,7 @@ function signalProcessGroup(child: ReturnType<typeof spawn>, signal: NodeJS.Sign
   }
 }
 
-function sanitizedEnvironment(home: string): NodeJS.ProcessEnv {
+export function sanitizedEnvironment(home: string): NodeJS.ProcessEnv {
   const allowed = new Set(['PATH', 'SYSTEMROOT', 'WINDIR', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ']);
   const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => allowed.has(key)));
   env.HOME = home;

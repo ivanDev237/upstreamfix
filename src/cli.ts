@@ -12,6 +12,7 @@ import { findApplicableMigrations, migrations } from './migrations/index.js';
 import { watchPackages } from './core/watch.js';
 import { diffPublishedApi } from './core/diff-api.js';
 import { analyzeImpact } from './core/impact.js';
+import { probeProject } from './core/probe.js';
 
 function existingMigration(value: string): string {
   if (!migrations.some((migration) => migration.id === value)) {
@@ -27,6 +28,23 @@ export function createProgram(): Command {
     .description('Prepare and review automated code migrations for breaking SDK changes.')
     .showHelpAfterError()
     .exitOverride();
+
+  program
+    .command('probe')
+    .description('Compare TypeScript diagnostics before and after an exact SDK upgrade in a temporary copy.')
+    .argument('<package@version>', 'exact target, for example stripe@23.0.0')
+    .option('-C, --cwd <directory>', 'Git project directory to probe', process.cwd())
+    .option('--yes', 'confirm dependency and Docker image downloads after reviewing the estimate')
+    .action(async (target: string, options: { cwd: string; yes?: boolean }) => {
+      const result = await probeProject(options.cwd, target, { confirmed: options.yes });
+      console.log(result.estimatedDownload);
+      if (result.status === 'confirmation-required') {
+        console.log('No downloads started. Re-run with --yes to perform the probe.');
+        return;
+      }
+      console.log(JSON.stringify(result, null, 2));
+      if (result.status === 'unavailable') process.exitCode = 1;
+    });
 
   program
     .command('impact')
