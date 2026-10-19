@@ -3,6 +3,12 @@
 All notable changes to UpstreamFix are documented here. Versions in the 0.x
 series are experimental; review proposed migrations before applying them.
 
+## Unreleased
+
+- Added `watch`, `diff-api`, `impact`, and `probe` for version monitoring, TypeScript API comparison, impact estimates, and isolated diagnostic probes.
+- Hardened previews and verification: bounded lockfile reports, explicit Yarn downloads, isolated package caches, package-manager detection, capped timeouts, and retained error tails.
+- Escaped untrusted benchmark output and withheld ambiguous Stripe rewrites.
+
 ## 0.1.2
 
 - Removed an empty npm token configuration from the release workflow.
