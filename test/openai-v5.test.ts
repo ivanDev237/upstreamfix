@@ -128,4 +128,26 @@ client.files.del('file_1');
     expect(outcome.manual.some((item) => item.reason.includes('syntax'))).toBe(false);
     expect(outcome.fileUpdates?.[0]?.contents).toContain("client.files.delete('file_1')");
   });
+
+  it.each([
+    "import OpenAI from 'openai'; class S { client = new OpenAI(); run() { return this.client.files.del('f'); } }",
+    "const { OpenAI } = require('openai'); const client = new OpenAI(); client.files.del('f');",
+    "import * as oa from 'openai'; const client = new oa.OpenAI(); client.files.del('f');",
+    "import OpenAI from 'openai'; const client = new OpenAI(); client.beta.threads.runs.poll('r', {thread_id:'t'});",
+    "import OpenAI from 'openai'; const client = new OpenAI(); client.beta.threads.runs.submitToolOutputsAndPoll('r', {thread_id:'t'});",
+    "import OpenAI from 'openai'; const client = new OpenAI(); client.containers.files.retrieve('container_1', 'file_1');",
+    "import OpenAI from 'openai'; const client = new OpenAI(); const vs = client.vectorStores; vs.files.del('vs', 'file');",
+    "import { fileFromPath } from 'openai'; fileFromPath('/tmp/a');",
+  ])('flags an unsupported v4 usage explicitly: %s', (source) => {
+    const outcome = migrate(source);
+    expect(outcome.manual.length).toBeGreaterThan(0);
+    expect(outcome.fileUpdates).toEqual([]);
+  });
+
+  it('updates moved re-exports and CommonJS module paths', () => {
+    const outcome = migrate("export { OpenAIError } from 'openai/error';\nconst errors = require('openai/error');\n");
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("from 'openai/core/error'");
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("require('openai/core/error')");
+  });
 });

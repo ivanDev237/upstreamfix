@@ -54,21 +54,28 @@ function addEdit(edits: Edit[], file: SourceFile, node: Node, replacement: strin
 
 function transformFile(file: SourceFile, result: MigrationResult): void {
   const imported = new Set<string>();
+  const edits: Edit[] = [];
+  const manualStart = result.manual.length;
   for (const declaration of file.getImportDeclarations()) {
     if (declaration.getModuleSpecifierValue() === 'openai') {
+      if (declaration.getNamespaceImport()) addManual(result, file, declaration, 'OpenAI namespace imports require manual review because receiver bindings cannot be proven safe.');
       const name = declaration.getDefaultImport()?.getText();
       if (name) imported.add(name);
       for (const named of declaration.getNamedImports()) {
         if (named.getName() === 'OpenAI') imported.add(named.getAliasNode()?.getText() ?? 'OpenAI');
+        if (named.getName() === 'fileFromPath') addManual(result, file, named, 'OpenAI v5 removed fileFromPath; choose the supported upload helper manually.');
       }
     }
   }
   for (const declaration of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const initializer = declaration.getInitializer();
     if (initializer && Node.isCallExpression(initializer) && initializer.getExpression().getText() === 'require'
-      && initializer.getArguments()[0]?.getText().replace(/['"]/g, '') === 'openai') imported.add(declaration.getName());
+      && initializer.getArguments()[0]?.getText().replace(/['"]/g, '') === 'openai') {
+      if (Node.isIdentifier(declaration.getNameNode())) imported.add(declaration.getName());
+      else addManual(result, file, declaration, 'Destructured require of openai needs manual binding review.');
+    }
   }
-  if (imported.size === 0 && !file.getImportDeclarations().some((item) => item.getModuleSpecifierValue().startsWith('openai/'))) return;
+  if (!file.getFullText().includes('openai')) return;
   if (file.getProject().getProgram().getSyntacticDiagnostics(file).some((item) => item.getCategory() === 1)) {
     result.manual.push({ file: file.getFilePath(), line: 1, reason: 'The source contains syntax errors; no OpenAI edits were applied.', snippet: '' });
     return;
@@ -88,8 +95,22 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       if (symbol) clients.add(symbol);
     }
   }
-  const edits: Edit[] = [];
-  const manualStart = result.manual.length;
+  for (const constructor of file.getDescendantsOfKind(SyntaxKind.NewExpression)) {
+    const parent = constructor.getParent();
+    const assignedKnownClient = parent && Node.isBinaryExpression(parent) && parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken
+      && Node.isIdentifier(parent.getLeft()) && Boolean(parent.getLeft().getSymbol() && clients.has(parent.getLeft().getSymbol()!));
+    if (imported.has(constructor.getExpression().getText()) && !Node.isVariableDeclaration(parent) && !assignedKnownClient) {
+      addManual(result, file, constructor, 'An OpenAI client stored outside a local variable needs manual receiver review.');
+    }
+  }
+  for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    const initializer = variable.getInitializer();
+    if (!initializer || !Node.isPropertyAccessExpression(initializer)) continue;
+    const root = rootIdentifier(initializer);
+    if (root?.getSymbol() && clients.has(root.getSymbol()!) && pathParts(initializer).length >= 2) {
+      addManual(result, file, variable, 'A destructured or aliased OpenAI subclient needs manual review of its v5 methods.');
+    }
+  }
   for (const declaration of file.getImportDeclarations()) {
     const specifier = declaration.getModuleSpecifierValue();
     const moved = MOVED_IMPORTS.get(specifier);
@@ -97,8 +118,19 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     else if (specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
       addManual(result, file, declaration, 'OpenAI v5 removes this private or shim import; review the replacement and runtime configuration.');
   }
+  for (const declaration of file.getExportDeclarations()) {
+    const specifier = declaration.getModuleSpecifierValue();
+    const moved = specifier ? MOVED_IMPORTS.get(specifier) : undefined;
+    if (moved && declaration.getModuleSpecifier()) addEdit(edits, file, declaration.getModuleSpecifier()!, `'${moved}'`, 'moved-import');
+  }
   for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
     const expression = call.getExpression();
+    if (expression.getText() === 'require') {
+      const argument = call.getArguments()[0];
+      const specifier = argument?.getText().replace(/^['"]|['"]$/g, '');
+      const moved = specifier ? MOVED_IMPORTS.get(specifier) : undefined;
+      if (moved && argument) addEdit(edits, file, argument, `'${moved}'`, 'moved-import');
+    }
     if (!Node.isPropertyAccessExpression(expression)) continue;
     const parts = pathParts(expression);
     const root = rootIdentifier(expression);
@@ -106,6 +138,8 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     const method = parts.slice(1).join('.');
     if (method.endsWith('.runFunctions')) {
       addManual(result, file, call, 'OpenAI v5 removes runFunctions; migrate function definitions and handling to runTools manually.');
+    } else if (method === 'beta.threads.runs.poll' || method === 'beta.threads.runs.submitToolOutputsAndPoll') {
+      addManual(result, file, call, 'OpenAI v5 changes this run helper; review its replacement and arguments manually.');
     } else if (DELETED_METHODS.has(method) && call.getArguments().length >= 2) {
       addManual(result, file, call, 'OpenAI v5 changes path parameters for this delete call; review the argument names and order in the official guide.');
     } else if (CHANGED_PATH_METHODS.has(method) && call.getArguments().length >= 2) {
