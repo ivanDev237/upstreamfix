@@ -44,15 +44,18 @@ export async function watchPackages(
     throw new Error('Invalid watch state file.');
   }
   const versions: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, previous.versions);
-  const events: WatchEvent[] = [...previous.events];
+  const events: WatchEvent[] = [];
   for (const packageName of [...new Set(packages)]) {
     const latest = await lookup(packageName);
     if (!exactVersion(latest)) throw new Error(`Invalid version for ${packageName}.`);
     const old = Object.hasOwn(versions, packageName) ? versions[packageName] : undefined;
-    if (old && Number(latest.split('.')[0]) > Number(old.split('.')[0])) events.push({ package: packageName, from: old, to: latest });
+    if (old && compareVersions(latest, old) > 0 && (
+      Number(latest.split('.')[0]) > Number(old.split('.')[0])
+      || (Number(latest.split('.')[0]) === Number(old.split('.')[0]) && old.includes('-') && !latest.includes('-'))
+    )) events.push({ package: packageName, from: old, to: latest });
     if (!old || compareVersions(latest, old) > 0) versions[packageName] = latest;
   }
-  const next: WatchState = { versions, events };
+  const next: WatchState = { versions, events: [...previous.events, ...events].slice(-100) };
   const absolute = path.resolve(statePath);
   await mkdir(path.dirname(absolute), { recursive: true });
   const temporary = `${absolute}.${randomUUID()}.tmp`;
@@ -62,7 +65,7 @@ export async function watchPackages(
   } finally {
     await rm(temporary, { force: true });
   }
-  return next;
+  return { versions, events };
 }
 
 function compareVersions(left: string, right: string): number {
@@ -71,5 +74,10 @@ function compareVersions(left: string, right: string): number {
   for (let index = 0; index < 3; index++) {
     if (a[index]! !== b[index]!) return a[index]! - b[index]!;
   }
-  return 0;
+  const leftPrerelease = left.split('-', 2)[1];
+  const rightPrerelease = right.split('-', 2)[1];
+  if (leftPrerelease === undefined && rightPrerelease !== undefined) return 1;
+  if (leftPrerelease !== undefined && rightPrerelease === undefined) return -1;
+  if (leftPrerelease === undefined || rightPrerelease === undefined) return 0;
+  return leftPrerelease.localeCompare(rightPrerelease, undefined, { numeric: true });
 }

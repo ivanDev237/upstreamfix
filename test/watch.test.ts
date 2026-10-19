@@ -38,5 +38,19 @@ it('rejects invalid stored versions without losing earlier events or lowering a 
   const result = await watchPackages(state, ['stripe', 'constructor'], async (name) => name === 'stripe' ? '22.0.0' : '1.0.0');
   expect(result.versions.stripe).toBe('23.0.0');
   expect(result.versions.constructor).toBe('1.0.0');
-  expect(result.events).toEqual([earlier]);
+  expect(result.events).toEqual([]);
+  expect(JSON.parse(await readFile(state, 'utf8')).events).toEqual([earlier]);
+});
+
+it('returns only new events, retains bounded history, and announces a stable major after beta', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-watch-events-'));
+  roots.push(root);
+  const state = path.join(root, 'watch.json');
+  const history = Array.from({ length: 150 }, (_, index) => ({ package: 'old', from: `${index}.0.0`, to: `${index + 1}.0.0` }));
+  await writeFile(state, JSON.stringify({ versions: { stripe: '23.0.0-beta.1' }, events: history }));
+  const first = await watchPackages(state, ['stripe'], async () => '23.0.0');
+  expect(first.events).toEqual([{ package: 'stripe', from: '23.0.0-beta.1', to: '23.0.0' }]);
+  expect(JSON.parse(await readFile(state, 'utf8')).events).toHaveLength(100);
+  const second = await watchPackages(state, ['stripe'], async () => '23.0.0');
+  expect(second.events).toEqual([]);
 });
