@@ -27,7 +27,10 @@ it('reports a precise new Stripe diagnostic while preserving the original lockfi
         expect(process.listenerCount('SIGINT')).toBeGreaterThan(signalHandlersBefore);
         expect(env.GITHUB_TOKEN).toBeUndefined();
         if (phase.endsWith('typecheck')) {
+          if (args[0] === 'rm') return { code: 0, output: 'removed' };
           expect(args).toContain('--network=none');
+          expect(args).toContain('--init');
+          expect(args).toContain('--name');
           typechecks++;
           return { code: 2, output: typechecks === 1
             ? 'src/pay.ts(2,1): error TS2322: preexisting'

@@ -166,6 +166,11 @@ describe('UpstreamFix CLI', () => {
     expect(migrate?.helpInformation()).toContain('--node-runtime <major>');
   });
 
+  it('exposes a bounded timeout for probe commands', () => {
+    const probe = createProgram().commands.find((command) => command.name() === 'probe');
+    expect(probe?.helpInformation()).toContain('--timeout <seconds>');
+  });
+
   it('previews a confirmed Node.js 22 declaration and rejects other majors', async () => {
     const cwd = await makeProject();
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);

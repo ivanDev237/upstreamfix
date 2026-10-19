@@ -6,6 +6,7 @@ import { copyProject, executeWithProcessGroup, sanitizedEnvironment } from './ve
 import { validateExactVersion } from './diff-api.js';
 import { migrations } from '../migrations/index.js';
 import { registerTemporaryCleanup } from './process-cleanup.js';
+import { randomUUID } from 'node:crypto';
 
 const nodeImage = 'node:24.22.0-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5';
 export type ProbePhase = 'baseline-install' | 'baseline-typecheck' | 'target-install' | 'target-typecheck';
@@ -33,9 +34,9 @@ function parseTarget(target: string): { packageName: string; version: string } {
   return { packageName, version };
 }
 
-const realExecutor: ProbeExecutor = async (_phase, command, args, cwd, env) => {
+const realExecutor = async (_phase: ProbePhase, command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ code: number; output: string }> => {
   try {
-    const result = await executeWithProcessGroup(command, args, cwd, env, 5 * 60 * 1000);
+    const result = await executeWithProcessGroup(command, args, cwd, env, timeoutMs);
     return { code: 0, output: `${result.stdout}${result.stderr}` };
   } catch (error) {
     const cause = error as Error & { stdout?: string; stderr?: string };
@@ -44,6 +45,9 @@ const realExecutor: ProbeExecutor = async (_phase, command, args, cwd, env) => {
 };
 
 export async function probeProject(cwd: string, target: string, options: ProbeOptions = {}): Promise<ProbeResult> {
+  if (options.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1000)) {
+    throw new Error('Probe timeout must be at least one second.');
+  }
   const { packageName, version } = parseTarget(target);
   const base: ProbeResult = {
     status: 'confirmation-required', package: packageName, targetVersion: version,
@@ -55,7 +59,8 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
   const unregisterCleanup = registerTemporaryCleanup(() => rm(root, { recursive: true, force: true }));
   const project = path.join(root, 'project');
   const home = path.join(root, 'home');
-  const execute = options.execute ?? realExecutor;
+  const execute: ProbeExecutor = options.execute ?? ((phase, command, args, directory, env) =>
+    realExecutor(phase, command, args, directory, env, options.timeoutMs ?? 5 * 60 * 1000));
   try {
     await mkdir(project);
     await mkdir(home);
@@ -78,12 +83,19 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
     }
     const currentVersion = lockedVersion;
     const env = sanitizedEnvironment(home);
-    const run = async (phase: ProbePhase, command: string, args: string[]) => execute(phase, command, args, project, env);
+    const containerName = `upstreamfix-probe-${process.pid}-${randomUUID()}`;
+    const run = async (phase: ProbePhase, command: string, args: string[]) => {
+      const result = await execute(phase, command, args, project, env);
+      if (command === 'docker' && result.code !== 0) {
+        await execute(phase, 'docker', ['rm', '-f', containerName], project, env).catch(() => undefined);
+      }
+      return result;
+    };
     const baselineInstall = await run('baseline-install', 'npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund', '--prefer-offline']);
     if (baselineInstall.code !== 0) return { ...base, currentVersion, status: 'unavailable', note: `Baseline installation failed: ${baselineInstall.output.slice(-2000)}` };
 
     const typeArgs = [
-      'run', '--rm', '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
+      'run', '--rm', '--init', '--name', containerName, '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
       '--memory=1536m', '--memory-swap=1536m', '--pids-limit=128', '--user=65534:65534',
       '--tmpfs=/tmp:rw,nosuid,nodev,size=64m', '-v', `${project}:/workspace:ro`, '-w', '/workspace',
       nodeImage, 'node', '/workspace/node_modules/typescript/bin/tsc', '--noEmit', '--pretty', 'false',

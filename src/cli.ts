@@ -37,9 +37,10 @@ export function createProgram(): Command {
     .description('Compare TypeScript diagnostics before and after an exact SDK upgrade in a temporary copy.')
     .argument('<package@version>', 'exact target, for example stripe@23.0.0')
     .option('-C, --cwd <directory>', 'Git project directory to probe', process.cwd())
+    .option('--timeout <seconds>', 'maximum time per probe command', parsePositiveInteger)
     .option('--yes', 'confirm dependency and Docker image downloads after reviewing the estimate')
-    .action(async (target: string, options: { cwd: string; yes?: boolean }) => {
-      const result = await probeProject(options.cwd, target, { confirmed: options.yes });
+    .action(async (target: string, options: { cwd: string; yes?: boolean; timeout?: number }) => {
+      const result = await probeProject(options.cwd, target, { confirmed: options.yes, ...(options.timeout ? { timeoutMs: options.timeout * 1000 } : {}) });
       console.log(result.estimatedDownload);
       if (result.status === 'confirmation-required') {
         console.log('No downloads started. Re-run with --yes to perform the probe.');
