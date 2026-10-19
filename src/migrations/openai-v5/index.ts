@@ -28,6 +28,10 @@ const MOVED_IMPORTS = new Map([
   ['openai/uploads', 'openai/core/uploads'],
   ['openai/resources/beta/chat/completions', 'openai/resources/chat/completions'],
 ]);
+const RUN_TOOLS_EVENTS = new Map([
+  ['functionCall', 'functionToolCall'], ['functionCallResult', 'functionToolCallResult'],
+  ['finalFunctionCall', 'finalFunctionToolCall'], ['finalFunctionCallResult', 'finalFunctionToolCallResult'],
+]);
 interface Edit { start: number; end: number; replacement: string; rule: string; before: string; line: number }
 
 function pathParts(node: Node): string[] {
@@ -95,6 +99,18 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       if (symbol) clients.add(symbol);
     }
   }
+  const runners = new Set<MorphSymbol>();
+  for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    const initializer = variable.getInitializer();
+    if (!initializer || !Node.isCallExpression(initializer)) continue;
+    const runExpression = initializer.getExpression();
+    if (!Node.isPropertyAccessExpression(runExpression)) continue;
+    const root = rootIdentifier(runExpression);
+    if (runExpression.getName() === 'runTools' && root?.getSymbol() && clients.has(root.getSymbol()!)) {
+      const symbol = variable.getNameNode().getSymbol();
+      if (symbol) runners.add(symbol);
+    }
+  }
   for (const constructor of file.getDescendantsOfKind(SyntaxKind.NewExpression)) {
     const parent = constructor.getParent();
     const assignedKnownClient = parent && Node.isBinaryExpression(parent) && parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken
@@ -132,6 +148,15 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       if (moved && argument) addEdit(edits, file, argument, `'${moved}'`, 'moved-import');
     }
     if (!Node.isPropertyAccessExpression(expression)) continue;
+    const receiver = rootIdentifier(expression);
+    const onRunner = Boolean(receiver?.getSymbol() && runners.has(receiver.getSymbol()!)) || expression.getText().includes('.runTools(');
+    if (onRunner && expression.getName() === 'on') {
+      const event = call.getArguments()[0]?.getText().replace(/^['"]|['"]$/g, '');
+      const replacement = event ? RUN_TOOLS_EVENTS.get(event) : undefined;
+      if (replacement) addManual(result, file, call, `OpenAI v5 renames runTools event ${event} to ${replacement}; review the listener manually.`);
+    } else if (onRunner && expression.getName().startsWith('finalFunctionCall')) {
+      addManual(result, file, call, `OpenAI v5 renames ${expression.getName()} to ${expression.getName().replace('FunctionCall', 'FunctionToolCall')}; review the returned value manually.`);
+    }
     const parts = pathParts(expression);
     const root = rootIdentifier(expression);
     if (parts.length < 3 || !root?.getSymbol() || !clients.has(root.getSymbol()!)) continue;

@@ -150,4 +150,16 @@ client.files.del('file_1');
     expect(outcome.fileUpdates?.[0]?.contents).toContain("from 'openai/core/error'");
     expect(outcome.fileUpdates?.[0]?.contents).toContain("require('openai/core/error')");
   });
+
+  it('flags v4 runTools event and final method names for manual review', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+const client = new OpenAI();
+const runner = client.chat.completions.runTools({tools: []});
+runner.on('functionCall', () => {});
+runner.finalFunctionCall();
+`);
+    expect(outcome.manual.map((item) => item.reason).join(' ')).toMatch(/functionToolCall/);
+    expect(outcome.manual.map((item) => item.reason).join(' ')).toMatch(/finalFunctionToolCall/);
+    expect(outcome.fileUpdates).toEqual([]);
+  });
 });
