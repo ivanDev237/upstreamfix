@@ -68,12 +68,7 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       if (name) imported.add(name);
       for (const named of declaration.getNamedImports()) {
         if (named.getName() === 'OpenAI') imported.add(named.getAliasNode()?.getText() ?? 'OpenAI');
-        if (named.getName() === 'fileFromPath') addManual(result, file, named, 'OpenAI v5 removed fileFromPath; choose the supported upload helper manually.');
       }
-    }
-    if (declaration.getModuleSpecifierValue() === 'openai/uploads'
-      && declaration.getNamedImports().some((named) => named.getName() === 'fileFromPath')) {
-      addManual(result, file, declaration, 'openai/core/uploads does not export fileFromPath; choose an upload helper manually.');
     }
   }
   for (const declaration of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
@@ -88,6 +83,16 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
   if (file.getProject().getProgram().getSyntacticDiagnostics(file).some((item) => item.getCategory() === 1)) {
     result.manual.push({ file: file.getFilePath(), line: 1, reason: 'The source contains syntax errors; no OpenAI edits were applied.', snippet: '' });
     return;
+  }
+  // v5 removes this helper. It may be imported, re-exported, destructured from
+  // require(), or accessed through a namespace/computed property. Never move
+  // the module path while a reference remains: the new module has no export.
+  const removedUploadHelper = file.getDescendants().find((node) =>
+    (Node.isIdentifier(node) || Node.isStringLiteral(node)) &&
+    (Node.isStringLiteral(node) ? node.getLiteralText() : node.getText()) === 'fileFromPath');
+  if (removedUploadHelper) {
+    addManual(result, file, removedUploadHelper,
+      'OpenAI v5 removed fileFromPath; choose a supported upload helper manually. No edits were applied to this file.');
   }
   const clients = new Set<MorphSymbol>();
   for (const parameter of file.getDescendantsOfKind(SyntaxKind.Parameter)) {

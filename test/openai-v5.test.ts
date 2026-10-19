@@ -111,6 +111,17 @@ function make(obj: ClientOptions | OpenAI) {
     expect(outcome.manual.some((item) => item.reason.includes('fileFromPath'))).toBe(true);
   });
 
+  it.each([
+    "export { fileFromPath } from 'openai/uploads';\n",
+    "const { fileFromPath: upload } = require('openai/uploads');\nupload('/tmp/x');\n",
+    "import * as uploads from 'openai/uploads';\nuploads.fileFromPath('/tmp/x');\n",
+    "const uploads = require('openai/uploads');\nuploads['fileFromPath']('/tmp/x');\n",
+  ])('T32 withholds every removed fileFromPath form: %s', (source) => {
+    const outcome = migrate(source);
+    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual.some((item) => item.reason.includes('fileFromPath'))).toBe(true);
+  });
+
   it('flags changed path calls, destructured subclients and aliased runner methods', () => {
     const outcome = migrate(`import OpenAI from 'openai';
 const client = new OpenAI();
