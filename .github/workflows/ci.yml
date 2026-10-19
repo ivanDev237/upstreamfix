@@ -35,6 +35,10 @@ jobs:
         run: npx vitest run test/firebase-admin-real-sdk.test.ts
         env:
           UPSTREAMFIX_RUN_REAL_SDK_TESTS: '1'
+      - name: Compare published Firebase declarations
+        run: npx vitest run test/diff-api-real-sdk.test.ts
+        env:
+          UPSTREAMFIX_RUN_REAL_SDK_TESTS: '1'
       - name: Verify Stripe migrations against published SDK releases
         run: npx vitest run test/stripe-real-sdk.test.ts
         env:

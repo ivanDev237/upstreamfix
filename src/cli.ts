@@ -10,6 +10,7 @@ import { writeMigrationOnBranch } from './core/write-branch.js';
 import { assertWritesEnabled } from './core/safety.js';
 import { findApplicableMigrations, migrations } from './migrations/index.js';
 import { watchPackages } from './core/watch.js';
+import { diffPublishedApi } from './core/diff-api.js';
 
 function existingMigration(value: string): string {
   if (!migrations.some((migration) => migration.id === value)) {
@@ -25,6 +26,17 @@ export function createProgram(): Command {
     .description('Prepare and review automated code migrations for breaking SDK changes.')
     .showHelpAfterError()
     .exitOverride();
+
+  program
+    .command('diff-api')
+    .description('Compare published TypeScript declarations of two exact npm package versions.')
+    .argument('<package>', 'npm package name')
+    .argument('<old>', 'exact old version')
+    .argument('<new>', 'exact new version')
+    .action(async (packageName: string, oldVersion: string, newVersion: string) => {
+      const report = await diffPublishedApi(packageName, oldVersion, newVersion);
+      console.log(JSON.stringify(report, null, 2));
+    });
 
   program
     .command('watch')
