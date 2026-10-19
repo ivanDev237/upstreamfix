@@ -152,6 +152,7 @@ export function renderTerminalReport(markdown: string): string {
       inFence = !inFence;
       return line;
     }
+    if (!inFence && line.startsWith('|')) return line.replaceAll('<br>', '\n    ');
     if (inFence || !line.startsWith('- ')) return line;
     return line
       .replace(/&lt;/g, '<')

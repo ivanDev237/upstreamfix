@@ -14,6 +14,18 @@ it('counts pnpm peer-suffixed package upgrades as changes', () => {
 import { renderMarkdownReport, renderTerminalReport } from '../src/core/report.js';
 
 describe('migration report formatting', () => {
+  it('shows verification output line breaks as lines in the terminal, not literal HTML', () => {
+    const report = renderMarkdownReport(
+      { id: 'test', title: 'Test', fromMajor: 1, toMajor: 2, releasedAt: '2026-01-01', rules: [], guideUrl: 'https://example.invalid' },
+      { changes: [], manual: [], filesChanged: [], proposedFiles: [], manifestNotes: [], proposedDiff: [] },
+      true,
+      { status: 'failed', checks: [{ name: 'Types', command: 'npm run typecheck', status: 'failed', durationMs: 10, output: 'first line\nsecond line' }] },
+    );
+    expect(report).toContain('first line<br>second line');
+    const terminal = renderTerminalReport(report);
+    expect(terminal).not.toContain('<br>');
+    expect(terminal).toContain('first line\n    second line');
+  });
   it('shows readable console guidance while preserving escaped Markdown and code diffs', () => {
     const markdown = '# Report\n\n- Node\\.js requires `"engines": \\{ "node": "&gt;=22" \\}`.\n\n````diff\n+const raw = "&gt;=22";\n````\n';
     const terminal = renderTerminalReport(markdown);
