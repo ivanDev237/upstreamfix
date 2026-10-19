@@ -61,6 +61,18 @@ it('requires exact versions', () => {
   expect(() => validateExactVersion('22.0.0')).not.toThrow();
 });
 
+it('rejects an archive whose type entry resolves to no exported symbols', () => {
+  const empty = tar({ 'package/package.json': '{"types":"missing"}', 'package/index.d.ts': 'export interface Visible { id: string }' });
+  expect(() => compareApiFromTarballs('sample', '1.0.0', '2.0.0', empty, empty)).toThrow(/type|symbol/i);
+});
+
+it('resolves extensionless and module declaration entries and compares overloads', () => {
+  const old = tar({ 'package/package.json': '{"types":"types/index"}', 'package/types/index.d.mts': 'declare module "sample" { export function f(x: string): string; export function f(x: number): number; }' });
+  const next = tar({ 'package/package.json': '{"types":"types/index"}', 'package/types/index.d.mts': 'declare module "sample" { export function f(x: string): string; }' });
+  const report = compareApiFromTarballs('sample', '1.0.0', '2.0.0', old, next);
+  expect(report.changed.some((item) => item.symbol.includes('f'))).toBe(true);
+});
+
 it('fetches simulated npm metadata and tarballs while validating integrity', async () => {
   const old = tar({ 'package/package.json': '{"types":"index.d.ts"}', 'package/index.d.ts': 'export declare function oldApi(): void;' });
   const next = tar({ 'package/package.json': '{"types":"index.d.ts"}', 'package/index.d.ts': 'export declare function newApi(): void;' });

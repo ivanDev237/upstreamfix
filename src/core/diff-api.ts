@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import path from 'node:path';
-import { Node, Project } from 'ts-morph';
+import { Node, Project, SyntaxKind } from 'ts-morph';
 import { readBoundedJson } from './watch.js';
 
 const maxArchiveBytes = 15 * 1024 * 1024;
@@ -48,7 +48,7 @@ export function unpackDeclarationFiles(archive: Buffer, integrity?: string): Map
       throw new Error(`Package archive has an unsafe path: ${name}`);
     }
     if (!['0', '5'].includes(kind)) throw new Error(`Package archive contains an unsupported link or entry: ${name}`);
-    if (kind === '0' && (name.endsWith('.d.ts') || name === 'package/package.json')) {
+    if (kind === '0' && (/\.d\.(?:ts|mts|cts)$/.test(name) || name === 'package/package.json')) {
       files.set(name.slice('package/'.length), unpacked.subarray(offset + 512, offset + 512 + size).toString('utf8'));
     }
     offset += 512 + Math.ceil(size / 512) * 512;
@@ -62,6 +62,7 @@ function declaredEntries(files: Map<string, string>): string[] {
   const candidates = new Set<string>();
   if (typeof manifest.types === 'string') candidates.add(manifest.types);
   if (typeof manifest.typings === 'string') candidates.add(manifest.typings);
+  if (typeof manifest.main === 'string') candidates.add(manifest.main);
   function visit(value: unknown): void {
     if (!value || typeof value !== 'object') return;
     for (const [key, item] of Object.entries(value)) {
@@ -70,35 +71,52 @@ function declaredEntries(files: Map<string, string>): string[] {
     }
   }
   visit(manifest.exports);
+  visit(manifest.typesVersions);
   if (candidates.size === 0 && files.has('index.d.ts')) candidates.add('index.d.ts');
-  return [...candidates].map((entry) => path.posix.normalize(entry.replace(/^\.\//, '')))
-    .filter((entry) => !entry.startsWith('../') && !path.posix.isAbsolute(entry) && files.has(entry));
+  const resolved = new Set<string>();
+  for (const candidate of candidates) {
+    const entry = path.posix.normalize(candidate.replace(/^\.\//, ''));
+    if (entry.startsWith('../') || path.posix.isAbsolute(entry)) continue;
+    for (const form of [entry, `${entry}.d.ts`, `${entry}.d.mts`, `${entry}.d.cts`, path.posix.join(entry, 'index.d.ts'), entry.replace(/\.[cm]?js$/, '.d.ts')]) {
+      if (files.has(form)) resolved.add(form);
+    }
+  }
+  return [...resolved];
 }
 
 function declarations(files: Map<string, string>): Map<string, ApiFinding> {
   const project = new Project({ useInMemoryFileSystem: true, skipAddingFilesFromTsConfig: true, compilerOptions: { noResolve: false } });
   for (const [name, content] of files) {
-    if (name.endsWith('.d.ts')) project.createSourceFile(`/package/${name}`, content, { overwrite: true });
+    if (/\.d\.(?:ts|mts|cts)$/.test(name)) project.createSourceFile(`/package/${name}`, content, { overwrite: true });
   }
   const symbols = new Map<string, ApiFinding>();
   for (const entry of declaredEntries(files)) {
     const source = project.getSourceFile(`/package/${entry}`);
     if (!source) continue;
     const prefix = entry === 'index.d.ts' ? '' : `${entry}:`;
-    for (const [name, nodes] of source.getExportedDeclarations()) {
-      const node = nodes[0];
-      if (!node) continue;
-      const key = `${prefix}${name}`;
-      symbols.set(key, { symbol: key, after: node.getText().replace(/\s+/g, ' ').trim(), source: entry });
-      if (Node.isInterfaceDeclaration(node) || Node.isClassDeclaration(node)) {
-        for (const member of node.getMembers()) {
-          const named = member as typeof member & { getName?: () => string };
-          const memberName = named.getName?.();
-          if (!memberName) continue;
+    const collect = (declarations: ReturnType<typeof source.getExportedDeclarations>, scope: string): void => {
+      for (const [name, nodes] of declarations) {
+        if (nodes.length === 0) continue;
+        const key = `${scope}${name}`;
+        symbols.set(key, { symbol: key, after: nodes.map((node) => node.getText().replace(/\s+/g, ' ').trim()).join(' | '), source: entry });
+        const members = new Map<string, string[]>();
+        for (const node of nodes) {
+          if (!Node.isInterfaceDeclaration(node) && !Node.isClassDeclaration(node)) continue;
+          for (const member of node.getMembers()) {
+            const memberName = (member as typeof member & { getName?: () => string }).getName?.();
+            if (!memberName) continue;
+            members.set(memberName, [...(members.get(memberName) ?? []), member.getText().replace(/\s+/g, ' ').trim()]);
+          }
+        }
+        for (const [memberName, texts] of members) {
           const memberKey = `${key}.${memberName}`;
-          symbols.set(memberKey, { symbol: memberKey, after: member.getText().replace(/\s+/g, ' ').trim(), source: entry });
+          symbols.set(memberKey, { symbol: memberKey, after: texts.join(' | '), source: entry });
         }
       }
+    };
+    collect(source.getExportedDeclarations(), prefix);
+    for (const module of source.getDescendantsOfKind(SyntaxKind.ModuleDeclaration)) {
+      collect(module.getExportedDeclarations(), `${prefix}${module.getName()}.`);
     }
   }
   return symbols;
@@ -107,6 +125,7 @@ function declarations(files: Map<string, string>): Map<string, ApiFinding> {
 export function compareApiFromTarballs(packageName: string, oldVersion: string, newVersion: string, oldArchive: Buffer, newArchive: Buffer, oldIntegrity?: string, newIntegrity?: string): ApiReport {
   const before = declarations(unpackDeclarationFiles(oldArchive, oldIntegrity));
   const after = declarations(unpackDeclarationFiles(newArchive, newIntegrity));
+  if (before.size === 0 || after.size === 0) throw new Error('No exported type symbols were resolved from one or both package archives; the API comparison is incomplete.');
   const removed: ApiFinding[] = [];
   const changed: ApiFinding[] = [];
   const added: ApiFinding[] = [];
