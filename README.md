@@ -6,7 +6,7 @@
 
 ## Demo
 
-[View the illustrative terminal walkthrough](https://github.com/ivanDev237/upstreamfix/blob/main/docs/upstreamfix-demo.gif) of listing, scanning, and previewing a migration.
+[View the Firebase Admin migration walkthrough](https://github.com/ivanDev237/upstreamfix/blob/main/docs/upstreamfix-demo.gif), composed from real CLI preview output on a local example project. It shows the proposed diff; no project files are written.
 
 The frames show the intended command flow. Output varies with the project and migration findings.
 
