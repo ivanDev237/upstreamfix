@@ -20,6 +20,20 @@ function outcome(overrides: Partial<RunOutcome> = {}): RunOutcome {
 }
 
 describe('security of Markdown reports', () => {
+  it('redacts organization, GitHub, AWS and truncated private keys', () => {
+    const raw = [
+      'sk_org_1234567890abcdef',
+      'ghp_abcdefghijklmnopqrstuvwxyz123456',
+      'AKIAABCDEFGHIJKLMNOP',
+      '-----BEGIN ENCRYPTED PRIVATE KEY-----\nvery-secret-content',
+      '-----BEGIN PGP PRIVATE KEY BLOCK-----\nprivate-material',
+    ].join('\n');
+    const safe = maskSecrets(raw);
+    for (const secret of ['sk_org_1234567890abcdef', 'ghp_abcdefghijklmnopqrstuvwxyz123456', 'AKIAABCDEFGHIJKLMNOP', 'very-secret-content', 'private-material']) {
+      expect(safe).not.toContain(secret);
+      if (!['very-secret-content', 'private-material'].includes(secret)) expect(maskSecrets(secret)).not.toContain(secret);
+    }
+  });
   it('removes terminal controls from reports and terminal output', () => {
     const injected = 'normal\x1b]8;;https://evil.invalid\x07link\x1b]8;;\x07\x1b[2J';
     const markdown = renderMarkdownReport(migration, outcome({
