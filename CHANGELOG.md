@@ -5,8 +5,14 @@ series are experimental; review proposed migrations before applying them.
 
 ## Unreleased
 
-- Added a two-job GitHub Actions migration workflow: read-only migration and separately permissioned PR or issue publication.
-- Added validated `.upstreamfix.yml` configuration, isolated custom checks, and a pinned test-repository example.
+## 0.2.0
+
+- Added a two-job GitHub Action: migration and verification run without a write token in isolated Docker containers; a separate, permissioned job validates the artifact before opening a PR or a manual-work issue. The Action never merges changes.
+- Added a strict `.upstreamfix.yml` for schedule, exclusions, custom verification commands, reviewers, labels, and explicit experimental opt-ins.
+- Expanded `probe` with Docker-backed real-project diagnostic comparison and added type-derived fixtures to investigate exact SDK version changes without inventing migration rules.
+- Hardened report rendering, credential redaction, Git operations, container isolation, timeout handling, and benchmark execution.
+- Expanded Stripe v23 migration coverage and real-SDK checks while keeping payment-sensitive changes for manual review.
+- Added OpenAI v4-to-v5 rules as **experimental**. The migration is excluded from `scan` and the GitHub Action by default and requires explicit opt-in; real-project type regressions still require manual work.
 
 ## 0.1.3
 
