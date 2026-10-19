@@ -68,6 +68,8 @@ export async function verifyProposedMigration(
   try {
     await mkdir(projectCopy, { recursive: true });
     await mkdir(isolatedHome, { recursive: true });
+    // This cache is unique to the invocation and removed before returning. Project
+    // scripts never receive the user's npm cache path or credentials through env.
     await mkdir(path.join(isolatedHome, 'npm-cache'), { recursive: true });
     await Promise.all([
       writeFile(path.join(isolatedHome, 'npmrc.user'), '', 'utf8'),

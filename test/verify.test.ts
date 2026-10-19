@@ -95,6 +95,24 @@ describe('migration verification', () => {
     expect(await readFile(path.join(cwd, 'server.js'), 'utf8')).toBe(before);
   });
 
+  it('uses a fresh npm cache per verification instead of the user cache', async () => {
+    const cwd = await makeProject();
+    const seen: string[] = [];
+    for (let run = 0; run < 2; run++) {
+      const result = await verifyProposedMigration(cwd, [diff], {
+        execute: async (_command, args, _directory, env) => {
+          if (args[0] === 'install') seen.push(env.NPM_CONFIG_CACHE ?? '');
+          return { stdout: 'offline stub' };
+        },
+      });
+      expect(result.status).toBe('passed');
+    }
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    expect(seen.every((cache) => cache.includes('upstreamfix-verify-') && !cache.startsWith(path.join(os.homedir(), '.npm')))).toBe(true);
+    await Promise.all(seen.map(async (cache) => await expect(stat(cache)).rejects.toMatchObject({ code: 'ENOENT' })));
+  });
+
   it('refuses to verify a folder that is not a Git working tree', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-verify-not-git-'));
     temporaryDirectories.push(cwd);
