@@ -1,0 +1,36 @@
+name: Client Action PR checks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/client-migrations-pr.yml'
+      - '.github/workflows/client-migrations.yml'
+      - 'action.yml'
+      - 'src/action/**'
+      - 'test/action-*.test.ts'
+      - 'examples/action-test/**'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Test client Action safety and publication decisions
+        run: npx vitest run test/action-config.test.ts test/action-migrate.test.ts test/action-publish.test.ts test/action-workflow.test.ts

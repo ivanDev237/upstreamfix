@@ -17,8 +17,11 @@ describe('type-diff fixtures', () => {
   it('can run the real SDK check as a pinned reusable GitHub workflow', () => {
     const workflow = readFileSync(new URL('../.github/workflows/type-fixtures.yml', import.meta.url), 'utf8');
     expect(workflow).toContain('workflow_call:');
-    expect(workflow).toContain('repository: ivanDev237/upstreamfix');
-    expect(workflow).toContain('ref: ${{ inputs.source_sha }}');
+    expect(workflow).toContain('pull_request:');
+    expect(workflow).toContain('branches: [main]');
+    expect(workflow).toContain('contents: read');
+    expect(workflow).toContain("|| 'ivanDev237/upstreamfix'");
+    expect(workflow).toContain("github.event_name == 'pull_request' && github.sha || inputs.source_sha");
   });
   it('makes the temporary root traversable by the unprivileged Docker user', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-fixture-mode-'));

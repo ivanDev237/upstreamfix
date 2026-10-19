@@ -15,11 +15,23 @@ describe('client migration workflow security boundary', () => {
     expect(source).toContain('timeout-minutes:');
   });
 
-  it('runs only on schedule, dispatch or a reusable workflow call, never on PR events', () => {
+  it('keeps the privileged workflow off PR events and checks it in a read-only companion', () => {
     const source = workflow();
     expect(source).toContain('workflow_call:');
     expect(source).toContain('workflow_dispatch:');
-    expect(source).not.toMatch(/^\s+pull_request(?:_target)?:/m);
+    expect(source).not.toContain('  pull_request:');
+    expect(source).not.toContain('pull_request_target:');
+    const prCheck = readFileSync(path.join(root, '.github/workflows/client-migrations-pr.yml'), 'utf8');
+    expect(prCheck).toContain('  pull_request:');
+    expect(prCheck).toContain('branches: [main]');
+    expect(prCheck).toContain("'.github/workflows/client-migrations.yml'");
+    expect(prCheck).toContain('contents: read');
+    expect(prCheck).toContain('persist-credentials: false');
+    expect(prCheck).not.toContain('contents: write');
+    expect(prCheck).not.toContain('secrets.');
+    expect(prCheck).not.toContain('pull_request_target:');
+    expect(source.split('\n  migrate:')[1]!.split('\n  publish:')[0]).toContain("if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'");
+    expect(source.split('\n  publish:')[1]).toContain("if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'");
   });
 
   it('never checks out or executes customer code in the write-permission job', () => {

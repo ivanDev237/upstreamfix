@@ -1,6 +1,17 @@
 name: Public repository benchmark
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/benchmark.yml'
+      - 'src/migrations/openai-v5/**'
+      - 'src/migrations/index.ts'
+      - 'src/core/runner.ts'
+      - 'scripts/benchmark.ts'
+      - 'benchmark/openai-5-repos.json'
+      - 'package.json'
+      - 'package-lock.json'
   workflow_dispatch:
     inputs:
       migration:
@@ -23,7 +34,7 @@ permissions:
 
 jobs:
   benchmark:
-    name: ${{ inputs.migration }} public repositories
+    name: ${{ github.event_name == 'pull_request' && 'openai@5' || inputs.migration }} public repositories
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
@@ -45,7 +56,7 @@ jobs:
       - name: Run reviewed corpus in isolated containers
         shell: bash
         env:
-          BENCHMARK_MIGRATION: ${{ inputs.migration }}
+          BENCHMARK_MIGRATION: ${{ github.event_name == 'pull_request' && 'openai@5' || inputs.migration }}
           BENCHMARK_REPOSITORY: ${{ inputs.repository }}
           BENCHMARK_REPORT: ${{ runner.temp }}/upstreamfix-benchmark.md
         run: |

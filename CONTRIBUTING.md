@@ -77,8 +77,15 @@ never be added to a benchmark manifest.
 
 ### Run the benchmark on GitHub Actions
 
-Open **Actions → Public repository benchmark → Run workflow** on the default
-`develop` branch. Choose one reviewed migration corpus, optionally provide an
+Changes to the OpenAI migration, benchmark runner, reviewed corpus, or benchmark
+workflow also run the five-repository OpenAI corpus automatically on pull requests
+to `main`. The probe and type-derived fixtures have their own path-filtered PR
+workflows. Client Action changes run a separate read-only PR check; the reusable
+client workflow that can publish PRs is never triggered by a pull request. PR
+checks use no repository secrets and retain their reports as workflow artifacts.
+
+After the workflow has reached `main`, open **Actions → Public repository benchmark
+→ Run workflow**. Choose one reviewed migration corpus, optionally provide an
 exact repository name for a pilot, and start the run. The workflow gives its
 token read-only access, checks out without stored Git credentials, runs the
 same Docker isolation with a 4096 MiB container cap, and uploads the Markdown
