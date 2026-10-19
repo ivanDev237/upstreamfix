@@ -20,6 +20,13 @@ export interface TypeFixture {
 }
 export interface TypeFixtureSet { fixtures: TypeFixture[]; manual: ApiFinding[] }
 
+export function selectFixtureForMember(set: TypeFixtureSet, member: string): TypeFixture | undefined {
+  return set.fixtures.find((fixture) => {
+    const symbol = fixture.derivedFrom.symbol.slice(fixture.derivedFrom.symbol.lastIndexOf(':') + 1);
+    return symbol === member || symbol.endsWith(`.${member}`);
+  });
+}
+
 /** The supported shapes come from public type declarations; unknown shapes stay manual. */
 export function generateTypeFixtures(report: ApiReport): TypeFixtureSet {
   validateExactVersion(report.oldVersion);

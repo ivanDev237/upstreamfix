@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { diffPublishedApi } from '../src/core/diff-api.js';
-import { generateTypeFixtures, makeFixtureReadable, validateFixtureDiagnostics, type TypeFixture } from '../src/core/type-fixtures.js';
+import { generateTypeFixtures, makeFixtureReadable, selectFixtureForMember, validateFixtureDiagnostics, type TypeFixture } from '../src/core/type-fixtures.js';
 
 const cases = [
   { packageName: 'stripe', oldVersion: '22.4.0', newVersion: '23.0.0', member: 'payment_method_types' },
@@ -60,8 +60,7 @@ for (const target of cases) {
   const report = await diffPublishedApi(target.packageName, target.oldVersion, target.newVersion);
   if (process.env.UPSTREAMFIX_DIFF_DIR) await writeFile(path.join(process.env.UPSTREAMFIX_DIFF_DIR, `api-diff-${target.packageName}.json`), JSON.stringify(report, null, 2));
   const generated = generateTypeFixtures(report);
-  const fixture = generated.fixtures.find((item) => item.derivedFrom.symbol.endsWith(`.${target.member}`)
-    || item.derivedFrom.symbol === target.member);
+  const fixture = selectFixtureForMember(generated, target.member);
   if (!fixture) throw new Error(`No reproducible ${target.member} fixture derived from ${target.packageName} declarations. Removed candidates: ${report.removed.filter((item) => item.symbol.includes(target.member)).map((item) => item.symbol).join(', ') || 'none'}. Changed candidates: ${report.changed.filter((item) => item.symbol.includes(target.member)).map((item) => item.symbol).join(', ') || 'none'}. Review the full uploaded type diff.`);
   const oldDiagnostics = await compile(fixture, target.oldVersion);
   const newDiagnostics = await compile(fixture, target.newVersion);

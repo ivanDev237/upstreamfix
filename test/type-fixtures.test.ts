@@ -4,7 +4,7 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { ApiReport } from '../src/core/diff-api.js';
-import { generateTypeFixtures, makeFixtureReadable } from '../src/core/type-fixtures.js';
+import { generateTypeFixtures, makeFixtureReadable, selectFixtureForMember } from '../src/core/type-fixtures.js';
 
 const report = (packageName: string, symbol: string): ApiReport => ({
   package: packageName, oldVersion: packageName === 'stripe' ? '22.5.0' : '13.10.0',
@@ -45,6 +45,10 @@ describe('type-diff fixtures', () => {
     const generated = generateTypeFixtures(report('firebase-admin', 'firestore'));
     expect(generated.fixtures[0]?.source).toContain('typeof admin.firestore');
     expect(generated.fixtures[0]?.expectedNewDiagnostic).toBe(2339);
+  });
+  it('selects a removed member despite the declaration entrypoint prefix', () => {
+    const set = generateTypeFixtures(report('firebase-admin', 'lib/index.d.ts:firestore'));
+    expect(selectFixtureForMember(set, 'firestore')?.derivedFrom.symbol).toBe('lib/index.d.ts:firestore');
   });
 
   it('does not invent a fixture for an ambiguous difference', () => {
