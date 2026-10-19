@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { reconcileProposal, validateProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, type Proposal, type ProposalPublisher } from './publish.js';
+import { reconcileProposal, validateProposal, validateProposalEnvelope, parseSafeRawDiff, parseCommitParents, findManagedIssue, type Proposal, type ProposalPublisher } from './publish.js';
 import { parseActionConfig } from './config.js';
 
 const execFile = promisify(execFileCallback);
@@ -84,6 +84,7 @@ async function findIssue(proposal: Proposal, state = 'open'): Promise<number | u
 for (const proposal of proposals) {
   let bareRoot: string | undefined;
   try {
+    validateProposalEnvelope(proposal, expectedBase, reviewedConfig);
     let parents: string[] = [];
     let changedFiles: string[] = [];
     if (proposal.status === 'ready') {

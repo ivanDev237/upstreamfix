@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { validateProposal, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
+import { validateProposal, validateProposalEnvelope, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
 
 const base = 'a'.repeat(40);
 const commit = 'b'.repeat(40);
@@ -10,6 +10,10 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('rejects hostile branch and commit metadata before bundle or Git access', () => {
+    expect(() => validateProposalEnvelope({ ...proposal, branch: '--upload-pack=evil' }, base)).toThrow('branch');
+    expect(() => validateProposalEnvelope({ ...proposal, commit: '--upload-pack=evil' }, base)).toThrow('commit');
+  });
   it('finds only bot-authored manual issues with the exact hidden marker', () => {
     const human = { number: 1, title: 'UpstreamFix: manual firebase-admin@14', body: '<!-- upstreamfix:manual:firebase-admin@14 -->', user: { login: 'person' } };
     const bot = { number: 102, title: human.title, body: human.body, user: { login: 'github-actions[bot]' } };

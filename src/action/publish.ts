@@ -78,18 +78,27 @@ export function parseSafeRawDiff(raw: string): string[] {
 }
 
 /** Metadata is untrusted until a separate Git bundle inspection confirms it. */
-export function validateProposal(proposal: Proposal, expectedBase: string, parents: string[], changedFiles: string[], config?: Pick<ActionConfig, 'reviewers' | 'labels'>): void {
+export function validateProposalEnvelope(proposal: Proposal, expectedBase: string, config?: Pick<ActionConfig, 'reviewers' | 'labels'>): void {
+  if (!proposal || typeof proposal !== 'object') throw new Error('Invalid proposal metadata.');
   if (proposal.schema !== 1 || !migrations.some((migration) => migration.id === proposal.migration)) throw new Error('Unknown proposal schema or migration.');
   if (!sha.test(proposal.base) || proposal.base !== expectedBase) throw new Error('Proposal base does not match the reviewed default-branch commit.');
   const expectedBranch = `upstreamfix/${proposal.migration.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')}`;
   if (proposal.branch !== expectedBranch) throw new Error('Proposal branch is outside the approved upstreamfix namespace.');
   if (!['ready', 'manual', 'none'].includes(proposal.status) || !['passed', 'failed', 'skipped'].includes(proposal.verification)) throw new Error('Invalid proposal status.');
+  if (!Array.isArray(proposal.files) || !proposal.files.every((file) => typeof file === 'string')
+    || !Array.isArray(proposal.reviewers) || !Array.isArray(proposal.labels) || typeof proposal.report !== 'string') throw new Error('Invalid proposal metadata types.');
   if (proposal.report.length > 100_000 || proposal.reviewers.length > 20 || proposal.labels.length > 20) throw new Error('Proposal metadata exceeds its limits.');
   if (!proposal.reviewers.every((value) => typeof value === 'string' && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(value))) throw new Error('Proposal reviewers are invalid.');
   if (!proposal.labels.every((value) => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9 _.-]{0,49}$/.test(value) && !/(?:auto[ _.-]*merge|merge[ _.-]*queue|merge[ _.-]*when[ _.-]*ready)/i.test(value))) throw new Error('Proposal labels are invalid or enable automatic merge.');
   if (config && (!sameList(proposal.reviewers, config.reviewers) || !sameList(proposal.labels, config.labels))) {
     throw new Error('Proposal reviewers or labels differ from the reviewed base configuration.');
   }
+  if (proposal.status === 'ready' && (!proposal.commit || !sha.test(proposal.commit))) throw new Error('A ready proposal requires a valid commit SHA.');
+  if (proposal.status !== 'ready' && proposal.commit) throw new Error('A non-ready proposal cannot contain a commit.');
+}
+
+export function validateProposal(proposal: Proposal, expectedBase: string, parents: string[], changedFiles: string[], config?: Pick<ActionConfig, 'reviewers' | 'labels'>): void {
+  validateProposalEnvelope(proposal, expectedBase, config);
   if (proposal.status === 'ready') {
     if (!proposal.commit || !sha.test(proposal.commit) || proposal.verification !== 'passed' || parents.length !== 1 || parents[0] !== proposal.base) {
       throw new Error('A ready proposal requires one verified commit with exactly the expected base parent.');
