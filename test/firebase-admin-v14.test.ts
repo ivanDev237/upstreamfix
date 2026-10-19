@@ -32,8 +32,15 @@ describe('firebase-admin v14 migration', () => {
     await writeFile(path.join(cwd, 'server.ts'), "import * as admin from 'firebase-admin';\nconst db = admin.app().database(admin.app().options.databaseURL);\nconsole.log(db);\n");
     const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
     expect(outcome.proposedFiles.some((file) => file.relativePath === 'server.ts')).toBe(false);
-    expect(outcome.manual.some((item) => item.reason.includes('overlap'))).toBe(true);
+    expect(outcome.manual.some((item) => item.reason.includes('overlap') || item.reason.includes('arguments'))).toBe(true);
     expect(outcome.changes.filter((item) => item.file.endsWith('server.ts'))).toHaveLength(0);
+  });
+  it('does not discard arguments to an app-scoped database getter', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'server.ts'), "import * as admin from 'firebase-admin';\nconst db = admin.app().database('https://other.example');\n");
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(outcome.manual.some((item) => item.reason.includes('arguments'))).toBe(true);
+    expect(outcome.proposedFiles.some((file) => file.relativePath === 'server.ts')).toBe(false);
   });
   it('does not launch a full Yarn installation merely to preview a lockfile', async () => {
     const cwd = await makeProject();

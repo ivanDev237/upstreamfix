@@ -218,6 +218,11 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
     }
   }
 
+  if (result.manual.slice(manualBefore).some((item) => item.reason.startsWith('App-scoped ') && item.reason.includes('arguments'))) {
+    sortManual(result.manual, manualBefore);
+    return false;
+  }
+
   if (edits.length === 0) {
     if (result.manual.length > manualBefore) sortManual(result.manual, manualBefore);
     return false;
@@ -325,6 +330,9 @@ function classifyAccess(access: PropertyAccessExpression): Classification {
         const serviceName = serviceAccess.getName();
         const nestedService = Object.hasOwn(SERVICES, serviceName) ? SERVICES[serviceName] : undefined;
         if (nestedService) {
+          if (serviceCall.getArguments().length > 0) {
+            return { reason: `App-scoped ${serviceName} call has arguments; choose the equivalent modular API manually so its target is preserved.` };
+          }
           return {
             node: serviceCall,
             text: `${nestedService.getter}()`,
