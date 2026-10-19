@@ -188,7 +188,7 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
 
     if (alias.kind === 'cjs') {
       for (const type of sourceFile.getDescendantsOfKind(SyntaxKind.TypeReference)) {
-        if (!new RegExp(`\\b${alias.name}\\s*\\.`).test(type.getText())) continue;
+        if (!aliasMemberPattern(alias.name).test(type.getText())) continue;
         aliasesWithManualUses.add(alias.name);
         result.manual.push({ file, line: type.getStartLineNumber(), reason: 'A type-only Firebase reference from require needs a manual import type; no runtime require was synthesized.', snippet: snippetOf(type) });
       }
@@ -285,8 +285,7 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
   textEdits.push(...aliasDeclarationRemovals(sourceFile, aliases, aliasesWithManualUses));
   const transformed = applyTextEdits(sourceFile.getFullText(), textEdits);
   for (const alias of aliases) {
-    const name = alias.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    if (!aliasesWithManualUses.has(alias.name) && new RegExp(`\\b${name}\\s*(?:\\.|\\[)`).test(transformed)) {
+    if (!aliasesWithManualUses.has(alias.name) && aliasMemberPattern(alias.name).test(transformed)) {
       result.manual.push({
         file,
         line: alias.nameNode.getStartLineNumber(),
@@ -304,6 +303,11 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
 
   if (result.manual.length > manualBefore) sortManual(result.manual, manualBefore);
   return true;
+}
+
+function aliasMemberPattern(alias: string): RegExp {
+  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\w$])${escaped}\\s*[.\\[]`);
 }
 
 function classify(ref: Identifier): Classification {
