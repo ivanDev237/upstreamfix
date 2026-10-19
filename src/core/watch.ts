@@ -38,15 +38,19 @@ export async function watchPackages(
       if (error.code === 'ENOENT') return { versions: {}, events: [] };
       throw error;
     });
-  if (!previous.versions || typeof previous.versions !== 'object' || !Array.isArray(previous.events)) throw new Error('Invalid watch state file.');
-  const versions = { ...previous.versions };
-  const events: WatchEvent[] = [];
+  if (!previous || !previous.versions || typeof previous.versions !== 'object' || Array.isArray(previous.versions) || !Array.isArray(previous.events)
+    || Object.values(previous.versions).some((version) => !exactVersion(version))
+    || previous.events.some((event) => !event || typeof event.package !== 'string' || !exactVersion(event.from) || !exactVersion(event.to))) {
+    throw new Error('Invalid watch state file.');
+  }
+  const versions: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, previous.versions);
+  const events: WatchEvent[] = [...previous.events];
   for (const packageName of [...new Set(packages)]) {
     const latest = await lookup(packageName);
     if (!exactVersion(latest)) throw new Error(`Invalid version for ${packageName}.`);
-    const old = versions[packageName];
+    const old = Object.hasOwn(versions, packageName) ? versions[packageName] : undefined;
     if (old && Number(latest.split('.')[0]) > Number(old.split('.')[0])) events.push({ package: packageName, from: old, to: latest });
-    versions[packageName] = latest;
+    if (!old || compareVersions(latest, old) > 0) versions[packageName] = latest;
   }
   const next: WatchState = { versions, events };
   const absolute = path.resolve(statePath);
@@ -59,4 +63,13 @@ export async function watchPackages(
     await rm(temporary, { force: true });
   }
   return next;
+}
+
+function compareVersions(left: string, right: string): number {
+  const a = left.split(/[.-]/).slice(0, 3).map(Number);
+  const b = right.split(/[.-]/).slice(0, 3).map(Number);
+  for (let index = 0; index < 3; index++) {
+    if (a[index]! !== b[index]!) return a[index]! - b[index]!;
+  }
+  return 0;
 }

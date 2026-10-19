@@ -26,3 +26,17 @@ it('preserves the previous state when one registry request fails', async () => {
   await expect(watchPackages(state, ['stripe'], async () => { throw new Error('offline'); })).rejects.toThrow('offline');
   expect(await readFile(state, 'utf8')).toBe(original);
 });
+
+it('rejects invalid stored versions without losing earlier events or lowering a version', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-watch-hostile-'));
+  roots.push(root);
+  const state = path.join(root, 'watch.json');
+  await writeFile(state, JSON.stringify({ versions: { stripe: 22 }, events: [] }));
+  await expect(watchPackages(state, ['stripe'], async () => '23.0.0')).rejects.toThrow('Invalid watch state');
+  const earlier = { package: 'stripe', from: '21.0.0', to: '22.0.0' };
+  await writeFile(state, JSON.stringify({ versions: { stripe: '23.0.0' }, events: [earlier] }));
+  const result = await watchPackages(state, ['stripe', 'constructor'], async (name) => name === 'stripe' ? '22.0.0' : '1.0.0');
+  expect(result.versions.stripe).toBe('23.0.0');
+  expect(result.versions.constructor).toBe('1.0.0');
+  expect(result.events).toEqual([earlier]);
+});
