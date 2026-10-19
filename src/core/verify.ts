@@ -312,7 +312,7 @@ async function installCommand(
     const yarnBerry = version >= 2 || (await readFile(path.join(lockRoot, 'yarn.lock'), 'utf8').catch(() => '')).includes('__metadata:');
     return {
       command: 'yarn',
-      args: ['install', '--non-interactive', ...(yarnBerry ? ['--mode=skip-builds'] : ['--ignore-scripts'])],
+      args: ['install', ...(yarnBerry ? ['--mode=skip-builds'] : ['--ignore-scripts'])],
       cwd: lockRoot,
     };
   }
@@ -453,6 +453,8 @@ function sanitizedEnvironment(home: string): NodeJS.ProcessEnv {
   env.NPM_CONFIG_USERCONFIG = path.join(home, 'npmrc.user');
   env.NPM_CONFIG_GLOBALCONFIG = path.join(home, 'npmrc.global');
   env.NPM_CONFIG_CACHE = path.join(home, 'npm-cache');
+  env.YARN_NODE_LINKER = 'node-modules';
+  env.YARN_ENABLE_SCRIPTS = 'false';
   env.CI = '1';
   env.COREPACK_ENABLE_UNSAFE_CUSTOM_URLS = '0';
   return env;

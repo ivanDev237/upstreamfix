@@ -310,6 +310,21 @@ describe('migration verification', () => {
     expect(commands).toContain('yarn run test');
   });
 
+  it('runs Yarn Berry without unsupported CLI flags and with the node-modules linker', async () => {
+    const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"' }, 'yarn@4.0.0');
+    let install: { args: string[]; env: NodeJS.ProcessEnv } | undefined;
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (command, args, _commandCwd, env) => {
+        if (command === 'yarn' && args[0] === 'install') install = { args, env };
+        return { stdout: 'offline stub' };
+      },
+    });
+    expect(result.status).toBe('passed');
+    expect(install?.args).not.toContain('--non-interactive');
+    expect(install?.env.YARN_NODE_LINKER).toBe('node-modules');
+    expect(install?.env.YARN_ENABLE_SCRIPTS).toBe('false');
+  });
+
   it('kills the timed out script process group, including its child process', async () => {
     const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"' });
     const marker = path.join(cwd, 'surviving-child.txt');
