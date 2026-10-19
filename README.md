@@ -24,11 +24,29 @@ The report path is explicit; preview commands do not create report files unless 
 
 ## GitHub Action
 
-Copy the [client workflow example](examples/action-test/.github/workflows/upstreamfix.yml) into your repository and pin both references to the same reviewed UpstreamFix commit SHA. The reusable workflow runs on a schedule or by manual dispatch. Its first job checks out your code without stored credentials, uses only `contents: read`, prepares a verified migration in a temporary copy, and uploads a Git bundle and redacted report. Its second job downloads and validates that bundle, then opens or updates a pull request. It opens an issue when manual review is needed and never merges a PR.
+### Install in under five minutes
 
-An optional `.upstreamfix.yml` supports `frequency` (`daily`, `weekly`, `manual`), `ignore`, `exclude`, `verify`, `reviewers`, `labels`, and `experimental`. Each list uses one `  - value` line per item. Custom `verify` commands run only in the first job's isolated verification copy. The config cannot increase permissions or turn off verification. A repository with no configured checks will not receive an automatic migration PR. To try OpenAI v5 in the Action, add `experimental:` and put `  - openai@5` on the next line of the reviewed config; it is excluded by default.
+1. In your repository, open **Settings → Actions → General**. Allow GitHub Actions and reusable workflows, then enable **Allow GitHub Actions to create and approve pull requests**. GitHub combines creation and approval in one repository setting; UpstreamFix creates PRs but does not approve or merge them. Keep the default `GITHUB_TOKEN` setting at read access if you prefer: the workflow requests its own permissions below. [GitHub settings guide](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository).
+2. Copy [this workflow](examples/action-test/.github/workflows/upstreamfix.yml) to `.github/workflows/upstreamfix.yml` in your repository. It grants exactly `contents: write`, `pull-requests: write`, `issues: write`, and `actions: write` to the reusable workflow. The migration job reduces its own token to `contents: read`; only the separate publication job receives write access. No secret or personal token is needed.
+3. Replace both `REPLACE_WITH_REVIEWED_MAIN_SHA` values with the **same reviewed 40-character commit SHA** already on UpstreamFix `main`. For a version tag, you may use `@v0.2.0` in the `uses:` line after that tag exists, but keep `upstreamfix_sha:` set to the exact SHA to which the tag points. A release tag and a main commit are accepted; a `develop` commit is refused. A full SHA is the safer pin. [GitHub reusable-workflow guide](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows).
+4. If your repository has `.github/workflows/ci.yml` on its default branch, keep `ci_workflow: ci.yml` in the copied example and add `workflow_dispatch:` to that CI workflow's `on:` triggers. Otherwise remove the `ci_workflow:` line. Commit the workflow, then open **Actions → UpstreamFix API migrations → Run workflow**. The example also runs weekly; change its `schedule` if needed.
+5. Read the result. UpstreamFix opens or updates a PR only when the migration and configured checks pass. It opens an issue for manual work. Review the diff, report, and official SDK guide before merging.
 
-Pull requests created with the default `GITHUB_TOKEN` do not trigger the repository's normal `pull_request` workflows. Run your CI manually on the proposed branch, or adapt the publication job to use a narrowly scoped GitHub App token or fine-grained PAT supplied by your organization. Review the report, the official migration guide, and the PR diff before merging.
+The first job checks out your code without stored credentials, installs dependencies without lifecycle scripts, verifies project checks in an isolated Docker container, and uploads a redacted report and Git bundle. The second job validates the bundle and publishes a PR or issue. Both jobs have time limits. A repository without a usable typecheck or test will not receive an automatic PR.
+
+An optional `.upstreamfix.yml` supports `frequency` (`daily`, `weekly`, `manual`), `ignore`, `exclude`, `verify`, `reviewers`, `labels`, and `experimental`. Each list uses one `  - value` line per item. For example:
+
+```yaml
+frequency: weekly
+verify:
+  - npm run typecheck
+ignore:
+  - stripe@23
+```
+
+Custom checks run only in the isolated verification job. This file cannot increase permissions or disable verification. OpenAI v5 is experimental and excluded by default; add `experimental:` followed by `  - openai@5` only after reviewing its limits.
+
+The repository's `GITHUB_TOKEN` may leave `pull_request` checks for a bot-created PR awaiting **Approve workflows to run**. When `ci_workflow` names a CI workflow that supports `workflow_dispatch`, UpstreamFix dispatches it on the verified migration branch after opening or updating the PR. If the dispatch fails, the PR remains open with a warning. This avoids relying on a new `pull_request` event to start CI. [GitHub token behavior](https://docs.github.com/en/actions/concepts/security/github_token). UpstreamFix does not merge automatically.
 
 ## Supported migrations
 
