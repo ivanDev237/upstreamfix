@@ -3,13 +3,16 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { dockerBindArgs } from '../src/core/docker-mount.js';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { Project } from 'ts-morph';
 import type { Migration, PackageManifest } from '../src/core/types.js';
-import { maskSecrets } from '../src/core/report.js';
+import { escapeUntrustedMarkdownCell as cell, maskSecrets } from '../src/core/report.js';
 import { newTypeScriptDiagnostics, parseTypeScriptDiagnostics } from '../src/core/diagnostic-diff.js';
-import { runMigration } from '../src/core/runner.js';
+import { runMigration, type RunOutcome } from '../src/core/runner.js';
+import { applyProposedFiles } from '../src/core/verify.js';
+import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from '../src/core/project-discovery.js';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 import { migrations } from '../src/migrations/index.js';
 
@@ -145,12 +148,11 @@ async function run(command: string, args: string[], cwd: string, home: string, t
 }
 
 async function filesBelow(root: string): Promise<string[]> {
-  const ignored = new Set(['.git', 'node_modules', 'dist', 'coverage', '.next', '.yarn']);
   const files: string[] = [];
   async function visit(directory: string): Promise<void> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        if (!ignored.has(entry.name)) await visit(path.join(directory, entry.name));
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) await visit(path.join(directory, entry.name));
       } else if (entry.isFile() && /\.(?:[cm]?js|jsx|tsx?)$/i.test(entry.name) && !entry.name.endsWith('.d.ts')) {
         files.push(path.join(directory, entry.name));
       }
@@ -165,7 +167,7 @@ async function packageFilesBelow(root: string): Promise<string[]> {
   async function visit(directory: string): Promise<void> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        if (!new Set(['.git', 'node_modules', 'dist', 'coverage', '.next', '.yarn']).has(entry.name)) await visit(path.join(directory, entry.name));
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) await visit(path.join(directory, entry.name));
       } else if (entry.isFile() && entry.name === 'package.json') files.push(path.join(directory, entry.name));
     }
   }
@@ -246,13 +248,9 @@ async function findMigrationPackages(root: string, migration: Migration): Promis
     const range = [manifest.dependencies, manifest.devDependencies, manifest.optionalDependencies, manifest.peerDependencies]
       .map((section) => section?.[migration.packageName])
       .find((value): value is string => typeof value === 'string');
-    if (range && isMajorRange(range, migration.fromMajor)) dirs.push(path.dirname(file));
+    if (range && isSupportedSourceMajor(range, migration.fromMajor)) dirs.push(path.dirname(file));
   }
   return dirs;
-}
-
-function isMajorRange(range: string, major: number): boolean {
-  return new RegExp(`^\\s*(?:[~^=]|>=?\\s*)?${major}(?:\\.(?:\\d+|x|\\*)){0,2}(?:\\s|$)`, 'i').test(range);
 }
 
 async function installDirs(root: string, migrationDirs: string[], repo: BenchRepo): Promise<string[]> {
@@ -281,7 +279,7 @@ async function clearPackageManagerCredentialFiles(root: string): Promise<void> {
   async function visit(directory: string): Promise<void> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        if (!new Set(['.git', 'node_modules', 'dist', 'coverage', '.next', '.yarn']).has(entry.name)) await visit(path.join(directory, entry.name));
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) await visit(path.join(directory, entry.name));
       } else if (entry.isFile() && secretBearingConfigNames.has(entry.name)) {
         await rm(path.join(directory, entry.name), { force: true });
       }
@@ -358,8 +356,8 @@ export function buildBenchmarkInstallDockerArgs(checkout: string, packageDir: st
   const dockerArgs = [
     'run', '--rm', '--network=bridge', ...dockerMemoryArgs(limits, uid, gid), '--cpus=1', '--pids-limit=256',
     '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user', `${uid}:${gid}`,
-    '--mount', `type=bind,source=${checkout},target=/workspace`, '--mount', `type=bind,source=${path.join(checkout, '.git')},target=/workspace/.git,readonly`,
-    '--mount', `type=bind,source=${cacheDir},target=/cache`,
+    ...dockerBindArgs(checkout, '/workspace'), ...dockerBindArgs(path.join(checkout, '.git'), '/workspace/.git', true),
+    ...dockerBindArgs(cacheDir, '/cache'),
     '--workdir', `/workspace/${relativeDir}`, '--env', 'HOME=/home/benchmark', '--env', 'CI=1',
     '--env', 'NPM_CONFIG_USERCONFIG=/home/benchmark/npmrc.user', '--env', 'NPM_CONFIG_GLOBALCONFIG=/home/benchmark/npmrc.global',
     '--env', 'NPM_CONFIG_AUDIT=false', '--env', 'NPM_CONFIG_FUND=false', '--env', 'NPM_CONFIG_CACHE=/cache/npm',
@@ -393,7 +391,7 @@ async function ensureTargetMajorInBenchmarkCopy(root: string, packageDirs: strin
     const exactTarget = `${migration.toMajor}.0.0`;
     for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'] as const) {
       const current = manifest[section]?.[migration.packageName];
-      if (current && (isMajorRange(current, migration.fromMajor) || isMajorRange(current, migration.toMajor)) && current !== exactTarget) {
+      if (current && (isSupportedSourceMajor(current, migration.fromMajor) || isSupportedSourceMajor(current, migration.toMajor)) && current !== exactTarget) {
         manifest[section]![migration.packageName] = exactTarget;
         changed = true;
       }
@@ -429,8 +427,8 @@ async function runIsolatedDockerScript(
   const dockerArgs = [
     'run', '--rm', '--network=none', ...dockerMemoryArgs(limits, uid, gid), '--cpus=1', '--pids-limit=256', '--read-only',
     '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user', `${uid}:${gid}`,
-    '--mount', `type=bind,source=${checkout},target=/workspace`, '--mount', `type=bind,source=${path.join(checkout, '.git')},target=/workspace/.git,readonly`, '--workdir', `/workspace/${relativeDir}`,
-    '--env', 'HOME=/home/benchmark', '--env', 'CI=1', '--env', 'NODE_OPTIONS=--max-old-space-size=3072', ...containerEnvArgs(env), nodeImage,
+    ...dockerBindArgs(checkout, '/workspace'), ...dockerBindArgs(path.join(checkout, '.git'), '/workspace/.git', true), '--workdir', `/workspace/${relativeDir}`,
+    '--env', 'HOME=/home/benchmark', '--env', 'CI=1', '--env', `NODE_OPTIONS=--max-old-space-size=${Math.max(256, limits.memoryMb - 256)}`, ...containerEnvArgs(env), nodeImage,
     ...(inferredTsc ? ['npm', 'exec', '--no', '--', 'tsc', '--noEmit'] : ['npm', 'run', '--ignore-scripts', selectedScript!]),
   ];
   try {
@@ -477,6 +475,10 @@ async function runPhaseChecks(
   const typecheck = await runForAll(typecheckScript, 'typecheck');
   const tests = await runForAll(testScript, 'test');
   return { typecheck, tests };
+}
+
+export async function analyzeBenchmarkMigration(migration: Migration, checkout: string): Promise<RunOutcome> {
+  return runMigration(migration, { cwd: checkout, dryRun: true, analysisOnly: true });
 }
 
 export async function benchmarkOne(
@@ -528,23 +530,15 @@ export async function benchmarkOne(
     await run('git', ['clean', '-fdx'], checkout, home);
     await clearPackageManagerCredentialFiles(checkout);
 
-    const outcome = await runMigration(migration, { cwd: checkout, dryRun: true });
+    const outcome = await analyzeBenchmarkMigration(migration, checkout);
     result.migrated = outcome.changes.length;
     result.manual = outcome.manual.length;
     result.usages = result.migrated + result.manual;
     result.details = outcome.manifestNotes.join(' ');
 
-    await validatePatchPaths(outcome.proposedDiff);
-    if (outcome.proposedDiff.length > 0) {
-      const patch = path.join(root, `${repo.name.replace(/[^A-Za-z0-9_.-]/g, '_')}.patch`);
-      await writeFile(patch, `${outcome.proposedDiff.join('\n')}\n`, 'utf8');
-      try {
-        await run('git', ['apply', '--check', patch], checkout, home);
-        await run('git', ['apply', patch], checkout, home);
-      } finally {
-        await rm(patch, { force: true });
-      }
-    }
+    // Display diffs may summarize large lockfiles and are not guaranteed to be
+    // executable patches. Apply the exact, path-checked file changes instead.
+    await applyProposedFiles(checkout, outcome.proposedFiles);
 
     const changedSources = outcome.filesChanged
       .filter((file) => /\.(?:[cm]?js|jsx|tsx?)$/i.test(file) && !file.endsWith('.d.ts'))
@@ -604,12 +598,6 @@ export function renderBenchmarkReport(
     '', `Project checks run only inside Docker image \`${nodeImage}\` with networking disabled. Dependency installation runs in Docker with no host credentials; lifecycle scripts are disabled.`, '',
   ];
   return lines.join('\n');
-}
-
-function cell(value: string): string {
-  return maskSecrets(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/`/g, '&#96;').replace(/\[/g, '&#91;').replace(/\]/g, '&#93;')
-    .replaceAll('|', '&#124;').replace(/[\r\n]+/g, ' ').trim();
 }
 
 async function main(): Promise<void> {

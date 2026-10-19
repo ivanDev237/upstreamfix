@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -7,6 +7,7 @@ import type { Migration, PackageManifest } from './types.js';
 import { runMigration, type RunOutcome } from './runner.js';
 import { applyProposedFiles, verifyProposedMigration, type VerificationOptions, type VerificationResult } from './verify.js';
 import { registerTemporaryCleanup } from './process-cleanup.js';
+import { parseManifest } from './manifest.js';
 
 const execFile = promisify(execFileCallback);
 
@@ -14,6 +15,7 @@ export interface WriteBranchOptions {
   cwd: string;
   allowDirty?: boolean;
   nodeRuntime?: 22;
+  allowYarnLockInstall?: boolean;
   timeoutMs?: number;
   /** Test seam for exercising the branch transaction without contacting a package registry. */
   verificationOptions?: VerificationOptions;
@@ -36,7 +38,7 @@ export async function writeMigrationOnBranch(
   migration: Migration,
   options: WriteBranchOptions,
 ): Promise<WriteBranchResult> {
-  const cwd = path.resolve(options.cwd);
+  const cwd = await realpath(path.resolve(options.cwd));
   const repositoryRoot = await git(cwd, ['rev-parse', '--show-toplevel']).then((value) => value.trim()).catch(() => {
     throw new Error('--write requires the project directory to be inside a Git repository.');
   });
@@ -67,14 +69,14 @@ export async function writeMigrationOnBranch(
   const unregisterCleanup = registerTemporaryCleanup(async () => {
     if (worktreeAdded) await git(repositoryRoot, ['worktree', 'remove', '--force', worktree]).catch(() => undefined);
     await rm(worktreeParent, { recursive: true, force: true });
-    if (branchCreated && !committed) await git(repositoryRoot, ['branch', '-D', branch]).catch(() => undefined);
+    if (branchCreated && !committed) await removeUncommittedBranch(repositoryRoot, branch, head);
   });
 
   try {
     await git(repositoryRoot, ['worktree', 'add', '--detach', worktree, head]);
     worktreeAdded = true;
     const projectCopy = projectRelative ? path.join(worktree, projectRelative) : worktree;
-    const outcome = await runMigration(migration, { cwd: projectCopy, dryRun: true, nodeRuntime: options.nodeRuntime });
+    const outcome = await runMigration(migration, { cwd: projectCopy, dryRun: true, nodeRuntime: options.nodeRuntime, allowYarnLockInstall: options.allowYarnLockInstall });
     if (outcome.manual.length > 0) {
       throw new Error(`Migration has ${outcome.manual.length} manual review item(s); no branch or commit was created.`);
     }
@@ -122,8 +124,8 @@ export async function writeMigrationOnBranch(
       }
     }
     await git(worktree, ['commit', '-m', `Apply ${migration.id} migration with UpstreamFix`]);
-    const commit = (await git(worktree, ['rev-parse', 'HEAD'])).trim();
     committed = true;
+    const commit = (await git(worktree, ['rev-parse', 'HEAD'])).trim();
     return {
       branch,
       commit,
@@ -137,8 +139,13 @@ export async function writeMigrationOnBranch(
       await git(repositoryRoot, ['worktree', 'remove', '--force', worktree]).catch(() => undefined);
     }
     await rm(worktreeParent, { recursive: true, force: true });
-    if (branchCreated && !committed) await git(repositoryRoot, ['branch', '-D', branch]).catch(() => undefined);
+    if (branchCreated && !committed) await removeUncommittedBranch(repositoryRoot, branch, head);
   }
+}
+
+async function removeUncommittedBranch(repositoryRoot: string, branch: string, originalHead: string): Promise<void> {
+  const current = await git(repositoryRoot, ['rev-parse', '--verify', branch]).then((value) => value.trim()).catch(() => undefined);
+  if (current === originalHead) await git(repositoryRoot, ['branch', '-D', branch]).catch(() => undefined);
 }
 
 /** Do not commit vNext source code while its containing manifest still installs vOld. */
@@ -158,7 +165,7 @@ async function assertChangedSourcesUseTargetSdk(projectRoot: string, migration: 
       const manifestFile = path.join(directory, 'package.json');
       const raw = proposed.get(manifestFile) ?? await readFile(manifestFile, 'utf8').catch(() => undefined);
       if (raw) {
-        const manifest = JSON.parse(raw) as PackageManifest;
+        const manifest = parseManifest<PackageManifest>(raw);
         const ranges = (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
           .map((section) => manifest[section]?.[migration.packageName])
           .filter((range): range is string => typeof range === 'string');
@@ -185,15 +192,17 @@ async function assertChangedSourcesUseTargetSdk(projectRoot: string, migration: 
 
 async function git(cwd: string, args: string[]): Promise<string> {
   try {
+    const settings = await readPreservedGitSettings(cwd);
     const { stdout } = await execFile('git', [
       '-c', `core.hooksPath=${os.devNull}`,
       '-c', 'core.fsmonitor=false',
       '-c', 'core.untrackedCache=false',
       '-c', 'protocol.file.allow=never',
+      '-c', `commit.gpgsign=${settings.get('commit.gpgsign') === 'true' ? 'true' : 'false'}`,
       ...args,
     ], {
       cwd,
-      env: await gitEnvironment(cwd),
+      env: await gitEnvironment(cwd, settings),
       timeout: 30_000,
       maxBuffer: 2 * 1024 * 1024,
       windowsHide: true,
@@ -214,8 +223,7 @@ const preservedGitConfigKeys = [
   'user.signingkey',
 ];
 
-async function gitEnvironment(cwd: string): Promise<NodeJS.ProcessEnv> {
-  const settings = await readPreservedGitSettings(cwd);
+async function gitEnvironment(cwd: string, settings: Map<string, string>): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH ?? '/usr/bin:/bin',
     HOME: process.env.HOME ?? os.homedir(),
@@ -288,10 +296,7 @@ async function readGitConfig(
 }
 
 async function assertSafeLocalGitConfig(repositoryRoot: string): Promise<void> {
-  const { stdout } = await execFile('git', [
-    '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'protocol.file.allow=never',
-    'config', '--local', '--get-regexp', String.raw`^(core\.fsmonitor|filter\..*\.(clean|smudge|process|required)|diff\.external|diff\..*\.command)$`,
-  ], {
+  const options = {
     cwd: repositoryRoot,
     env: {
       PATH: process.env.PATH ?? '/usr/bin:/bin',
@@ -303,16 +308,29 @@ async function assertSafeLocalGitConfig(repositoryRoot: string): Promise<void> {
     timeout: 10_000,
     maxBuffer: 1024 * 1024,
     windowsHide: true,
-  }).catch((error: NodeJS.ErrnoException & { code?: string | number; stdout?: string }) => {
-    if (String(error.code) !== '1') throw error;
-    return { stdout: error.stdout ?? '' };
-  });
-  const dangerous = stdout.split(/\r?\n/).filter((line) => {
-    const [key, ...value] = line.trim().split(/\s+/);
-    if (!key) return false;
-    if (key.toLowerCase() === 'core.fsmonitor') return value.join(' ') !== '' && !/^false$/i.test(value.join(' '));
-    return value.join(' ').trim() !== '';
-  });
+  };
+  const output = await Promise.all(['--local', '--worktree'].map(async (scope) => {
+    const { stdout } = await execFile('git', [
+      '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'protocol.file.allow=never',
+      'config', scope, '--includes', '--show-origin', '--null', '--list',
+    ], options);
+    return stdout;
+  }));
+  const dangerous: string[] = [];
+  for (const listing of output) {
+    const fields = listing.split('\0');
+    for (let index = 0; index + 1 < fields.length; index += 2) {
+      const origin = fields[index] ?? '';
+      const record = fields[index + 1] ?? '';
+      const separator = record.indexOf('\n');
+      if (separator < 0) continue;
+      const key = record.slice(0, separator).toLowerCase();
+      const value = record.slice(separator + 1).trim();
+      if (/^include(?:if\..*)?\.path$/.test(key)) dangerous.push(`${origin}: ${key}`);
+      else if (key === 'core.fsmonitor' && value && !/^false$/i.test(value)) dangerous.push(`${origin}: ${key}`);
+      else if (/^(?:filter\..*\.(?:clean|smudge|process|required)|diff\.external|diff\..*\.command|gpg\..*)$/.test(key) && value) dangerous.push(`${origin}: ${key}`);
+    }
+  }
   if (dangerous.length > 0) {
     throw new Error('The repository has configured Git filters, diff commands, or fsmonitor hooks. Remove them before using --write.');
   }

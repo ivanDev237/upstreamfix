@@ -1,11 +1,13 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Project } from 'ts-morph';
 import { findApplicableMigrations } from '../src/migrations/index.js';
 import { runMigration } from '../src/core/runner.js';
+import type { MigrationResult } from '../src/core/types.js';
 import { stripeV22 } from '../src/migrations/stripe-v22/index.js';
+import { applyStripeEdits } from '../src/migrations/stripe-shared.js';
 
 const roots: string[] = [];
 
@@ -20,6 +22,67 @@ async function makeProject(source: string, range = '^21.0.0'): Promise<string> {
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
 
 describe('Stripe Node SDK v21 → v22 migration', () => {
+  it('uses the same conservative major parser and ignored folders in scan and migrate', async () => {
+    const cwd = await makeProject("import Stripe from 'stripe';\nStripe('key');\n", '>=21');
+    expect(await findApplicableMigrations(cwd)).toEqual([]);
+    const outcome = await runMigration(stripeV22, { cwd, dryRun: true });
+    expect(outcome.manual.some((item) => item.reason.includes('only analyzes major v21'))).toBe(true);
+
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { stripe: '^24.0.0' } }));
+    await mkdir(path.join(cwd, '.codex'));
+    await writeFile(path.join(cwd, '.codex', 'package.json'), JSON.stringify({ dependencies: { stripe: '^21.0.0' } }));
+    await writeFile(path.join(cwd, '.codex', 'private.ts'), "import Stripe from 'stripe';\nStripe('key');\n");
+    expect(await findApplicableMigrations(cwd)).toEqual([]);
+    const ignored = await runMigration(stripeV22, { cwd, dryRun: true });
+    expect(ignored.filesChanged).not.toContain('.codex/private.ts');
+  });
+
+  it('withholds all edits from a Stripe file with syntax errors', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('broken.ts', "import Stripe from 'stripe';\nconst stripe = Stripe(\n");
+    const result = stripeV22.transform(project);
+    expect(result.manual.some((item) => item.reason.includes('syntax'))).toBe(true);
+    expect(result.fileUpdates).toEqual([]);
+  });
+  it('does not report unrelated syntax errors just because text mentions stripe', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('styles.ts', 'const style = "stripe";\nconst broken = (\n');
+    const result = stripeV22.transform(project);
+    expect(result.manual).toEqual([]);
+  });
+  it('ignores Stripe URLs in comments and CSS class selectors in malformed unrelated files', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('comment.ts', '// https://dashboard.stripe.com\nconst broken = (\n');
+    project.createSourceFile('commented-import.ts', "// import Stripe from 'stripe';\nconst broken = (\n");
+    project.createSourceFile('style.ts', "const selector = 'div.stripe.active';\nconst broken = (\n");
+    const result = stripeV22.transform(project);
+    expect(result.manual).toEqual([]);
+  });
+  it('flags unsupported Stripe import and callback forms for manual review', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('namespace.ts', "import * as S from 'stripe';\nconst client = new S.Stripe('key');\n");
+    project.createSourceFile('named-default.ts', "import { default as Stripe } from 'stripe';\nconst client = Stripe('key');\n");
+    project.createSourceFile('member.ts', "import Stripe from 'stripe';\nclass X { constructor(private stripe: Stripe) {} run() { this.stripe.customers.retrieve('id', () => {}); } }\n");
+    project.createSourceFile('cjs.ts', "const { default: Stripe } = require('stripe').default;\n");
+    const result = stripeV22.transform(project);
+    for (const file of ['namespace.ts', 'named-default.ts', 'member.ts', 'cjs.ts']) {
+      expect(result.manual.some((item) => item.file.endsWith(file))).toBe(true);
+    }
+  });
+
+  it('reports overlapping Stripe edits instead of dropping one silently', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    const source = project.createSourceFile('nested.js', 'const stripe = original;\n');
+    const result: MigrationResult = { changes: [], manual: [], filesChanged: [], fileUpdates: [] };
+    const original = source.getFullText();
+    applyStripeEdits(source, [
+      { start: 6, end: 12, replacement: 'client', rule: 'first', before: 'stripe', line: 1 },
+      { start: 8, end: 14, replacement: 'other', rule: 'second', before: 'ripe =', line: 1 },
+    ], result, original);
+    expect(result.manual.some((item) => item.reason.includes('overlap'))).toBe(true);
+    expect(result.fileUpdates).toEqual([]);
+  });
+
   it('migrates the constructor and unambiguous RequestOptions position, plus the package range, in preview', async () => {
     const cwd = await makeProject(
       "import Stripe from 'stripe';\nconst stripe = Stripe(process.env.STRIPE_KEY!);\nexport const customer = stripe.customers.retrieve('cus_123', {stripeAccount: process.env.CONNECTED_ACCOUNT!});\n",

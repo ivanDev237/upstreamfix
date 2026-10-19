@@ -3,6 +3,16 @@
 All notable changes to UpstreamFix are documented here. Versions in the 0.x
 series are experimental; review proposed migrations before applying them.
 
+## Unreleased
+
+## 0.1.3
+
+- Fixed the CLI entry point: `0.1.2` exited silently when invoked through `npx` or a global installation.
+- Added `--version`, `watch`, `diff-api`, `impact`, and `probe` for version monitoring, TypeScript API comparison, impact estimates, and isolated diagnostic probes.
+- Prevented unsafe Firebase rewrites involving nested calls, retained arguments, type references, and stored app instances.
+- Hardened Git writes, package installation, verification, reports, secret masking, and benchmark isolation.
+- Improved Stripe diagnostics and migration safeguards; fixed UTF-8 BOM preservation and lockfile handling.
+
 ## 0.1.2
 
 - Removed an empty npm token configuration from the release workflow.

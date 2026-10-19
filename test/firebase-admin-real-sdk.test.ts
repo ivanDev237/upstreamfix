@@ -1,5 +1,3 @@
-import { execFile as execFileCallback } from 'node:child_process';
-import { promisify } from 'node:util';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
@@ -7,8 +5,8 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Project } from 'ts-morph';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
+import { runRealSdkNpm, runRealSdkNode } from './helpers/real-sdk-command.js';
 
-const execFile = promisify(execFileCallback);
 const temporaryDirectories: string[] = [];
 const realSdkVersions = ['13.10.0', '14.0.0', '14.5.0'];
 const enabled = process.env.UPSTREAMFIX_RUN_REAL_SDK_TESTS === '1';
@@ -26,12 +24,7 @@ describe.skipIf(!enabled)('firebase-admin v14 migration against real SDK release
       JSON.stringify({ private: true, engines: { node: '>=22.0.0' }, dependencies: { 'firebase-admin': version } }),
     );
 
-    const npmCli = process.env.npm_execpath ?? 'npm';
-    await execFile(
-      process.execPath,
-      [npmCli, 'install', '--no-save', '--ignore-scripts', '--package-lock=false', '--no-audit', '--no-fund', `firebase-admin@${version}`],
-      { cwd, timeout: 240_000 },
-    );
+    await runRealSdkNpm(cwd, ['install', '--no-save', '--ignore-scripts', '--package-lock=false', '--no-audit', '--no-fund', `firebase-admin@${version}`]);
 
     const requireFromFixture = createRequire(path.join(cwd, 'package.json'));
     expect(requireFromFixture.resolve('firebase-admin/app')).toBeTruthy();
@@ -52,7 +45,7 @@ describe.skipIf(!enabled)('firebase-admin v14 migration against real SDK release
     expect(transformed).toContain('getFirestore()');
 
     const repoRoot = process.cwd();
-    await execFile(process.execPath, [
+    await runRealSdkNode(cwd, [
       path.join(repoRoot, 'node_modules/typescript/bin/tsc'),
       '--noEmit',
       '--skipLibCheck',
@@ -68,7 +61,7 @@ describe.skipIf(!enabled)('firebase-admin v14 migration against real SDK release
       '--typeRoots',
       path.join(repoRoot, 'node_modules/@types'),
       transformedPath,
-    ], { cwd, timeout: 60_000 });
+    ], 60_000);
 
     expect(await readFile(transformedPath, 'utf8')).toBe(transformed);
   }, 300_000);
@@ -84,12 +77,7 @@ describe.skipIf(!enabled)('firebase-admin v14 migration against real SDK release
     };
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
 
-    const npmCli = process.env.npm_execpath ?? 'npm';
-    await execFile(
-      process.execPath,
-      [npmCli, 'install', '--no-save', '--ignore-scripts', '--package-lock=false', '--no-audit', '--no-fund', 'firebase-admin@13.10.0'],
-      { cwd, timeout: 240_000 },
-    );
+    await runRealSdkNpm(cwd, ['install', '--no-save', '--ignore-scripts', '--package-lock=false', '--no-audit', '--no-fund', 'firebase-admin@13.10.0']);
 
     const sources = new Map([
       ['firebase.ts', "import * as admin from 'firebase-admin';\nexport const app = admin.initializeApp();\nexport const db = admin.firestore(app);\n"],
@@ -120,14 +108,10 @@ describe.skipIf(!enabled)('firebase-admin v14 migration against real SDK release
     for (const [file, contents] of updates) await writeFile(path.join(cwd, file), contents);
     manifest.dependencies['firebase-admin'] = '14.5.0';
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
-    await execFile(
-      process.execPath,
-      [npmCli, 'install', '--no-save', '--ignore-scripts', '--package-lock=false', '--no-audit', '--no-fund', 'firebase-admin@14.5.0'],
-      { cwd, timeout: 240_000 },
-    );
+    await runRealSdkNpm(cwd, ['install', '--no-save', '--ignore-scripts', '--package-lock=false', '--no-audit', '--no-fund', 'firebase-admin@14.5.0']);
 
     const repoRoot = process.cwd();
-    await execFile(process.execPath, [
+    await runRealSdkNode(cwd, [
       path.join(repoRoot, 'node_modules/typescript/bin/tsc'),
       '--noEmit',
       '--skipLibCheck',
@@ -143,6 +127,6 @@ describe.skipIf(!enabled)('firebase-admin v14 migration against real SDK release
       '--typeRoots',
       path.join(repoRoot, 'node_modules/@types'),
       ...[...sources.keys()].map((file) => path.join(cwd, file)),
-    ], { cwd, timeout: 60_000 });
+    ], 60_000);
   }, 360_000);
 });

@@ -1,6 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Migration, PackageManifest } from '../core/types.js';
+import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from '../core/project-discovery.js';
 import { firebaseAdminV14 } from './firebase-admin-v14/index.js';
 import { stripeV22 } from './stripe-v22/index.js';
 import { stripeV23 } from './stripe-v23/index.js';
@@ -8,22 +9,15 @@ import { stripeV23 } from './stripe-v23/index.js';
 /** The shipped migration catalog. Adding a migration requires registering it here, not in core or the CLI. */
 export const migrations: readonly Migration[] = [firebaseAdminV14, stripeV22, stripeV23];
 
-const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'coverage', '.next', '.nuxt', '.turbo', '.cache']);
-
 export async function findApplicableMigrations(cwd: string): Promise<Migration[]> {
   const manifests = await readManifests(path.resolve(cwd));
   return migrations.filter((migration) => manifests.some((manifest) => {
     const sections = [manifest.dependencies, manifest.devDependencies, manifest.peerDependencies, manifest.optionalDependencies];
     return sections.some((section) => {
       const range = section?.[migration.packageName];
-      return typeof range === 'string' && declaredMajor(range) === migration.fromMajor;
+      return typeof range === 'string' && isSupportedSourceMajor(range, migration.fromMajor);
     });
   }));
-}
-
-function declaredMajor(range: string): number | undefined {
-  const match = /^\s*(?:[~^=]|>=?\s*)?(\d+)(?:\.|\s|$)/.exec(range);
-  return match ? Number(match[1]) : undefined;
 }
 
 async function readManifests(root: string): Promise<PackageManifest[]> {
@@ -33,7 +27,7 @@ async function readManifests(root: string): Promise<PackageManifest[]> {
       if (entry.isSymbolicLink()) continue;
       const absolute = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!ignoredDirectories.has(entry.name)) await visit(absolute);
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) await visit(absolute);
       } else if (entry.isFile() && entry.name === 'package.json') {
         try {
           manifests.push(JSON.parse(await readFile(absolute, 'utf8')) as PackageManifest);

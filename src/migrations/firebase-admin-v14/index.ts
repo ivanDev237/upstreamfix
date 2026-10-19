@@ -8,6 +8,7 @@ import {
   type SourceFile,
 } from 'ts-morph';
 import type { Change, ManualItem, Migration, MigrationResult, PackageManifest } from '../../core/types.js';
+import { guaranteesNodeMajor } from '../../core/node-range.js';
 import {
   APP_MODULE,
   CREDENTIAL_FACTORIES,
@@ -72,6 +73,8 @@ export const firebaseAdminV14: Migration = {
       .map((dependencies) => dependencies?.['firebase-functions-test'])
       .find((value): value is string => typeof value === 'string');
     if (functionsTest) notes.push(`firebase-functions-test "${functionsTest}" is installed. In a benchmarked project, the v14 typecheck failed because this package's declarations import firebase-admin exports removed in v14 (including app and firestore). Check whether a compatible release is available; otherwise update the test setup, then rerun the tests before upgrading.`);
+    const functionsVersion = dependencyVersion(manifest, 'firebase-functions');
+    if (functionsVersion) notes.push(`firebase-functions \`${functionsVersion}\` is installed: check that its firebase-admin peer range accepts v14.`);
     return notes;
   },
 
@@ -126,7 +129,7 @@ export const firebaseAdminV14: Migration = {
     } else if (!runtimeReady) {
       notes.push(`firebase-admin v14 requires Node.js 22 or later; review \`engines.node\` (${engine}).`);
     }
-    const functionsVersion = manifest.dependencies?.['firebase-functions'];
+    const functionsVersion = dependencyVersion(manifest, 'firebase-functions');
     if (functionsVersion) {
       notes.push(
         `firebase-functions \`${functionsVersion}\` is installed: check that its firebase-admin peer range accepts v14 (firebase-functions#1902).`,
@@ -136,9 +139,14 @@ export const firebaseAdminV14: Migration = {
   },
 };
 
+function dependencyVersion(manifest: PackageManifest, name: string): string | undefined {
+  return [manifest.dependencies, manifest.devDependencies, manifest.peerDependencies, manifest.optionalDependencies]
+    .map((section) => section?.[name])
+    .find((value): value is string => typeof value === 'string');
+}
+
 function supportsNode22(range: string): boolean {
-  const normalized = range.trim();
-  return /^(?:>=\s*22(?:\.\d+){0,2}|(?:\^|~)\s*22(?:\.\d+){0,2}|22(?:\.\d+){0,2})$/.test(normalized);
+  return guaranteesNodeMajor(range, 22);
 }
 
 function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
@@ -150,6 +158,29 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
 
   const aliases = findAliases(sourceFile);
   if (aliases.length === 0) return false;
+
+  const aliasNames = new Set(aliases.map((alias) => alias.name));
+  for (const declaration of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    const initializer = declaration.getInitializer();
+    const nameNode = declaration.getNameNode();
+    if (!Node.isCallExpression(initializer) || !Node.isIdentifier(nameNode)) continue;
+    const factory = initializer.getExpression();
+    if (!Node.isPropertyAccessExpression(factory) || factory.getName() !== 'app') continue;
+    const root = factory.getExpression();
+    if (!Node.isIdentifier(root) || !aliasNames.has(root.getText())) continue;
+    for (const reference of nameNode.findReferencesAsNodes()) {
+      if (reference === nameNode || reference.getSourceFile() !== sourceFile) continue;
+      const access = reference.getParent();
+      if (!Node.isPropertyAccessExpression(access) || access.getExpression() !== reference) continue;
+      const service = access.getName();
+      if (!Object.hasOwn(SERVICES, service) && !Object.hasOwn(REMOVED_SERVICES, service)) continue;
+      result.manual.push({ file, line: access.getStartLineNumber(), reason: `Stored admin.app() result calls app.${service}; choose the modular service getter manually.`, snippet: snippetOf(access) });
+    }
+  }
+  if (result.manual.length > manualBefore) {
+    sortManual(result.manual, manualBefore);
+    return false;
+  }
 
   const edits: Edit[] = [];
   const aliasesWithManualUses = new Set<string>();
@@ -178,6 +209,14 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
       continue;
     }
 
+    if (alias.kind === 'cjs') {
+      for (const type of sourceFile.getDescendantsOfKind(SyntaxKind.TypeReference)) {
+        if (!aliasMemberPattern(alias.name).test(type.getText())) continue;
+        aliasesWithManualUses.add(alias.name);
+        result.manual.push({ file, line: type.getStartLineNumber(), reason: 'A type-only Firebase reference from require needs a manual import type; no runtime require was synthesized.', snippet: snippetOf(type) });
+      }
+    }
+
     const references = alias.nameNode
       .findReferencesAsNodes()
       .filter(Node.isIdentifier)
@@ -185,12 +224,25 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
       .filter((reference) => reference !== alias.nameNode);
 
     for (const ref of references) {
-      const classification = classify(ref);
       const line = ref.getStartLineNumber();
+
+      if (alias.kind === 'cjs' && ref.getFirstAncestorByKind(SyntaxKind.TypeReference)) {
+        aliasesWithManualUses.add(alias.name);
+        result.manual.push({ file, line, reason: 'A type-only Firebase reference from require needs a manual import type; no runtime require was synthesized.', snippet: snippetOf(ref) });
+        continue;
+      }
+
+      const classification = classify(ref);
 
       if ('reason' in classification) {
         aliasesWithManualUses.add(alias.name);
         result.manual.push({ file, line, reason: classification.reason, snippet: snippetOf(ref) });
+        continue;
+      }
+
+      if (alias.kind === 'cjs' && classification.imports.some((imp) => imp.typeOnly)) {
+        aliasesWithManualUses.add(alias.name);
+        result.manual.push({ file, line, reason: 'A type-only Firebase reference from require needs a manual import type; no runtime require was synthesized.', snippet: snippetOf(ref) });
         continue;
       }
 
@@ -218,15 +270,34 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
     }
   }
 
+  if (result.manual.slice(manualBefore).some((item) => item.reason.startsWith('App-scoped ') && item.reason.includes('arguments'))) {
+    sortManual(result.manual, manualBefore);
+    return false;
+  }
+
   if (edits.length === 0) {
     if (result.manual.length > manualBefore) sortManual(result.manual, manualBefore);
     return false;
   }
 
-  const textEdits: TextEdit[] = edits.map((edit) => ({ start: edit.start, end: edit.end, text: edit.text }));
-  for (const edit of edits) {
-    result.changes.push({ file, line: edit.line, rule: edit.rule, before: edit.before, after: edit.text } satisfies Change);
+  const orderedEdits = [...edits].sort((a, b) => a.start - b.start || a.end - b.end);
+  if (hasOverlappingEdits(orderedEdits)) {
+    for (let index = 1; index < orderedEdits.length; index++) {
+      const previous = orderedEdits[index - 1]!;
+      const current = orderedEdits[index]!;
+      if (current.start >= previous.end) continue;
+      result.manual.push({
+        file,
+        line: current.line,
+        reason: 'Automatic Firebase edits overlap in this file; review the nested usage manually before migrating it.',
+        snippet: current.before,
+      });
+      sortManual(result.manual, manualBefore);
+      return false;
+    }
   }
+
+  const textEdits: TextEdit[] = edits.map((edit) => ({ start: edit.start, end: edit.end, text: edit.text }));
 
   const importMap = mergeImports(edits.flatMap((edit) => edit.imports));
   const kind: AliasKind = aliases.some((alias) => alias.kind === 'esm') ? 'esm' : 'cjs';
@@ -237,10 +308,40 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
   }
   textEdits.push(...aliasDeclarationRemovals(sourceFile, aliases, aliasesWithManualUses));
   const transformed = applyTextEdits(sourceFile.getFullText(), textEdits);
+  for (const alias of aliases) {
+    if (!aliasesWithManualUses.has(alias.name) && aliasMemberPattern(alias.name).test(transformed)) {
+      result.manual.push({
+        file,
+        line: alias.nameNode.getStartLineNumber(),
+        reason: `The ${alias.name} namespace still has references after migration; its import cannot be removed safely. Review this file manually.`,
+        snippet: snippetOf(alias.nameNode),
+      });
+      sortManual(result.manual, manualBefore);
+      return false;
+    }
+  }
+  for (const edit of edits) {
+    result.changes.push({ file, line: edit.line, rule: edit.rule, before: edit.before, after: edit.text } satisfies Change);
+  }
   if (transformed !== sourceFile.getFullText()) result.fileUpdates?.push({ file, contents: transformed });
 
   if (result.manual.length > manualBefore) sortManual(result.manual, manualBefore);
   return true;
+}
+
+export function hasOverlappingEdits(edits: Array<{ start: number; end: number }>): boolean {
+  const ordered = [...edits].sort((left, right) => left.start - right.start || left.end - right.end);
+  let boundary = -1;
+  for (const edit of ordered) {
+    if (edit.start < boundary) return true;
+    boundary = Math.max(boundary, edit.end);
+  }
+  return false;
+}
+
+function aliasMemberPattern(alias: string): RegExp {
+  const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\w$])${escaped}\\s*[.\\[]`);
 }
 
 function classify(ref: Identifier): Classification {
@@ -309,6 +410,9 @@ function classifyAccess(access: PropertyAccessExpression): Classification {
         const serviceName = serviceAccess.getName();
         const nestedService = Object.hasOwn(SERVICES, serviceName) ? SERVICES[serviceName] : undefined;
         if (nestedService) {
+          if (serviceCall.getArguments().length > 0) {
+            return { reason: `App-scoped ${serviceName} call has arguments; choose the equivalent modular API manually so its target is preserved.` };
+          }
           return {
             node: serviceCall,
             text: `${nestedService.getter}()`,
@@ -575,7 +679,7 @@ function renderImports(
   const newline = fullText.includes('\r\n') ? '\r\n' : '\n';
   const before = fullText.slice(0, position);
   const after = fullText.slice(position);
-  const prefix = before.endsWith('\n') ? '' : newline;
+  const prefix = before.length === 0 || before.endsWith('\n') ? '' : newline;
   const suffix = after.startsWith('\n') ? '' : newline;
   return `${prefix}${lines.join(newline)}${suffix}`;
 }
@@ -635,7 +739,7 @@ function aliasDeclarationRemovals(
         importDecl.getNamedImports().length === 0
       ) {
         const key = `${importDecl.getStart()}:${importDecl.getEnd()}`;
-        if (!seen.has(key)) removals.push({ start: importDecl.getStart(), end: importDecl.getEnd(), text: '' });
+        if (!seen.has(key)) removals.push({ start: importDecl.getStart(), end: endIncludingLineBreak(sourceFile, importDecl.getEnd()), text: '' });
         seen.add(key);
       }
       continue;
@@ -646,11 +750,18 @@ function aliasDeclarationRemovals(
     const removable = importEquals ?? (statement?.getDeclarations().length === 1 ? statement : undefined);
     if (removable) {
       const key = `${removable.getStart()}:${removable.getEnd()}`;
-      if (!seen.has(key)) removals.push({ start: removable.getStart(), end: removable.getEnd(), text: '' });
+      if (!seen.has(key)) removals.push({ start: removable.getStart(), end: endIncludingLineBreak(sourceFile, removable.getEnd()), text: '' });
       seen.add(key);
     }
   }
   return removals;
+}
+
+function endIncludingLineBreak(sourceFile: SourceFile, end: number): number {
+  const text = sourceFile.getFullText();
+  if (text.slice(end, end + 2) === '\r\n') return end + 2;
+  if (text[end] === '\n') return end + 1;
+  return end;
 }
 
 function snippetOf(node: Node): string {

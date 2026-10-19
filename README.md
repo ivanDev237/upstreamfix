@@ -32,10 +32,27 @@ The report path is explicit; preview commands do not create report files unless 
 
 Run `upstreamfix list` for the catalog included in the installed version. Run `upstreamfix scan --cwd <project>` to select migrations from package versions declared in root or nested `package.json` files.
 
+## Detecting SDK changes
+
+These commands report evidence for review. They do not create migration rules or pull requests.
+
+```sh
+upstreamfix watch --state /path/to/upstreamfix-watch.json
+upstreamfix diff-api firebase-admin 13.10.0 14.0.0
+upstreamfix impact --cwd /path/to/project
+upstreamfix probe stripe@23.0.0 --cwd /path/to/project
+```
+
+`watch` checks the npm `latest` tags of catalog packages. The first run records a baseline; later runs record newly observed **major** versions in the chosen JSON file. It makes small registry requests and updates the file atomically. `diff-api` downloads two exact npm tarballs, verifies their published integrity values, and compares public TypeScript declarations. Removed or changed declarations are clues; apparent renames are explicitly hypotheses. The archive size is capped and no package scripts run.
+
+`impact` reads declared versions in root and nested manifests, looks up each catalog package's latest npm version, and estimates automatic versus manual source findings using the catalog's current rules. It does not install dependencies or modify the project. Its counts are estimates, not a compatibility guarantee.
+
+`probe` needs a Git project with a root npm lockfile and TypeScript. It shows an estimated cold download first and exits without downloading. Add `--yes` after reviewing that estimate. It copies the project, installs the locked baseline and an exact target SDK version with lifecycle scripts disabled, and runs both compiler checks in a pinned Docker image with no network and a read-only project mount. Existing compiler errors are separated from new candidates. A new error is **not proof** that the SDK caused it. The original files and lockfile remain untouched. pnpm/Yarn projects and projects without a readable TypeScript check currently return "measurement unavailable". Docker and registry access are required only for the confirmed probe.
+
 ## What is not supported
 
 - The GitHub Action exits without changing a repository; automatic pull requests are not available.
-- UpstreamFix does not watch package registries, discover new API changes, or invent migrations. It only previews migration rules already included in the release.
+- `watch`, `diff-api`, and `probe` can identify new version and type-change candidates. They do not generate or approve safe migration rules automatically.
 - Only migrations shown by `upstreamfix list` are supported. Unsupported, ambiguous, or semantic API changes require manual work.
 - Lockfile previews cover standalone root projects using npm v3, pnpm, or Yarn Classic lockfiles. Regenerating a lockfile may contact the package registry; pnpm or Yarn must already be installed and match any `packageManager` pin. Workspaces, Yarn Berry, shrinkwrap, project package-manager configuration files, and local or non-registry dependencies are left for manual review.
 

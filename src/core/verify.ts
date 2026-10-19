@@ -3,11 +3,13 @@ import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { StringDecoder } from 'node:string_decoder';
 import { applyPatch, parsePatch } from 'diff';
 import type { ProposedFileChange } from './types.js';
 import { registerTemporaryCleanup, terminateProcessGroup, trackProcessGroup } from './process-cleanup.js';
+import { IGNORED_PROJECT_DIRECTORIES } from './project-discovery.js';
+import { parseManifest } from './manifest.js';
 
-const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'coverage', '.next', '.nuxt', '.turbo', '.cache', '.codex', '.claude']);
 const ignoredFiles = new Set(['.npmrc', '.yarnrc', '.yarnrc.yml', '.pnpmfile.cjs', '.pnpmfile.mjs', 'yarn.config.cjs']);
 const maxOutputLength = 4_000;
 const maxCopyBytes = 100 * 1024 * 1024;
@@ -36,6 +38,8 @@ export interface VerificationOptions {
   packageName?: string;
   /** Exact migration results. When present these are applied directly; unified diffs are for display only. */
   fileChanges?: ProposedFileChange[];
+  /** Override the UpstreamFix pnpm cache location (primarily for offline tests). */
+  pnpmCacheRoot?: string;
   execute?: (command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number) => Promise<{ stdout?: string; stderr?: string } | undefined>;
 }
 
@@ -62,12 +66,15 @@ export async function verifyProposedMigration(
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-verify-'));
   const projectCopy = path.join(temporaryRoot, 'project');
   const isolatedHome = path.join(temporaryRoot, 'home');
+  const persistentPnpmStore = options.pnpmCacheRoot ?? path.join(os.homedir(), '.cache', 'upstreamfix', 'pnpm-store');
   const checks: VerificationCheck[] = [];
   const unregisterCleanup = registerTemporaryCleanup(() => rm(temporaryRoot, { recursive: true, force: true }));
 
   try {
     await mkdir(projectCopy, { recursive: true });
     await mkdir(isolatedHome, { recursive: true });
+    // This cache is unique to the invocation and removed before returning. Project
+    // scripts never receive the user's npm cache path or credentials through env.
     await mkdir(path.join(isolatedHome, 'npm-cache'), { recursive: true });
     await Promise.all([
       writeFile(path.join(isolatedHome, 'npmrc.user'), '', 'utf8'),
@@ -86,6 +93,7 @@ export async function verifyProposedMigration(
     const env = sanitizedEnvironment(isolatedHome);
     const installChecks: VerificationCheck[] = [];
     const installDirs = new Set(packageDirs);
+    const installedRoots = new Set<string>();
     const rootPackage = await readPackageJson(projectCopy).catch(() => undefined);
     if (rootPackage && (rootPackage.scripts?.typecheck || rootPackage.scripts?.test || rootPackage.workspaces) && hasDependencies(rootPackage)) {
       installDirs.add(projectCopy);
@@ -94,6 +102,22 @@ export async function verifyProposedMigration(
       const pkg = await readPackageJson(directory);
       if (!hasDependencies(pkg)) continue;
       const plan = await installCommand(projectCopy, directory, pkg);
+      if (installedRoots.has(plan.cwd)) continue;
+      installedRoots.add(plan.cwd);
+      if (plan.command === 'yarn' && plan.yarnMajor && plan.yarnMajor >= 2) {
+        const versionCheck = await runCheck('Check Yarn version', 'yarn', ['--version'], plan.cwd, env, timeoutMs, options.execute);
+        checks.push(versionCheck);
+        const actualMajor = Number(/^\s*(\d+)\./.exec(versionCheck.output)?.[1]);
+        if (versionCheck.status !== 'passed' || !(actualMajor >= 2) || (plan.yarnExact && actualMajor !== plan.yarnMajor)) {
+          return { status: 'failed', checks, note: `Yarn ${plan.yarnMajor} is required by this project, but the temporary copy resolved ${versionCheck.output || 'an unknown version'}. Dependency installation was refused.` };
+        }
+      }
+      if (plan.command === 'pnpm') {
+        const cacheInfo = await lstat(persistentPnpmStore).catch(() => undefined);
+        if (cacheInfo?.isSymbolicLink() || (cacheInfo && !cacheInfo.isDirectory())) throw new Error('The private pnpm cache path is not a regular directory.');
+        await mkdir(persistentPnpmStore, { recursive: true, mode: 0o700 });
+        plan.args.push('--store-dir', persistentPnpmStore, '--prefer-offline');
+      }
       const installLabel = path.relative(projectCopy, plan.cwd) || '.';
       const check = await runCheck(`Install dependencies (${installLabel})`, plan.command, plan.args, plan.cwd, env, timeoutMs, options.execute);
       installChecks.push(check);
@@ -145,25 +169,25 @@ export async function verifyProposedMigration(
   }
 }
 
-async function copyProject(source: string, destination: string): Promise<void> {
+export async function copyProject(source: string, destination: string, operation = '--verify'): Promise<void> {
   let listing: string;
   try {
     ({ stdout: listing } = await execFile('git', [
       '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', 'ls-files', '-co', '--exclude-standard', '-z',
     ], {
       cwd: source,
-      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: os.tmpdir(), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull, GIT_TERMINAL_PROMPT: '0' },
+      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: process.env.HOME ?? os.homedir(), GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' },
       timeout: 15_000,
       maxBuffer: 8 * 1024 * 1024,
     }));
   } catch {
-    throw new Error('--verify requires a Git working tree so ignored and untracked files can be excluded safely.');
+    throw new Error(`${operation} requires a Git working tree so ignored and untracked files can be excluded safely.`);
   }
   let totalBytes = 0;
   for (const relative of listing.split('\0').filter(Boolean)) {
     const portable = relative.replaceAll('\\', '/');
     const parts = portable.split('/');
-    if (parts.some((part) => ignoredDirectories.has(part))
+    if (parts.some((part) => IGNORED_PROJECT_DIRECTORIES.has(part))
       || ignoredFiles.has(parts.at(-1)!) || isSensitivePath(portable)) continue;
     const sourcePath = path.resolve(source, relative);
     const relativeCheck = path.relative(source, sourcePath);
@@ -221,6 +245,15 @@ export async function applyProposedFiles(projectCopy: string, changes: ProposedF
     const key = process.platform === 'win32' ? relative.toLowerCase() : relative;
     if (seen.has(key)) throw new Error(`A proposed change contains a duplicate path: ${change.relativePath}`);
     seen.add(key);
+    let ancestor = root;
+    for (const component of relative.split(path.sep)) {
+      ancestor = path.join(ancestor, component);
+      const info = await lstat(ancestor).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return undefined;
+        throw error;
+      });
+      if (info?.isSymbolicLink()) throw new Error(`A proposed change crosses a symbolic link: ${change.relativePath}`);
+    }
     const current = await readFile(absolute, 'utf8').catch(() => undefined);
     if (current !== change.before) throw new Error(`The temporary project does not match the migration input for ${change.relativePath}.`);
     await mkdir(path.dirname(absolute), { recursive: true });
@@ -232,7 +265,8 @@ async function findRelevantPackageDirs(root: string, packageName: string): Promi
   const manifests = await findPackageFiles(root);
   const packageDirs: string[] = [];
   for (const manifestPath of manifests) {
-    const pkg = await readPackageJson(path.dirname(manifestPath));
+    const pkg = await readPackageJson(path.dirname(manifestPath)).catch(() => undefined);
+    if (!pkg) continue;
     if (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
       .some((section) => typeof (pkg as Record<string, unknown>)[section] === 'object'
         && (pkg as Record<string, Record<string, string>>)[section]?.[packageName])) {
@@ -261,7 +295,7 @@ async function findPackageFiles(root: string): Promise<string[]> {
       if (entry.isSymbolicLink()) continue;
       const absolute = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!ignoredDirectories.has(entry.name)) await visit(absolute);
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) await visit(absolute);
       } else if (entry.isFile() && entry.name === 'package.json') found.push(absolute);
     }
   }
@@ -270,7 +304,7 @@ async function findPackageFiles(root: string): Promise<string[]> {
 }
 
 async function readPackageJson(directory: string): Promise<PackageJson> {
-  return JSON.parse(await readFile(path.join(directory, 'package.json'), 'utf8')) as PackageJson;
+  return parseManifest<PackageJson>(await readFile(path.join(directory, 'package.json'), 'utf8'));
 }
 
 function hasDependencies(pkg: PackageJson): boolean {
@@ -282,27 +316,17 @@ async function installCommand(
   root: string,
   directory: string,
   pkg: PackageJson,
-): Promise<{ command: string; args: string[]; cwd: string }> {
-  const lockRoot = await findLockfileRoot(root, directory);
-  const lockfile = await findLockfileName(lockRoot);
-  const rootPackage = await readPackageJson(lockRoot).catch(() => undefined);
-  const declared: unknown = pkg.packageManager ?? rootPackage?.packageManager;
-  let manager: string;
-  if (declared === undefined) manager = lockfile === 'pnpm-lock.yaml' ? 'pnpm' : lockfile === 'yarn.lock' ? 'yarn' : 'npm';
-  else {
-    if (typeof declared !== 'string' || !/^(npm|pnpm|yarn)@\d+\.\d+\.\d+(?:\+sha\d+\.[0-9a-f]+)?$/.test(declared)) {
-      throw new Error(`Unsupported or unsafe packageManager field: ${String(declared)}. Use an exact npm, pnpm, or Yarn version.`);
-    }
-    manager = declared.slice(0, declared.indexOf('@'));
-  }
+): Promise<{ command: string; args: string[]; cwd: string; yarnMajor?: number; yarnExact?: boolean }> {
+  const { lockRoot, manager, declared } = await detectPackageManager(root, directory, pkg);
   if (manager === 'pnpm') return { command: 'pnpm', args: ['install', '--ignore-scripts', '--no-frozen-lockfile'], cwd: lockRoot };
   if (manager === 'yarn') {
     const version = Number(/^yarn@(\d+)/.exec(declared ?? '')?.[1] ?? 1);
     const yarnBerry = version >= 2 || (await readFile(path.join(lockRoot, 'yarn.lock'), 'utf8').catch(() => '')).includes('__metadata:');
     return {
       command: 'yarn',
-      args: ['install', '--non-interactive', ...(yarnBerry ? ['--mode=skip-builds'] : ['--ignore-scripts'])],
+      args: ['install', ...(yarnBerry ? ['--mode=skip-builds'] : ['--ignore-scripts'])],
       cwd: lockRoot,
+      ...(yarnBerry ? { yarnMajor: Math.max(version, 2), yarnExact: version >= 2 } : {}),
     };
   }
   return { command: 'npm', args: ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefer-offline'], cwd: lockRoot };
@@ -315,7 +339,7 @@ async function findLockfileRoot(root: string, directory: string): Promise<string
     if (current === root) break;
     current = path.dirname(current);
   }
-  return root;
+  return directory;
 }
 
 async function findLockfileName(directory: string): Promise<string | undefined> {
@@ -331,14 +355,24 @@ async function findLockfileName(directory: string): Promise<string | undefined> 
 }
 
 async function scriptCommand(root: string, directory: string, pkg: PackageJson, script: string): Promise<{ command: string; args: string[] }> {
-  const lockRoot = await findLockfileRoot(root, directory);
-  const lockfile = await findLockfileName(lockRoot);
-  const rootPackage = await readPackageJson(lockRoot).catch(() => undefined);
-  const manager = pkg.packageManager?.split('@')[0] ?? rootPackage?.packageManager?.split('@')[0]
-    ?? (lockfile === 'pnpm-lock.yaml' ? 'pnpm' : lockfile === 'yarn.lock' ? 'yarn' : 'npm');
+  const { manager } = await detectPackageManager(root, directory, pkg);
   if (manager === 'pnpm') return { command: 'pnpm', args: ['run', script] };
   if (manager === 'yarn') return { command: 'yarn', args: ['run', script] };
   return { command: 'npm', args: ['--ignore-scripts', 'run', script] };
+}
+
+async function detectPackageManager(root: string, directory: string, pkg: PackageJson): Promise<{ lockRoot: string; manager: 'npm' | 'pnpm' | 'yarn'; declared?: string }> {
+  const lockRoot = await findLockfileRoot(root, directory);
+  const lockfile = await findLockfileName(lockRoot);
+  const rootPackage = await readPackageJson(lockRoot).catch(() => undefined);
+  const declared: unknown = pkg.packageManager ?? rootPackage?.packageManager;
+  if (declared !== undefined && (typeof declared !== 'string' || !/^(npm|pnpm|yarn)@\d+\.\d+\.\d+(?:\+sha\d+\.[0-9a-f]+)?$/.test(declared))) {
+    throw new Error(`Unsupported or unsafe packageManager field: ${String(declared)}. Use an exact npm, pnpm, or Yarn version.`);
+  }
+  const manager = declared === undefined
+    ? lockfile === 'pnpm-lock.yaml' ? 'pnpm' : lockfile === 'yarn.lock' ? 'yarn' : 'npm'
+    : declared.slice(0, declared.indexOf('@')) as 'npm' | 'pnpm' | 'yarn';
+  return { lockRoot, manager, ...(typeof declared === 'string' ? { declared } : {}) };
 }
 
 async function runCheck(
@@ -354,6 +388,9 @@ async function runCheck(
   const commandText = [command, ...args].join(' ');
   try {
     const result = execute ? await execute(command, args, cwd, env, timeoutMs) : undefined;
+    if (execute && result === undefined && name.startsWith('Install dependencies')) {
+      throw new Error('The supplied executor did not provide an installation result; refusing to run a real package install.');
+    }
     const output = result ?? await executeWithProcessGroup(command, args, cwd, env, timeoutMs);
     return { name, command: commandText, status: 'passed', durationMs: Date.now() - start, output: truncate(`${output.stdout ?? ''}${output.stderr ?? ''}`) };
   } catch (error) {
@@ -364,7 +401,7 @@ async function runCheck(
   }
 }
 
-async function executeWithProcessGroup(
+export async function executeWithProcessGroup(
   command: string,
   args: string[],
   cwd: string,
@@ -382,59 +419,47 @@ async function executeWithProcessGroup(
     const unregisterGroup = child.pid ? trackProcessGroup(child.pid) : () => undefined;
     let stdout = '';
     let stderr = '';
-    let timedOut = false;
+    const stdoutDecoder = new StringDecoder('utf8');
+    const stderrDecoder = new StringDecoder('utf8');
     let settled = false;
-    let killTimer: NodeJS.Timeout | undefined;
     const timeout = setTimeout(() => {
-      timedOut = true;
-      signalProcessGroup(child, 'SIGTERM');
-      killTimer = setTimeout(() => signalProcessGroup(child, 'SIGKILL'), 750);
+      void finish(new Error(`Command exceeded its ${timeoutMs} ms timeout.`), true);
     }, timeoutMs);
-    const append = (current: string, chunk: Buffer): string => {
-      const remaining = 2 * 1024 * 1024 - Buffer.byteLength(current);
-      return remaining <= 0 ? current : current + chunk.toString('utf8').slice(0, remaining);
+    const append = (current: string, chunk: string): string => {
+      const marker = '\n… [middle of command output omitted] …\n';
+      const limit = 2 * 1024 * 1024;
+      const next = current + chunk;
+      if (next.length <= limit) return next;
+      const middle = current.indexOf(marker);
+      const head = middle >= 0 ? current.slice(0, middle) : next.slice(0, limit / 2);
+      return head + marker + next.slice(-limit / 2);
     };
-    child.stdout?.on('data', (chunk: Buffer) => { stdout = append(stdout, chunk); });
-    child.stderr?.on('data', (chunk: Buffer) => { stderr = append(stderr, chunk); });
-    const finish = (error?: Error): void => {
+    child.stdout?.on('data', (chunk: Buffer) => { stdout = append(stdout, stdoutDecoder.write(chunk)); });
+    child.stderr?.on('data', (chunk: Buffer) => { stderr = append(stderr, stderrDecoder.write(chunk)); });
+    const finish = async (error?: Error, timedOut = false): Promise<void> => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      if (killTimer) clearTimeout(killTimer);
-      if (error) reject(error);
+      if (!timedOut) await new Promise((done) => setTimeout(done, 50));
+      stdout = append(stdout, stdoutDecoder.end());
+      stderr = append(stderr, stderrDecoder.end());
+      if (child.pid) await terminateProcessGroup(child.pid, timedOut ? 100 : 0);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      unregisterGroup();
+      if (error) reject(Object.assign(error, { stdout, stderr, ...(timedOut ? { code: 'ETIMEDOUT', timedOut: true } : {}) }));
+      else resolve({ stdout, stderr });
     };
-    child.once('error', async (error) => {
-      if (child.pid) await terminateProcessGroup(child.pid, 0);
-      unregisterGroup();
-      const failure = Object.assign(error, { stdout, stderr, timedOut });
-      finish(failure);
+    child.once('error', (error) => {
+      void finish(error);
     });
-    child.once('close', async (code, signal) => {
-      if (child.pid) await terminateProcessGroup(child.pid);
-      unregisterGroup();
-      if (timedOut) {
-        finish(Object.assign(new Error(`Command exceeded its ${timeoutMs} ms timeout.`), { code: 'ETIMEDOUT', stdout, stderr, timedOut: true }));
-      } else if (code === 0) {
-        finish();
-        resolve({ stdout, stderr });
-      } else {
-        finish(Object.assign(new Error(`Command exited with ${signal ? `signal ${signal}` : `code ${code}`}.`), { stdout, stderr }));
-      }
+    child.once('exit', (code, signal) => {
+      void finish(code === 0 ? undefined : new Error(`Command exited with ${signal ? `signal ${signal}` : `code ${code}`}.`));
     });
   });
 }
 
-function signalProcessGroup(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
-  if (!child.pid) return;
-  try {
-    if (process.platform === 'win32') child.kill(signal);
-    else process.kill(-child.pid, signal);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') child.kill(signal);
-  }
-}
-
-function sanitizedEnvironment(home: string): NodeJS.ProcessEnv {
+export function sanitizedEnvironment(home: string): NodeJS.ProcessEnv {
   const allowed = new Set(['PATH', 'SYSTEMROOT', 'WINDIR', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ']);
   const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => allowed.has(key)));
   env.HOME = home;
@@ -442,14 +467,24 @@ function sanitizedEnvironment(home: string): NodeJS.ProcessEnv {
   env.NPM_CONFIG_USERCONFIG = path.join(home, 'npmrc.user');
   env.NPM_CONFIG_GLOBALCONFIG = path.join(home, 'npmrc.global');
   env.NPM_CONFIG_CACHE = path.join(home, 'npm-cache');
+  env.NPM_CONFIG_IGNORE_SCRIPTS = 'true';
+  env.YARN_IGNORE_SCRIPTS = 'true';
+  env.YARN_NODE_LINKER = 'node-modules';
+  env.YARN_ENABLE_SCRIPTS = 'false';
   env.CI = '1';
   env.COREPACK_ENABLE_UNSAFE_CUSTOM_URLS = '0';
+  env.COREPACK_ENABLE_PROJECT_SPEC = '0';
+  env.COREPACK_ENABLE_AUTO_PIN = '0';
+  env.COREPACK_HOME = path.join(home, 'corepack');
   return env;
 }
 
 function truncate(output: string): string {
   const trimmed = output.trim();
-  return trimmed.length <= maxOutputLength ? trimmed : `${trimmed.slice(0, maxOutputLength)} … [truncated]`;
+  if (trimmed.length <= maxOutputLength) return trimmed;
+  const marker = '\n… [truncated middle; beginning and end retained] …\n';
+  const headLength = Math.floor((maxOutputLength - marker.length) / 2);
+  return trimmed.slice(0, headLength) + marker + trimmed.slice(-(maxOutputLength - marker.length - headLength));
 }
 
 async function fileExists(file: string): Promise<boolean> {

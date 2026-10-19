@@ -41,4 +41,7 @@ stripe.webhooks.signature.verifyHeader(payload, header, secret);
     expect(manifest.dependencies.stripe).toBe('^23.0.0');
     expect(notes.join(' ')).toContain('requires Node.js 20 or later');
   });
+  it('accepts a bounded Node range whose minimum is supported', () => {
+    expect(stripeV23.inspectManifest?.({ engines: { node: '>=20 <25' } })).toEqual([]);
+  });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { maskSecrets, renderMarkdownReport } from '../src/core/report.js';
+import { maskSecrets, renderMarkdownReport, renderTerminalReport, sanitizeTerminalText } from '../src/core/report.js';
 import type { RunOutcome } from '../src/core/runner.js';
 import type { MigrationInfo } from '../src/core/types.js';
 
@@ -20,6 +20,69 @@ function outcome(overrides: Partial<RunOutcome> = {}): RunOutcome {
 }
 
 describe('security of Markdown reports', () => {
+  it('uses the selected SDK in an empty report and escapes verification notes', () => {
+    const report = renderMarkdownReport(migration, outcome({ changes: [], manual: [], proposedDiff: [] }), true,
+      { status: 'failed', checks: [], note: '<script>alert(1)</script>' });
+    expect(report).not.toContain('Firebase Admin');
+    expect(report).toContain('No supported Stripe SDK v22 migration usages');
+    expect(report).toContain('&lt;script&gt;');
+  });
+  it('redacts organization, GitHub, AWS and truncated private keys', () => {
+    const syntheticAwsKey = ['AK', 'IA', 'ABCDEFGHIJKLMNOP'].join('');
+    const raw = [
+      'sk_org_1234567890abcdef',
+      'ghp_abcdefghijklmnopqrstuvwxyz123456',
+      syntheticAwsKey,
+      '-----BEGIN ENCRYPTED PRIVATE KEY-----\nvery-secret-content',
+      '-----BEGIN PGP PRIVATE KEY BLOCK-----\nprivate-material',
+    ].join('\n');
+    const safe = maskSecrets(raw);
+    for (const secret of ['sk_org_1234567890abcdef', 'ghp_abcdefghijklmnopqrstuvwxyz123456', syntheticAwsKey, 'very-secret-content', 'private-material']) {
+      expect(safe).not.toContain(secret);
+      if (!['very-secret-content', 'private-material'].includes(secret)) expect(maskSecrets(secret)).not.toContain(secret);
+    }
+  });
+  it('redacts GitHub PATs, Slack tokens, encoded Firebase keys and raw privateKey values', () => {
+    const syntheticSlackToken = ['xox', 'b-1234567890-abcdefghijklmnopqrstuvwxyz'].join('');
+    const syntheticUserToken = ['xox', 'p-1234567890-abcdefghijklmnopqrstuvwxyz'].join('');
+    const syntheticPrivateKey = ['MI', 'IEabcdefghijklmnopqrstuvwxyz0123456789'].join('');
+    const secrets = [
+      'github_pat_abcdefghijklmnopqrstuvwxyz0123456789',
+      syntheticSlackToken,
+      syntheticUserToken,
+      `privateKey: "${syntheticPrivateKey}"`,
+      `\\"private_key\\": \\"${syntheticPrivateKey}\\"`,
+    ];
+    const safe = maskSecrets(secrets.join('\n'));
+    for (const secret of secrets.slice(0, 3)) expect(safe).not.toContain(secret);
+    expect(safe).not.toContain(syntheticPrivateKey);
+  });
+  it('removes terminal controls from reports and terminal output', () => {
+    const injected = 'normal\x1b]8;;https://evil.invalid\x07link\x1b]8;;\x07\x1b[2J';
+    const markdown = renderMarkdownReport(migration, outcome({
+      manual: [{ file: 'x.ts', line: 1, reason: injected, snippet: injected }], proposedDiff: [injected], changes: [],
+    }), true);
+    expect(markdown).not.toContain('\x1b');
+    expect(markdown).not.toContain('\x07');
+    expect(renderTerminalReport(markdown)).not.toContain('\x1b');
+    expect(renderTerminalReport('- note: ' + injected)).not.toContain('\x1b');
+  });
+  it('removes bidi controls before escaping report prose and console errors', () => {
+    const injected = '\u202Ehidden\u202C \x1b[2J';
+    const report = renderMarkdownReport(migration, outcome({ manifestNotes: [injected], changes: [], manual: [], proposedDiff: [] }), true);
+    expect(report).not.toMatch(/[\u202a-\u202e\u2066-\u2069\x1b]/);
+    expect(sanitizeTerminalText(injected)).toBe('hidden ');
+  });
+  it('redacts underscored secrets in escaped table cells', () => {
+    const secret = 'AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz012345678';
+    const report = renderMarkdownReport(migration, outcome({
+      changes: [{ file: 'src/x.ts', line: 1, rule: 'key', before: `private_key: "literal_secret_value"; api: "${secret}"`, after: 'redacted' }],
+      proposedDiff: [], manual: [],
+    }), true);
+    expect(report).not.toContain(secret);
+    expect(report).not.toContain('literal\\_secret\\_value');
+    expect(report).toContain('REDACTED');
+  });
   it('redacts realistic Stripe, webhook, Google API, PEM, and Firebase private-key values everywhere', () => {
     const report = renderMarkdownReport(migration, outcome({
       manifestNotes: ['Stripe key sk_test_51AbCdEfGhIjKlMnOpQr and rk_live_51AbCdEfGhIjKlMnOpQr'],

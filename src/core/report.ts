@@ -22,7 +22,7 @@ export function renderMarkdownReport(
   lines.push('');
 
   if (total === 0) {
-    lines.push('No supported Firebase Admin namespace usages were found in the scanned files.');
+    lines.push(`No supported ${escapeMarkdownText(migration.title)} usages were found in the scanned files.`);
     lines.push('');
   }
 
@@ -49,7 +49,7 @@ export function renderMarkdownReport(
     lines.push(`- Result: **${verification.status}**`);
     lines.push('- Scope: temporary project copy; the original project was not changed.');
     lines.push('- Verification commands run on this machine with a restricted environment, without copied credentials or package install scripts; project test code is still executable code and is not network-isolated.');
-    if (verification.note) lines.push(`- Note: ${verification.note}`);
+    if (verification.note) lines.push(`- Note: ${escapeMarkdownText(verification.note)}`);
     if (verification.checks.length > 0) {
       lines.push('');
       lines.push('| Check | Command | Result | Duration | Output |');
@@ -97,19 +97,47 @@ export function renderMarkdownReport(
     lines.push('3. Handle the items listed under "Needs your attention".');
   }
   lines.push('');
-  const raw = lines.join('\n');
+  const raw = stripTerminalControls(lines.join('\n'));
   const sanitized = maskSecrets(raw);
   return sanitized === raw ? raw : `${sanitized}\n> Warning: possible credentials were detected in the report and redacted. Review the source before sharing this report.`;
 }
 
 /** Redact common provider credentials and private-key material from every report field. */
 export function maskSecrets(value: string): string {
-  return value
-    .replace(/-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/g, '[PRIVATE KEY REDACTED]')
-    .replace(/((?:"|\b)private_key(?:"|\b)\s*:\s*)(?:"(?:\\.|[^"\\])*"|'[^']*'|[^,\r\n}]+)/gi, '$1"[REDACTED]"')
+  return redactPrivateKeys(value)
+    .replace(/((?:\\?"private_key\\?"|private_key|privateKey)\s*:\s*)\\?"[^"\r\n]*\\?"/gi, '$1"[REDACTED]"')
+    .replace(/((?:"|\b)private\\?_key(?:"|\b)\s*:\s*)(?:"(?:\\.|[^"\\])*"|'[^']*'|[^,\r\n}]+)/gi, '$1"[REDACTED]"')
     .replace(/\b(?:sk|rk|pk)\\?_(?:live|test)\\?_(?:[A-Za-z0-9-]|\\?_){8,}\b/gi, '[API key redacted]')
+    .replace(/\bsk_org_[A-Za-z0-9_-]{8,}\b/g, '[API key redacted]')
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, '[GitHub token redacted]')
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '[GitHub token redacted]')
+    .replace(/\bxox[bp]-[A-Za-z0-9-]{20,}\b/g, '[Slack token redacted]')
+    .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '[AWS key redacted]')
     .replace(/\bwhsec\\?_(?:[A-Za-z0-9-]|\\?_){8,}\b/gi, '[webhook secret redacted]')
     .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, '[API key redacted]');
+}
+
+function redactPrivateKeys(value: string): string {
+  const begin = /-----BEGIN ((?:(?:[A-Z0-9]+ )*PRIVATE KEY|PGP PRIVATE KEY BLOCK))-----/g;
+  let result = '';
+  let cursor = 0;
+  for (let match = begin.exec(value); match; match = begin.exec(value)) {
+    result += value.slice(cursor, match.index) + '[PRIVATE KEY REDACTED]';
+    const endMarker = `-----END ${match[1]}-----`;
+    const end = value.indexOf(endMarker, begin.lastIndex);
+    if (end < 0) return result;
+    cursor = end + endMarker.length;
+    begin.lastIndex = cursor;
+  }
+  return result + value.slice(cursor);
+}
+
+/** Escape third-party command output before placing it in a public Markdown table. */
+export function escapeUntrustedMarkdownCell(value: string): string {
+  return maskSecrets(stripTerminalControls(value))
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/`/g, '&#96;').replace(/\[/g, '&#91;').replace(/\]/g, '&#93;')
+    .replaceAll('|', '&#124;').replace(/[\r\n\u2028\u2029]+/g, ' ').trim();
 }
 
 /** Keep the Markdown artifact intact while making prose readable in a terminal. */
@@ -127,7 +155,34 @@ export function renderTerminalReport(markdown: string): string {
       .replace(/&amp;/g, '&')
       .replace(/\\([\\`*_{}\[\]()#+.!])/g, '$1');
   }).join('\n');
-  return maskSecrets(readable);
+  return sanitizeTerminalText(readable);
+}
+
+export function sanitizeTerminalText(value: string): string {
+  return maskSecrets(stripTerminalControls(value));
+}
+
+function stripTerminalControls(value: string): string {
+  let clean = '';
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code === 0x1b) {
+      const kind = value[i + 1];
+      if (kind === '[') {
+        i += 2;
+        while (i < value.length && !(value.charCodeAt(i) >= 0x40 && value.charCodeAt(i) <= 0x7e)) i++;
+      } else if (kind === ']' || kind === 'P' || kind === 'X' || kind === '^' || kind === '_') {
+        i += 2;
+        while (i < value.length && value.charCodeAt(i) !== 0x07 && !(value[i] === '\x1b' && value[i + 1] === '\\')) i++;
+        if (value[i] === '\x1b') i++;
+      } else i++;
+      continue;
+    }
+    if ((code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || (code >= 0x7f && code <= 0x9f)
+      || (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069)) continue;
+    clean += value[i];
+  }
+  return clean;
 }
 
 function markdownCell(value: string): string {
@@ -135,12 +190,13 @@ function markdownCell(value: string): string {
 }
 
 function escapeMarkdownText(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/([\\`*_{}\[\]()#+.!])/g, '\\$1');
+  return sanitizeTerminalText(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/([\\`*_{}\[\]()#+.!])/g, '\\$1')
+    .replaceAll('\\[API key redacted\\]', '[API key redacted]');
 }
 
 function inlineCode(value: string): string {
-  const normalized = value.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
+  const normalized = sanitizeTerminalText(value).replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
   const runs = [...normalized.matchAll(/`+/g)].map(([run]) => run.length);
   const delimiter = '`'.repeat(Math.max(1, ...runs) + 1);
   const needsPadding = normalized.startsWith('`') || normalized.endsWith('`') || /^\s|\s$/.test(normalized);

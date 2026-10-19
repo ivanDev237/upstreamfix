@@ -1,17 +1,23 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { execFile as execFileCallback } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { registerTemporaryCleanup } from './process-cleanup.js';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { structuredPatch } from 'diff';
 import { Project } from 'ts-morph';
 import type { ManualItem, Migration, MigrationResult, PackageManifest, ProposedFileChange } from './types.js';
+import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from './project-discovery.js';
+import { parseManifest } from './manifest.js';
 
 const execFile = promisify(execFileCallback);
 
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs']);
-const IGNORED_DIRS = new Set(['node_modules', 'dist', 'coverage', '.next', '.git', '.venv', 'venv']);
+const MAX_DIFF_INPUT_BYTES = 1024 * 1024;
+const MAX_DIFF_OUTPUT_CHARS = 64 * 1024;
+const MAX_REPORT_DIFF_CHARS = 256 * 1024;
+const LOCKFILE_NAMES = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock']);
 
 export function loadProject(cwd: string, packageName = 'firebase-admin'): Project {
   const project = new Project({
@@ -37,7 +43,7 @@ function loadScopedProject(root: string, migration: Migration): ScopedProject {
     let parsed: PackageManifest | undefined;
     let invalid = false;
     try {
-      parsed = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) as PackageManifest;
+      parsed = parseManifest<PackageManifest>(readFileSync(file, 'utf8'));
     } catch {
       invalid = true;
     }
@@ -91,7 +97,7 @@ function loadScopedProject(root: string, migration: Migration): ScopedProject {
       });
       continue;
     }
-    if (!isSourceMajorRange(declaration.range, migration.fromMajor)) {
+    if (!isSupportedSourceMajor(declaration.range, migration.fromMajor)) {
       manual.push({
         file: sourcePath,
         line: 1,
@@ -105,10 +111,6 @@ function loadScopedProject(root: string, migration: Migration): ScopedProject {
   }
 
   return { project, manual, manifestBySource };
-}
-
-function isSourceMajorRange(range: string, major: number): boolean {
-  return new RegExp(`^\\s*[~^]?${major}(?:\\.(?:\\d+|x|\\*)){0,2}\\s*$`, 'i').test(range);
 }
 
 function isRegistryVersionSpec(spec: string): boolean {
@@ -148,6 +150,9 @@ export function lockfileCommandEnvironment(home: string): NodeJS.ProcessEnv {
     NPM_CONFIG_FUND: 'false',
     NPM_CONFIG_IGNORE_SCRIPTS: 'true',
     COREPACK_ENABLE_PROJECT_SPEC: '0',
+    COREPACK_ENABLE_AUTO_PIN: '0',
+    COREPACK_ENABLE_UNSAFE_CUSTOM_URLS: '0',
+    COREPACK_HOME: path.join(home, 'corepack'),
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_TERMINAL_PROMPT: '0',
   };
@@ -159,7 +164,7 @@ function findSourceFiles(root: string, packageName: string): string[] {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const absolutePath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRS.has(entry.name)) visit(absolutePath);
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) visit(absolutePath);
         continue;
       }
       if (!entry.isFile() || entry.name.endsWith('.d.ts')) continue;
@@ -176,6 +181,10 @@ export interface RunOptions {
   dryRun: boolean;
   /** Explicit confirmation that Firebase Admin v14 will run on Node.js 22+. */
   nodeRuntime?: 22;
+  /** Yarn Classic needs a full dependency installation to regenerate yarn.lock. */
+  allowYarnLockInstall?: boolean;
+  /** Count source findings only; never regenerate lockfiles or prepare manifest writes. */
+  analysisOnly?: boolean;
 }
 
 export interface RunOutcome extends MigrationResult {
@@ -206,9 +215,9 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   }
   const scoped = loadScopedProject(options.cwd, migration);
   const project = scoped.project;
-  const originalSources = new Map<string, string>(
-    project.getSourceFiles().map((file): [string, string] => [file.getFilePath(), file.getFullText()]),
-  );
+  const originalSources = new Map<string, string>(await Promise.all(
+    project.getSourceFiles().map(async (file): Promise<[string, string]> => [file.getFilePath(), await readFile(file.getFilePath(), 'utf8')]),
+  ));
   const result = migration.transform(project);
   result.manual.unshift(...scoped.manual);
   const compatibilityNotes = migration.inspectManifest
@@ -220,7 +229,7 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   const manifestsWithChangedCode = new Set(
     result.filesChanged.map((sourcePath) => scoped.manifestBySource.get(sourcePath)).filter((file): file is string => Boolean(file)),
   );
-  const manifest = result.manual.length === 0 && result.changes.length > 0
+  const manifest = !options.analysisOnly && result.manual.length === 0 && result.changes.length > 0
     ? await migrateManifests(migration, options, manifestsWithChangedCode)
     : {
         notes: [result.manual.length > 0
@@ -233,6 +242,11 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     throw new Error('A dependency manifest needs manual review; no files were written. Resolve it and preview again.');
   }
 
+  for (const update of result.fileUpdates ?? []) {
+    if (originalSources.get(update.file)?.startsWith('\uFEFF') && !update.contents.startsWith('\uFEFF')) {
+      update.contents = `\uFEFF${update.contents}`;
+    }
+  }
   const sourceUpdates = new Map((result.fileUpdates ?? []).map((update) => [update.file, update.contents]));
   const proposedFiles: ProposedFileChange[] = [];
   const proposedDiff = result.filesChanged.flatMap((filePath) => {
@@ -248,6 +262,15 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     proposedFiles.push({ relativePath: change.relativePath, before: change.before, after: change.after });
     const diff = unifiedDiff(change.relativePath, change.before, change.after);
     if (diff) proposedDiff.push(diff);
+  }
+  let reportedCharacters = 0;
+  for (let index = 0; index < proposedDiff.length; index++) {
+    const remaining = MAX_REPORT_DIFF_CHARS - reportedCharacters;
+    if (remaining < proposedDiff[index]!.length) {
+      proposedDiff.splice(index, proposedDiff.length - index, `[Further diffs withheld: the report limit is ${MAX_REPORT_DIFF_CHARS} characters.]`);
+      break;
+    }
+    reportedCharacters += proposedDiff[index]!.length;
   }
 
   return {
@@ -270,7 +293,7 @@ async function inspectManifests(migration: Migration, cwd: string): Promise<stri
     const raw = await readFile(manifestPath, 'utf8');
     if (!raw.includes(JSON.stringify(migration.packageName))) continue;
     try {
-      const manifest = JSON.parse(raw.replace(/^\uFEFF/, '')) as PackageManifest;
+      const manifest = parseManifest<PackageManifest>(raw);
       notes.push(...(migration.inspectManifest?.(manifest) ?? []));
     } catch {
       // Invalid manifests are already surfaced as manual review items for source files.
@@ -299,7 +322,7 @@ async function migrateManifests(
     }
     let manifest: PackageManifest;
     try {
-      manifest = JSON.parse(raw.replace(/^\uFEFF/, '')) as PackageManifest;
+      manifest = parseManifest<PackageManifest>(raw);
     } catch {
       manual.push({
         file: relativePath,
@@ -365,7 +388,9 @@ async function migrateManifests(
         : existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'pnpm-lock.yaml'
           ? await regeneratePnpmLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd)
           : existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'yarn.lock'
-            ? await regenerateYarnLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd)
+            ? options.allowYarnLockInstall
+              ? await regenerateYarnLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd)
+              : { reason: 'Yarn Classic lockfile regeneration requires --allow-yarn-lock-install because it runs a full dependency installation (estimated 50–400 MB of downloads without a warm cache).' }
           : { reason: `This package uses unsupported lockfile(s): ${existingLocks.join(', ')}.` };
       if (!lockResult.contents) {
         notes.push(...fileNotes.filter((note) => !note.includes(' → ')));
@@ -430,7 +455,7 @@ async function regeneratePackageLock(
   let before: string;
   let lock: { lockfileVersion?: unknown };
   try {
-    manifest = JSON.parse(updatedManifest.replace(/^\uFEFF/, '')) as PackageManifest;
+    manifest = parseManifest<PackageManifest>(updatedManifest);
     before = await readFile(lockPath, 'utf8');
     lock = JSON.parse(before) as { lockfileVersion?: unknown };
   } catch {
@@ -456,17 +481,21 @@ async function regeneratePackageLock(
   }
 
   let temporaryDirectory: string | undefined;
+  let unregisterCleanup: (() => void) | undefined;
   try {
     temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'upstreamfix-npm-lock-'));
+    unregisterCleanup = registerTemporaryCleanup(() => rm(temporaryDirectory!, { recursive: true, force: true }));
     await writeFile(path.join(temporaryDirectory, 'package.json'), updatedManifest, 'utf8');
     await writeFile(path.join(temporaryDirectory, 'package-lock.json'), before, 'utf8');
     const args = ['install', '--package-lock-only', '--lockfile-version=3', '--ignore-scripts', '--no-audit', '--no-fund'];
+    // npm_execpath may be pnpm or Yarn when launched through dlx; resolve npm from PATH instead.
     await execFile('npm', args, { cwd: temporaryDirectory, env: lockfileCommandEnvironment(temporaryDirectory), timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
     const contents = await readFile(path.join(temporaryDirectory, 'package-lock.json'), 'utf8');
     return { before, contents };
   } catch {
     return { reason: 'npm could not regenerate package-lock.json in an isolated temporary directory.' };
   } finally {
+    unregisterCleanup?.();
     if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
   }
 }
@@ -488,7 +517,7 @@ async function regeneratePnpmLock(
   let manifest: PackageManifest;
   let before: string;
   try {
-    manifest = JSON.parse(updatedManifest.replace(/^\uFEFF/, '')) as PackageManifest;
+    manifest = parseManifest<PackageManifest>(updatedManifest);
     before = await readFile(lockPath, 'utf8');
   } catch {
     return { reason: 'The package.json or pnpm-lock.yaml could not be read for a safe lockfile update.' };
@@ -519,8 +548,10 @@ async function regeneratePnpmLock(
   }
 
   let temporaryDirectory: string | undefined;
+  let unregisterCleanup: (() => void) | undefined;
   try {
     const probeHome = await mkdtemp(path.join(tmpdir(), 'upstreamfix-pnpm-home-'));
+    const unregisterProbeHome = registerTemporaryCleanup(() => rm(probeHome, { recursive: true, force: true }));
     let versionOutput: string;
     try {
       ({ stdout: versionOutput } = await execFile('pnpm', ['--version'], {
@@ -530,6 +561,7 @@ async function regeneratePnpmLock(
       maxBuffer: 1024 * 1024,
       }));
     } finally {
+      unregisterProbeHome();
       await rm(probeHome, { recursive: true, force: true });
     }
     const installedVersion = versionOutput.trim();
@@ -544,6 +576,7 @@ async function regeneratePnpmLock(
     }
 
     temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'upstreamfix-pnpm-lock-'));
+    unregisterCleanup = registerTemporaryCleanup(() => rm(temporaryDirectory!, { recursive: true, force: true }));
     // pnpm reads packageManager and may download a different CLI automatically. The exact
     // version was checked above, so omit this metadata from the isolated temporary manifest.
     delete manifest.packageManager;
@@ -564,6 +597,7 @@ async function regeneratePnpmLock(
   } catch {
     return { reason: 'pnpm could not regenerate pnpm-lock.yaml in an isolated temporary directory; ensure the pinned pnpm version is installed and registry access is available.' };
   } finally {
+    unregisterCleanup?.();
     if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
   }
 }
@@ -585,7 +619,7 @@ async function regenerateYarnLock(
   let manifest: PackageManifest;
   let before: string;
   try {
-    manifest = JSON.parse(updatedManifest.replace(/^\uFEFF/, '')) as PackageManifest;
+    manifest = parseManifest<PackageManifest>(updatedManifest);
     before = await readFile(lockPath, 'utf8');
   } catch {
     return { reason: 'The package.json or yarn.lock could not be read for a safe lockfile update.' };
@@ -619,8 +653,10 @@ async function regenerateYarnLock(
   }
 
   let temporaryDirectory: string | undefined;
+  let unregisterCleanup: (() => void) | undefined;
   try {
     const probeHome = await mkdtemp(path.join(tmpdir(), 'upstreamfix-yarn-home-'));
+    const unregisterProbeHome = registerTemporaryCleanup(() => rm(probeHome, { recursive: true, force: true }));
     let versionOutput: string;
     try {
       ({ stdout: versionOutput } = await execFile('yarn', ['--version'], {
@@ -630,6 +666,7 @@ async function regenerateYarnLock(
       maxBuffer: 1024 * 1024,
       }));
     } finally {
+      unregisterProbeHome();
       await rm(probeHome, { recursive: true, force: true });
     }
     const installedVersion = versionOutput.trim();
@@ -644,6 +681,7 @@ async function regenerateYarnLock(
     }
 
     temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'upstreamfix-yarn-lock-'));
+    unregisterCleanup = registerTemporaryCleanup(() => rm(temporaryDirectory!, { recursive: true, force: true }));
     delete manifest.packageManager;
     await writeFile(path.join(temporaryDirectory, 'package.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
     await writeFile(path.join(temporaryDirectory, 'yarn.lock'), before, 'utf8');
@@ -661,6 +699,7 @@ async function regenerateYarnLock(
   } catch {
     return { reason: 'Yarn Classic could not regenerate yarn.lock in an isolated temporary directory; ensure the pinned Yarn 1.x version is installed and registry access is available.' };
   } finally {
+    unregisterCleanup?.();
     if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
   }
 }
@@ -700,7 +739,7 @@ function findPackageManifests(root: string): string[] {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const absolutePath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRS.has(entry.name)) visit(absolutePath);
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) visit(absolutePath);
       } else if (entry.isFile() && entry.name === 'package.json') {
         found.push(absolutePath);
       }
@@ -714,7 +753,7 @@ function addNodeEngineToManifest(raw: string): string | undefined {
   const rootStart = raw.charCodeAt(0) === 0xfeff ? 1 : 0;
   if (raw[rootStart] !== '{') return undefined;
   const engineMember = findJsonObjectMember(raw, rootStart, 'engines');
-  if (!engineMember && Object.hasOwn(JSON.parse(raw.replace(/^\uFEFF/, '')) as PackageManifest, 'engines')) return undefined;
+  if (!engineMember && Object.hasOwn(parseManifest<PackageManifest>(raw), 'engines')) return undefined;
   const objectStart = engineMember?.valueStart ?? rootStart;
   if (raw[objectStart] !== '{') return undefined;
   const objectEnd = jsonValueEnd(raw, objectStart);
@@ -731,7 +770,7 @@ function addNodeEngineToManifest(raw: string): string | undefined {
     : `${hasMembers ? ', ' : ''}${engineMember ? '"node": ">=22"' : '"engines": { "node": ">=22" }'}`;
   const updated = raw.slice(0, insertAt) + addition + raw.slice(insertAt);
   try {
-    const parsed = JSON.parse(updated.replace(/^\uFEFF/, '')) as PackageManifest;
+    const parsed = parseManifest<PackageManifest>(updated);
     return parsed.engines?.node === '>=22' ? updated : undefined;
   } catch {
     return undefined;
@@ -855,6 +894,10 @@ function jsonValueEnd(text: string, start: number): number {
 
 export function unifiedDiff(file: string, before: string, after: string): string {
   if (before === after) return '';
+  if (LOCKFILE_NAMES.has(path.basename(file))) return summarizeLockfile(file, before, after);
+  if (Buffer.byteLength(before) + Buffer.byteLength(after) > MAX_DIFF_INPUT_BYTES) {
+    return `${file}: diff withheld because the source exceeds ${MAX_DIFF_INPUT_BYTES} bytes.`;
+  }
   const patch = structuredPatch(
     `a/${file}`,
     `b/${file}`,
@@ -869,5 +912,65 @@ export function unifiedDiff(file: string, before: string, after: string): string
     output.push(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
     output.push(...hunk.lines);
   }
-  return output.join('\n');
+  const rendered = output.join('\n');
+  return rendered.length <= MAX_DIFF_OUTPUT_CHARS
+    ? rendered
+    : `${file}: diff withheld because it exceeds ${MAX_DIFF_OUTPUT_CHARS} characters.`;
+}
+
+export function summarizeLockfile(file: string, before: string, after: string): string {
+  const previous = lockfilePackages(file, before);
+  const next = lockfilePackages(file, after);
+  if (!previous || !next) return `${file}: lockfile changed; package counts unavailable (file too large or unrecognized format). Full diff withheld.`;
+  let added = 0;
+  let removed = 0;
+  let changed = 0;
+  for (const [name, version] of next) {
+    if (!previous.has(name)) added++;
+    else if (previous.get(name) !== version) changed++;
+  }
+  for (const name of previous.keys()) if (!next.has(name)) removed++;
+  return `${file}: lockfile summary — added: ${added}, removed: ${removed}, changed: ${changed}. Full diff withheld.`;
+}
+
+function lockfilePackages(file: string, contents: string): Map<string, string> | undefined {
+  if (Buffer.byteLength(contents) > 30 * 1024 * 1024) return undefined;
+  if (file.endsWith('.json')) {
+    try {
+      const parsed = JSON.parse(contents) as { packages?: Record<string, { version?: unknown }> };
+      if (!parsed.packages || typeof parsed.packages !== 'object') return undefined;
+      return new Map(Object.entries(parsed.packages)
+        .filter(([name, value]) => name !== '' && value && typeof value.version === 'string')
+        .map(([name, value]) => [name, value.version as string]));
+    } catch {
+      return undefined;
+    }
+  }
+  const packages = new Map<string, string>();
+  let section = '';
+  let name = '';
+  for (const line of contents.split(/\r?\n/)) {
+    if (file.endsWith('pnpm-lock.yaml')) {
+      if (/^(packages|snapshots):\s*$/.test(line)) { section = line.slice(0, -1); name = ''; continue; }
+      if (/^[^\s#]/.test(line)) { section = ''; name = ''; }
+      const entry = section === 'packages' ? /^  (['"]?)(.+?)\1:\s*$/.exec(line) : null;
+      if (entry) {
+        const rawName = entry[2]!.replace(/^\//, '').replace(/\(.*$/, '');
+        const separator = rawName.lastIndexOf('@');
+        name = separator > 0 ? rawName.slice(0, separator) : rawName;
+        packages.set(name, separator > 0 ? rawName.slice(separator + 1).split('(')[0]! : rawName);
+      }
+      const version = /^    version:\s*['"]?([^\s'"]+)/.exec(line);
+      if (name && version) packages.set(name, version[1]!);
+    } else {
+      if (/^[^\s#].*:\s*$/.test(line)) {
+        const selector = line.slice(0, -1).split(',')[0]!.trim().replace(/^['"]|['"]$/g, '');
+        const separator = selector.lastIndexOf('@');
+        name = separator > 0 ? selector.slice(0, separator) : selector;
+      }
+      const version = /^  version\s+['"]([^'"]+)['"]/.exec(line);
+      if (name && version) packages.set(name, version[1]!);
+    }
+  }
+  return packages.size > 0 ? packages : undefined;
 }

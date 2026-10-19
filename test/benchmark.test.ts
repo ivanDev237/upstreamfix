@@ -1,14 +1,34 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkRepos, renderBenchmarkReport, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
+import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkRepos, renderBenchmarkReport, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
+import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 
 const execFile = promisify(execFileCallback);
 
 describe('public repository benchmark helpers', () => {
+  it('analyzes source changes without invoking host lockfile regeneration', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-benchmark-analysis-'));
+    const originalPath = process.env.PATH;
+    try {
+      const bin = path.join(cwd, 'bin');
+      const marker = path.join(cwd, 'host-npm-ran');
+      await mkdir(bin);
+      await writeFile(path.join(bin, 'npm'), `#!/bin/sh\ntouch '${marker}'\nexit 9\n`);
+      await chmod(path.join(bin, 'npm'), 0o755);
+      process.env.PATH = `${bin}${path.delimiter}${originalPath ?? ''}`;
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { 'firebase-admin': '^13.0.0' }, engines: { node: '>=22' } }));
+      await writeFile(path.join(cwd, 'index.ts'), "import * as admin from 'firebase-admin';\nadmin.initializeApp();\n");
+      await writeFile(path.join(cwd, 'package-lock.json'), '{ invalid lock');
+      const result = await analyzeBenchmarkMigration(firebaseAdminV14, cwd);
+      expect(result.proposedFiles.some((file) => file.relativePath === 'package-lock.json')).toBe(false);
+      expect(result.changes.length).toBeGreaterThan(0);
+      await expect(readFile(marker, 'utf8')).rejects.toThrow();
+    } finally { process.env.PATH = originalPath; await rm(cwd, { recursive: true, force: true }); }
+  });
   it('reports the automatic rate using migration changes and manual items', () => {
     const report = renderBenchmarkReport([
       { name: 'sample', commit: 'a'.repeat(40), status: 'completed', usages: 3, migrated: 2, manual: 1, typecheck: { before: 'pass', after: 'fail: TS error' }, tests: { before: 'fail: existing test', after: 'pass' }, details: '' },
@@ -17,6 +37,21 @@ describe('public repository benchmark helpers', () => {
     expect(report).toContain('66.7%');
     expect(report).toContain('2 of 3 detected migration items');
     expect(report).toContain('| sample | `aaaaaaaaaaaa` | completed | 3 | 2 | 1 | pass | fail: TS error | fail: existing test | pass |  |');
+  });
+
+  it('escapes hostile test output before writing a public Markdown table', () => {
+    const report = renderBenchmarkReport([{
+      name: 'sample', commit: 'a'.repeat(40), status: 'failed', usages: 0, migrated: 0, manual: 0,
+      typecheck: { before: 'pass', after: 'fail: </td>\n| forged | row | \u001b[31m' },
+      tests: { before: 'pass', after: 'fail: `code` [link](javascript:alert(1))' },
+      details: '<script>alert(1)</script>',
+    }]);
+    expect(report).not.toContain('</td>');
+    expect(report).not.toContain('<script>');
+    expect(report).not.toContain('\u001b');
+    expect(report).not.toContain('\n| forged | row |');
+    expect(report).toContain('&lt;script&gt;');
+    expect(report).toContain('&#124; forged &#124; row &#124;');
   });
 
   it('rejects repositories that have not been reviewed', () => {
@@ -92,6 +127,11 @@ describe('public repository benchmark helpers', () => {
     expect(validatePackageManagerField('pnpm@9.15.0', 'package.json')).toBeUndefined();
     const args = buildBenchmarkInstallDockerArgs('/tmp/checkout', '/tmp/checkout', 'yarn', ['install'], '/tmp/cache/yarn', { memoryMb: 1024, tempMb: 128 });
     expect(args).toContain('COREPACK_ENABLE_UNSAFE_CUSTOM_URLS=0');
+  });
+  it('uses a bind volume when a checkout path contains a comma', () => {
+    const args = buildBenchmarkInstallDockerArgs('/tmp/a,b', '/tmp/a,b', 'npm', ['install'], '/tmp/cache', { memoryMb: 2048, tempMb: 128 });
+    expect(args).toContain('--volume');
+    expect(args).toContain('/tmp/a,b:/workspace');
   });
 
   it('loads the reviewed Stripe corpus as eight v22 repositories and four v23 repositories', async () => {

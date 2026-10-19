@@ -1,14 +1,16 @@
-import { execFile as execFileCallback, spawn } from 'node:child_process';
+import { execFile as execFileCallback, spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat, writeFile, mkdir, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { applyProposedDiffs, applyProposedFiles, verifyProposedMigration, type VerificationOptions } from '../src/core/verify.js';
+import { applyProposedDiffs, applyProposedFiles, copyProject, executeWithProcessGroup, verifyProposedMigration, type VerificationOptions } from '../src/core/verify.js';
 
 const temporaryDirectories: string[] = [];
 const execFile = promisify(execFileCallback);
+const processGroupProbe = spawnSync(process.execPath, ['-e', 'process.stdout.write("ready")'], { encoding: 'utf8', timeout: 3_000 });
+const processGroupsAvailable = process.env.CODEX_PERMISSION_PROFILE !== 'managed' && processGroupProbe.status === 0 && processGroupProbe.stdout === 'ready';
 
 async function makeProject(
   scripts: Record<string, string> = { typecheck: 'tsc --noEmit', test: 'vitest run' },
@@ -57,6 +59,65 @@ afterEach(async () => {
 });
 
 describe('migration verification', () => {
+  it('respects a global Git excludesFile when copying a project', async () => {
+    const cwd = await makeProject();
+    const home = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-git-global-'));
+    const copied = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-global-copy-'));
+    temporaryDirectories.push(home, copied);
+    await writeFile(path.join(cwd, 'ignored-global.txt'), 'secret');
+    const excludes = path.join(home, 'excludes');
+    await writeFile(excludes, 'ignored-global.txt\n');
+    await writeFile(path.join(home, '.gitconfig'), `[core]\n\texcludesFile = ${excludes}\n`);
+    const previousHome = process.env.HOME;
+    try {
+      process.env.HOME = home;
+      await copyProject(cwd, copied);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+    await expect(readFile(path.join(copied, 'ignored-global.txt'), 'utf8')).rejects.toThrow();
+  });
+  it('installs a nested package without a lockfile in that package directory', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ name: 'root', scripts: {} }));
+    await mkdir(path.join(cwd, 'functions'));
+    await writeFile(path.join(cwd, 'functions', 'package.json'), JSON.stringify({ dependencies: { 'firebase-admin': '^14.0.0' }, scripts: { test: 'node -e 1' } }));
+    let installDirectory = '';
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args, directory) => {
+        if (args[0] === 'install') installDirectory = directory;
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('passed');
+    expect(path.basename(installDirectory)).toBe('functions');
+  });
+  it('ignores an unrelated invalid nested manifest during verification', async () => {
+    const cwd = await makeProject({ test: 'node -e 1' });
+    await mkdir(path.join(cwd, 'broken'));
+    await writeFile(path.join(cwd, 'broken', 'package.json'), '{invalid');
+    const result = await verifyProposedMigration(cwd, [diff], { execute: async () => ({ stdout: 'ok' }) });
+    expect(result.status).toBe('passed');
+  });
+  it('parses a package manifest with a UTF-8 BOM', async () => {
+    const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"' });
+    const manifest = await readFile(path.join(cwd, 'package.json'), 'utf8');
+    await writeFile(path.join(cwd, 'package.json'), `\uFEFF${manifest}`);
+    const result = await verifyProposedMigration(cwd, [diff], { execute: async () => ({ stdout: 'ok' }) });
+    expect(result.status).toBe('passed');
+  });
+  it.skipIf(!processGroupsAvailable)('finishes after the parent exits even if a detached descendant holds its output pipe (requires process groups)', async () => {
+    const started = Date.now();
+    const script = 'require("node:child_process").spawn(process.execPath,["-e","setTimeout(()=>{},1500)"],{detached:true,stdio:["ignore",process.stdout,process.stderr]}).unref(); process.exit(0);';
+    await executeWithProcessGroup(process.execPath, ['-e', script], os.tmpdir(), { PATH: process.env.PATH }, 500);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+  it.skipIf(!processGroupsAvailable)('preserves UTF-8 characters split across process output chunks (requires process groups)', async () => {
+    const script = 'process.stdout.write(Buffer.from([0xe2])); setTimeout(() => process.stdout.write(Buffer.from([0x82,0xac])), 20);';
+    const result = await executeWithProcessGroup(process.execPath, ['-e', script], os.tmpdir(), { PATH: process.env.PATH }, 1000);
+    expect(result.stdout).toBe('€');
+  });
   it('checks a patched temporary copy, strips secrets, and leaves the source untouched', async () => {
     const cwd = await makeProject();
     const fsmonitorMarker = path.join(cwd, 'fsmonitor-ran');
@@ -93,6 +154,61 @@ describe('migration verification', () => {
     expect(copiedCredentials.filter(Boolean)).toEqual([]);
     await expect(readFile(fsmonitorMarker, 'utf8')).rejects.toThrow();
     expect(await readFile(path.join(cwd, 'server.js'), 'utf8')).toBe(before);
+  });
+
+  it('uses a fresh npm cache per verification instead of the user cache', async () => {
+    const cwd = await makeProject();
+    const seen: string[] = [];
+    for (let run = 0; run < 2; run++) {
+      const result = await verifyProposedMigration(cwd, [diff], {
+        execute: async (_command, args, _directory, env) => {
+          if (args[0] === 'install') seen.push(env.NPM_CONFIG_CACHE ?? '');
+          return { stdout: 'offline stub' };
+        },
+      });
+      expect(result.status).toBe('passed');
+    }
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).not.toBe(seen[1]);
+    expect(seen.every((cache) => cache.includes('upstreamfix-verify-') && !cache.startsWith(path.join(os.homedir(), '.npm')))).toBe(true);
+    await Promise.all(seen.map(async (cache) => await expect(stat(cache)).rejects.toMatchObject({ code: 'ENOENT' })));
+  });
+
+  it('never falls through to a real installation when an install stub returns nothing', async () => {
+    const cwd = await makeProject();
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async () => undefined,
+    });
+    expect(result.status).toBe('failed');
+    expect(result.checks[0]?.output).toContain('did not provide an installation result');
+  });
+
+  it('reuses a private pnpm store across runs without exposing it to project scripts', async () => {
+    const cwd = await makeProject({ test: 'node -e "process.exit(0)"' }, 'pnpm@10.0.0');
+    const cache = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-pnpm-cache-test-'));
+    temporaryDirectories.push(cache);
+    const store = path.join(cache, 'store');
+    let reused = false;
+    for (let run = 0; run < 2; run++) {
+      const result = await verifyProposedMigration(cwd, [diff], {
+        pnpmCacheRoot: store,
+        execute: async (command, args, _directory, env) => {
+          if (command === 'pnpm' && args[0] === 'install') {
+            const temporaryStore = args[args.indexOf('--store-dir') + 1]!;
+            expect(temporaryStore).toBe(store);
+            if (run === 1) reused = (await readFile(path.join(temporaryStore, 'marker'), 'utf8')) === 'cached';
+            await mkdir(temporaryStore, { recursive: true });
+            await writeFile(path.join(temporaryStore, 'marker'), 'cached');
+          } else {
+            expect(env.HOME).not.toContain(cache);
+            expect(JSON.stringify(env)).not.toContain(store);
+          }
+          return { stdout: 'ok' };
+        },
+      });
+      expect(result.status).toBe('passed');
+    }
+    expect(reused).toBe(true);
   });
 
   it('refuses to verify a folder that is not a Git working tree', async () => {
@@ -142,6 +258,20 @@ describe('migration verification', () => {
     expect(commandRan).toBe(false);
   });
 
+  it('uses the same validated package manager for installation and scripts', async () => {
+    const cwd = await makeProject({ typecheck: 'echo types', test: 'echo tests' }, 'pnpm@10.0.0');
+    const commands: string[] = [];
+    const result = await verifyProposedMigration(cwd, [diff], {
+      pnpmCacheRoot: path.join(cwd, 'private-pnpm-cache'),
+      execute: async (command) => {
+        commands.push(command);
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('passed');
+    expect(commands).toEqual(['pnpm', 'pnpm', 'pnpm']);
+  });
+
   it('applies structured migration contents to filenames containing tabs', async () => {
     const cwd = await makeProject();
     const oddPath = path.join(cwd, 'src', 'x\ty.ts');
@@ -166,6 +296,17 @@ describe('migration verification', () => {
     expect(await readFile(oddPath, 'utf8')).toBe('const original = true;\n');
   });
 
+  it('refuses a proposed file whose parent is a symbolic link', async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-symlink-project-'));
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-symlink-outside-'));
+    temporaryDirectories.push(project, outside);
+    await writeFile(path.join(outside, 'target.ts'), 'old');
+    await symlink(outside, path.join(project, 'linked'));
+    await expect(applyProposedFiles(project, [{ relativePath: 'linked/target.ts', before: 'old', after: 'new' }]))
+      .rejects.toThrow('symbolic link');
+    expect(await readFile(path.join(outside, 'target.ts'), 'utf8')).toBe('old');
+  });
+
   it('records typecheck and test failures separately', async () => {
     const cwd = await makeProject();
     const result = await verifyProposedMigration(cwd, [diff], {
@@ -179,6 +320,23 @@ describe('migration verification', () => {
     expect(result.status).toBe('failed');
     expect(result.checks.find((check) => check.name.startsWith('Typecheck'))?.output).toContain('TS2322');
     expect(result.checks.find((check) => check.name.startsWith('Tests'))?.output).toContain('1 failed');
+  });
+
+  it('keeps the first and last lines of long command output', async () => {
+    const cwd = await makeProject();
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args) => {
+        if (args.includes('typecheck')) throw Object.assign(new Error('failed'), {
+          stderr: `initial context\n${'progress\n'.repeat(1000)}TS2339: actual error at the end`,
+        });
+        return { stdout: 'ok' };
+      },
+    });
+    const output = result.checks.find((check) => check.name.startsWith('Typecheck'))?.output ?? '';
+    expect(output).toContain('initial context');
+    expect(output).toContain('TS2339: actual error at the end');
+    expect(output).toContain('[truncated');
+    expect(output.length).toBeLessThanOrEqual(4_000);
   });
 
   it('reports timeouts and continues to capture the test command result', async () => {
@@ -255,6 +413,7 @@ describe('migration verification', () => {
     const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"', test: 'node -e "process.exit(0)"' }, 'pnpm@10.0.0');
     const commands: string[] = [];
     const result = await verifyProposedMigration(cwd, [diff], {
+      pnpmCacheRoot: path.join(cwd, '.test-pnpm-store'),
       execute: async (command, args) => {
         commands.push(`${command} ${args.join(' ')}`);
         return { stdout: 'ok' };
@@ -265,6 +424,17 @@ describe('migration verification', () => {
     expect(commands).toContain('pnpm run typecheck');
     expect(commands).toContain('pnpm run test');
   });
+  it('refuses an unreadable Yarn version before installation', async () => {
+    const cwd = await makeProject({ test: 'node -e "process.exit(0)"' });
+    await writeFile(path.join(cwd, 'yarn.lock'), '__metadata:\n  version: 8\n');
+    const commands: string[] = [];
+    const result = await verifyProposedMigration(cwd, [diff], { execute: async (command, args) => {
+      commands.push(`${command} ${args.join(' ')}`);
+      return { stdout: args[0] === '--version' ? 'unknown build' : 'ok' };
+    } });
+    expect(result.status).toBe('failed');
+    expect(commands).not.toContain('yarn install');
+  });
 
   it('uses Yarn to run scripts when the project declares Yarn', async () => {
     const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"', test: 'node -e "process.exit(0)"' }, 'yarn@4.0.0');
@@ -272,13 +442,47 @@ describe('migration verification', () => {
     const result = await verifyProposedMigration(cwd, [diff], {
       execute: async (command, args) => {
         commands.push(`${command} ${args.join(' ')}`);
-        return { stdout: 'ok' };
+        return { stdout: args[0] === '--version' ? '4.0.0' : 'ok' };
       },
     });
 
     expect(result.status).toBe('passed');
     expect(commands).toContain('yarn run typecheck');
     expect(commands).toContain('yarn run test');
+  });
+
+  it('runs Yarn Berry without unsupported CLI flags and with the node-modules linker', async () => {
+    const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"' }, 'yarn@4.0.0');
+    let install: { args: string[]; env: NodeJS.ProcessEnv } | undefined;
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (command, args, _commandCwd, env) => {
+        if (command === 'yarn' && args[0] === 'install') install = { args, env };
+        return { stdout: args[0] === '--version' ? '4.0.0' : 'offline stub' };
+      },
+    });
+    expect(result.status).toBe('passed');
+    expect(install?.args).not.toContain('--non-interactive');
+    expect(install?.env.YARN_NODE_LINKER).toBe('node-modules');
+    expect(install?.env.YARN_ENABLE_SCRIPTS).toBe('false');
+    expect(install?.env.COREPACK_ENABLE_PROJECT_SPEC).toBe('0');
+    expect(install?.env.COREPACK_HOME).toContain('upstreamfix-verify-');
+  });
+
+  it('refuses Yarn Classic when the project declares Yarn Berry', async () => {
+    const cwd = await makeProject({ test: 'node -e "process.exit(0)"' }, 'yarn@4.0.0');
+    let installed = false;
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (command, args, _directory, env) => {
+        expect(env.NPM_CONFIG_IGNORE_SCRIPTS).toBe('true');
+        expect(env.YARN_IGNORE_SCRIPTS).toBe('true');
+        if (command === 'yarn' && args[0] === '--version') return { stdout: '1.22.22' };
+        if (args[0] === 'install') installed = true;
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('failed');
+    expect(result.note).toContain('Yarn');
+    expect(installed).toBe(false);
   });
 
   it('kills the timed out script process group, including its child process', async () => {

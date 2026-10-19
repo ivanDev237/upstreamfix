@@ -1,15 +1,17 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { execFile as execFileCallback } from 'node:child_process';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFile as execFileCallback, spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createProgram } from '../src/cli.js';
+import { createProgram, completedBranchNotice, safeCliError, withCompletedBranchNotice } from '../src/cli.js';
 
 const execFile = promisify(execFileCallback);
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temporaryDirectories: string[] = [];
+const subprocessProbe = spawnSync(process.execPath, ['-e', 'process.stdout.write("ready")'], { encoding: 'utf8', timeout: 3_000 });
+const subprocessAvailable = subprocessProbe.status === 0 && subprocessProbe.stdout === 'ready';
 
 async function makeProject(firebaseAdminRange = '^13.0.0'): Promise<string> {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-cli-'));
@@ -25,6 +27,22 @@ afterEach(async () => {
 });
 
 describe('UpstreamFix CLI', () => {
+  it('sanitizes untrusted error details before printing them', () => {
+    const error = safeCliError(new Error('bad\x1b[2J\u202Ename'));
+    expect(error).toBe('upstreamfix: badname');
+  });
+  it('summarizes branches already created before a scan fails', () => {
+    expect(completedBranchNotice([{ branch: 'upstreamfix/firebase-admin-14', commit: 'abc123' }]))
+      .toContain('upstreamfix/firebase-admin-14: abc123');
+  });
+  it('reports an already committed branch when a later scan step throws', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await expect(withCompletedBranchNotice(async (record) => {
+      record({ branch: 'upstreamfix/firebase-admin-14', commit: 'abc123' });
+      throw new Error('second migration failed');
+    })).rejects.toThrow('second migration failed');
+    expect(errors.mock.calls.map(([message]) => String(message)).join('\n')).toContain('upstreamfix/firebase-admin-14: abc123');
+  });
   it('previews by default and requires Git for --write without modifying files', async () => {
     const cwd = await makeProject();
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -57,6 +75,8 @@ describe('UpstreamFix CLI', () => {
     const report = await readFile(reportPath, 'utf8');
     expect(report).toContain('Dry run: no file was written.');
     expect((await readdir(path.dirname(reportPath))).sort()).toEqual(['migration.md']);
+    expect(vi.mocked(console.log).mock.calls.map(([message]) => String(message)).join('\n'))
+      .not.toContain('No project files were written');
   });
 
   it('prints Node.js guidance cleanly while keeping the saved Markdown escaped', async () => {
@@ -79,6 +99,13 @@ describe('UpstreamFix CLI', () => {
       .rejects.toThrow('Unknown migration');
   });
 
+  it('rejects verification timeouts longer than 24 hours before any project work', async () => {
+    await expect(createProgram().parseAsync(['node', 'upstreamfix', 'migrate', 'firebase-admin@14', '--verify-timeout', '86401']))
+      .rejects.toThrow('at most 86400 seconds');
+    await expect(createProgram().parseAsync(['node', 'upstreamfix', 'scan', '--verify-timeout', '999999999999999999']))
+      .rejects.toThrow('at most 86400 seconds');
+  });
+
   it('lists migration metadata from the catalog', async () => {
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     await createProgram().parseAsync(['node', 'upstreamfix', 'list']);
@@ -95,6 +122,21 @@ describe('UpstreamFix CLI', () => {
       cwd: projectRoot,
       timeout: 10_000,
     });
+  });
+
+  it.skipIf(!subprocessAvailable)('runs the compiled CLI through a bin symlink and prints its version (requires subprocess support)', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-bin-link-'));
+    temporaryDirectories.push(cwd);
+    const bin = path.join(cwd, 'upstreamfix');
+    await symlink(path.join(projectRoot, 'dist', 'cli.js'), bin);
+    const help = spawnSync(process.execPath, [bin, '--help'], { cwd, encoding: 'utf8', timeout: 10_000 });
+    expect(help.error).toBeUndefined();
+    expect(help.status).toBe(0);
+    expect(help.stdout).toContain('Usage: upstreamfix');
+    const version = spawnSync(process.execPath, [bin, '--version'], { cwd, encoding: 'utf8', timeout: 10_000 });
+    expect(version.error).toBeUndefined();
+    expect(version.status).toBe(0);
+    expect(version.stdout.trim()).toBe('0.1.3');
   });
 
   it('scans only migrations matching dependencies in the project', async () => {
@@ -141,6 +183,11 @@ describe('UpstreamFix CLI', () => {
     expect(migrate?.helpInformation()).toContain('--verify');
     expect(migrate?.helpInformation()).toContain('--verify-timeout <seconds>');
     expect(migrate?.helpInformation()).toContain('--node-runtime <major>');
+  });
+
+  it('exposes a bounded timeout for probe commands', () => {
+    const probe = createProgram().commands.find((command) => command.name() === 'probe');
+    expect(probe?.helpInformation()).toContain('--timeout <seconds>');
   });
 
   it('previews a confirmed Node.js 22 declaration and rejects other majors', async () => {
