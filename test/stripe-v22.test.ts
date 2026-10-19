@@ -50,6 +50,14 @@ describe('Stripe Node SDK v21 → v22 migration', () => {
     const result = stripeV22.transform(project);
     expect(result.manual).toEqual([]);
   });
+  it('ignores Stripe URLs in comments and CSS class selectors in malformed unrelated files', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('comment.ts', '// https://dashboard.stripe.com\nconst broken = (\n');
+    project.createSourceFile('commented-import.ts', "// import Stripe from 'stripe';\nconst broken = (\n");
+    project.createSourceFile('style.ts', "const selector = 'div.stripe.active';\nconst broken = (\n");
+    const result = stripeV22.transform(project);
+    expect(result.manual).toEqual([]);
+  });
   it('flags unsupported Stripe import and callback forms for manual review', () => {
     const project = new Project({ useInMemoryFileSystem: true });
     project.createSourceFile('namespace.ts', "import * as S from 'stripe';\nconst client = new S.Stripe('key');\n");
