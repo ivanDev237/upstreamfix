@@ -62,6 +62,18 @@ unrelated.files.del('file_2');
     expect(next).toContain("unrelated.files.del('file_2')");
   });
 
+  it('does not rewrite a shadowing parameter with the same name as an OpenAI client', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+const client = new OpenAI();
+function unrelated(client: { files: { del(id: string): void } }) { client.files.del('other'); }
+client.files.del('real');
+`);
+    expect(outcome.manual).toEqual([]);
+    const next = outcome.fileUpdates?.[0]?.contents ?? '';
+    expect(next).toContain("client.files.del('other')");
+    expect(next).toContain("client.files.delete('real')");
+  });
+
   it('rewrites beta chat on a client declared with the imported OpenAI type', () => {
     const outcome = migrate(`import { OpenAI, ClientOptions } from 'openai';
 function make(obj: ClientOptions | OpenAI) {

@@ -1,4 +1,4 @@
-import { Node, SyntaxKind, type Project, type SourceFile } from 'ts-morph';
+import { Node, SyntaxKind, type Project, type SourceFile, type Symbol as MorphSymbol } from 'ts-morph';
 import type { Change, ManualItem, Migration, MigrationResult, PackageManifest } from '../../core/types.js';
 import { guaranteesNodeMajor } from '../../core/node-range.js';
 
@@ -36,6 +36,12 @@ function pathParts(node: Node): string[] {
   return [];
 }
 
+function rootIdentifier(node: Node): Node | undefined {
+  if (Node.isIdentifier(node)) return node;
+  if (Node.isPropertyAccessExpression(node)) return rootIdentifier(node.getExpression());
+  return undefined;
+}
+
 function addManual(result: MigrationResult, file: SourceFile, node: Node, reason: string): void {
   result.manual.push({ file: file.getFilePath(), line: file.getLineAndColumnAtPos(node.getStart()).line,
     reason, snippet: node.getText().slice(0, 500) });
@@ -67,15 +73,20 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     result.manual.push({ file: file.getFilePath(), line: 1, reason: 'The source contains syntax errors; no OpenAI edits were applied.', snippet: '' });
     return;
   }
-  const clients = new Set<string>();
+  const clients = new Set<MorphSymbol>();
   for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const initializer = variable.getInitializer();
-    if (initializer && Node.isNewExpression(initializer) && imported.has(initializer.getExpression().getText())) clients.add(variable.getName());
+    if (initializer && Node.isNewExpression(initializer) && imported.has(initializer.getExpression().getText())) {
+      const symbol = variable.getNameNode().getSymbol();
+      if (symbol) clients.add(symbol);
+    }
     // A client may be assigned in branches after its declaration. Its explicit
     // imported OpenAI type still identifies the receiver without guessing from
     // an arbitrary property name.
-    if (Node.isIdentifier(variable.getNameNode()) && imported.has(variable.getTypeNode()?.getText() ?? ''))
-      clients.add(variable.getName());
+    if (Node.isIdentifier(variable.getNameNode()) && imported.has(variable.getTypeNode()?.getText() ?? '')) {
+      const symbol = variable.getNameNode().getSymbol();
+      if (symbol) clients.add(symbol);
+    }
   }
   const edits: Edit[] = [];
   const manualStart = result.manual.length;
@@ -90,7 +101,8 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     const expression = call.getExpression();
     if (!Node.isPropertyAccessExpression(expression)) continue;
     const parts = pathParts(expression);
-    if (parts.length < 3 || !clients.has(parts[0]!)) continue;
+    const root = rootIdentifier(expression);
+    if (parts.length < 3 || !root?.getSymbol() || !clients.has(root.getSymbol()!)) continue;
     const method = parts.slice(1).join('.');
     if (method.endsWith('.runFunctions')) {
       addManual(result, file, call, 'OpenAI v5 removes runFunctions; migrate function definitions and handling to runTools manually.');
@@ -109,7 +121,8 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     const beta = property.getExpression();
     if (!Node.isPropertyAccessExpression(beta) || beta.getName() !== 'beta') continue;
     const root = pathParts(beta.getExpression());
-    if (root.length === 1 && clients.has(root[0]!)) addEdit(edits, file, beta, root[0]!, 'beta-chat');
+    const rootNode = rootIdentifier(beta.getExpression());
+    if (root.length === 1 && rootNode?.getSymbol() && clients.has(rootNode.getSymbol()!)) addEdit(edits, file, beta, root[0]!, 'beta-chat');
   }
   for (const property of file.getDescendantsOfKind(SyntaxKind.PropertyAssignment)) {
     if (property.getName() !== 'httpAgent') continue;
