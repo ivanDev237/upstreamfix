@@ -12,6 +12,10 @@ const execFile = promisify(execFileCallback);
 
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs']);
 const IGNORED_DIRS = new Set(['node_modules', 'dist', 'coverage', '.next', '.git', '.venv', 'venv']);
+const MAX_DIFF_INPUT_BYTES = 1024 * 1024;
+const MAX_DIFF_OUTPUT_CHARS = 64 * 1024;
+const MAX_REPORT_DIFF_CHARS = 256 * 1024;
+const LOCKFILE_NAMES = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock']);
 
 export function loadProject(cwd: string, packageName = 'firebase-admin'): Project {
   const project = new Project({
@@ -248,6 +252,15 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     proposedFiles.push({ relativePath: change.relativePath, before: change.before, after: change.after });
     const diff = unifiedDiff(change.relativePath, change.before, change.after);
     if (diff) proposedDiff.push(diff);
+  }
+  let reportedCharacters = 0;
+  for (let index = 0; index < proposedDiff.length; index++) {
+    const remaining = MAX_REPORT_DIFF_CHARS - reportedCharacters;
+    if (remaining < proposedDiff[index]!.length) {
+      proposedDiff.splice(index, proposedDiff.length - index, `[Further diffs withheld: the report limit is ${MAX_REPORT_DIFF_CHARS} characters.]`);
+      break;
+    }
+    reportedCharacters += proposedDiff[index]!.length;
   }
 
   return {
@@ -855,6 +868,10 @@ function jsonValueEnd(text: string, start: number): number {
 
 export function unifiedDiff(file: string, before: string, after: string): string {
   if (before === after) return '';
+  if (LOCKFILE_NAMES.has(path.basename(file))) return summarizeLockfile(file, before, after);
+  if (Buffer.byteLength(before) + Buffer.byteLength(after) > MAX_DIFF_INPUT_BYTES) {
+    return `${file}: diff withheld because the source exceeds ${MAX_DIFF_INPUT_BYTES} bytes.`;
+  }
   const patch = structuredPatch(
     `a/${file}`,
     `b/${file}`,
@@ -869,5 +886,56 @@ export function unifiedDiff(file: string, before: string, after: string): string
     output.push(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
     output.push(...hunk.lines);
   }
-  return output.join('\n');
+  const rendered = output.join('\n');
+  return rendered.length <= MAX_DIFF_OUTPUT_CHARS
+    ? rendered
+    : `${file}: diff withheld because it exceeds ${MAX_DIFF_OUTPUT_CHARS} characters.`;
+}
+
+function summarizeLockfile(file: string, before: string, after: string): string {
+  const previous = lockfilePackages(file, before);
+  const next = lockfilePackages(file, after);
+  if (!previous || !next) return `${file}: lockfile changed; package counts unavailable (file too large or unrecognized format). Full diff withheld.`;
+  let added = 0;
+  let removed = 0;
+  let changed = 0;
+  for (const [name, version] of next) {
+    if (!previous.has(name)) added++;
+    else if (previous.get(name) !== version) changed++;
+  }
+  for (const name of previous.keys()) if (!next.has(name)) removed++;
+  return `${file}: lockfile summary — added: ${added}, removed: ${removed}, changed: ${changed}. Full diff withheld.`;
+}
+
+function lockfilePackages(file: string, contents: string): Map<string, string> | undefined {
+  if (Buffer.byteLength(contents) > 30 * 1024 * 1024) return undefined;
+  if (file.endsWith('.json')) {
+    try {
+      const parsed = JSON.parse(contents) as { packages?: Record<string, { version?: unknown }> };
+      if (!parsed.packages || typeof parsed.packages !== 'object') return undefined;
+      return new Map(Object.entries(parsed.packages)
+        .filter(([name, value]) => name !== '' && value && typeof value.version === 'string')
+        .map(([name, value]) => [name, value.version as string]));
+    } catch {
+      return undefined;
+    }
+  }
+  const packages = new Map<string, string>();
+  let section = '';
+  let name = '';
+  for (const line of contents.split(/\r?\n/)) {
+    if (file.endsWith('pnpm-lock.yaml')) {
+      if (/^(packages|snapshots):\s*$/.test(line)) { section = line.slice(0, -1); name = ''; continue; }
+      if (/^[^\s#]/.test(line)) { section = ''; name = ''; }
+      const entry = section === 'packages' ? /^  (['"]?)(.+?)\1:\s*$/.exec(line) : null;
+      if (entry) { name = entry[2]!; packages.set(name, name); }
+      const version = /^    version:\s*['"]?([^\s'"]+)/.exec(line);
+      if (name && version) packages.set(name, version[1]!);
+    } else {
+      if (/^[^\s#].*:\s*$/.test(line)) name = line.slice(0, -1);
+      const version = /^  version\s+['"]([^'"]+)['"]/.exec(line);
+      if (name && version) packages.set(name, version[1]!);
+    }
+  }
+  return packages.size > 0 ? packages : undefined;
 }

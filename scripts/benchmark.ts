@@ -10,6 +10,7 @@ import type { Migration, PackageManifest } from '../src/core/types.js';
 import { maskSecrets } from '../src/core/report.js';
 import { newTypeScriptDiagnostics, parseTypeScriptDiagnostics } from '../src/core/diagnostic-diff.js';
 import { runMigration } from '../src/core/runner.js';
+import { applyProposedFiles } from '../src/core/verify.js';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 import { migrations } from '../src/migrations/index.js';
 
@@ -534,17 +535,9 @@ export async function benchmarkOne(
     result.usages = result.migrated + result.manual;
     result.details = outcome.manifestNotes.join(' ');
 
-    await validatePatchPaths(outcome.proposedDiff);
-    if (outcome.proposedDiff.length > 0) {
-      const patch = path.join(root, `${repo.name.replace(/[^A-Za-z0-9_.-]/g, '_')}.patch`);
-      await writeFile(patch, `${outcome.proposedDiff.join('\n')}\n`, 'utf8');
-      try {
-        await run('git', ['apply', '--check', patch], checkout, home);
-        await run('git', ['apply', patch], checkout, home);
-      } finally {
-        await rm(patch, { force: true });
-      }
-    }
+    // Display diffs may summarize large lockfiles and are not guaranteed to be
+    // executable patches. Apply the exact, path-checked file changes instead.
+    await applyProposedFiles(checkout, outcome.proposedFiles);
 
     const changedSources = outcome.filesChanged
       .filter((file) => /\.(?:[cm]?js|jsx|tsx?)$/i.test(file) && !file.endsWith('.d.ts'))

@@ -37,6 +37,25 @@ describe('migration report formatting', () => {
     expect(diff).toContain('+changed 45');
   });
 
+  it('summarizes a large lockfile without exposing its complete diff', () => {
+    const before = JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/a': { version: '1.0.0' }, 'node_modules/b': { version: '1.0.0' } } }, null, 2) + '\n' + ' '.repeat(2_000_000);
+    const after = JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/a': { version: '2.0.0' }, 'node_modules/c': { version: '1.0.0' } } }, null, 2) + '\n' + ' '.repeat(2_000_000);
+    const report = unifiedDiff('package-lock.json', before, after);
+    expect(report).toContain('added: 1');
+    expect(report).toContain('removed: 1');
+    expect(report).toContain('changed: 1');
+    expect(report.length).toBeLessThan(10_000);
+    expect(report).not.toContain('@@');
+  });
+
+  it('bounds the diff for a large non-lockfile source', () => {
+    const before = 'old line\n'.repeat(100_000);
+    const after = 'new line\n'.repeat(100_000);
+    const report = unifiedDiff('src/generated.ts', before, after);
+    expect(report).toContain('diff withheld');
+    expect(report.length).toBeLessThan(1_000);
+  });
+
   it('escapes multiline and pipe characters in Markdown table cells', () => {
     const report = renderMarkdownReport(
       { id: 'test', title: 'Test', fromMajor: 1, toMajor: 2, releasedAt: '2026-01-01', rules: ['replace'], guideUrl: 'https://example.com' },

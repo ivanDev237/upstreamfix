@@ -221,6 +221,15 @@ export async function applyProposedFiles(projectCopy: string, changes: ProposedF
     const key = process.platform === 'win32' ? relative.toLowerCase() : relative;
     if (seen.has(key)) throw new Error(`A proposed change contains a duplicate path: ${change.relativePath}`);
     seen.add(key);
+    let ancestor = root;
+    for (const component of relative.split(path.sep)) {
+      ancestor = path.join(ancestor, component);
+      const info = await lstat(ancestor).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return undefined;
+        throw error;
+      });
+      if (info?.isSymbolicLink()) throw new Error(`A proposed change crosses a symbolic link: ${change.relativePath}`);
+    }
     const current = await readFile(absolute, 'utf8').catch(() => undefined);
     if (current !== change.before) throw new Error(`The temporary project does not match the migration input for ${change.relativePath}.`);
     await mkdir(path.dirname(absolute), { recursive: true });

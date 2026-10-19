@@ -166,6 +166,17 @@ describe('migration verification', () => {
     expect(await readFile(oddPath, 'utf8')).toBe('const original = true;\n');
   });
 
+  it('refuses a proposed file whose parent is a symbolic link', async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-symlink-project-'));
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-symlink-outside-'));
+    temporaryDirectories.push(project, outside);
+    await writeFile(path.join(outside, 'target.ts'), 'old');
+    await symlink(outside, path.join(project, 'linked'));
+    await expect(applyProposedFiles(project, [{ relativePath: 'linked/target.ts', before: 'old', after: 'new' }]))
+      .rejects.toThrow('symbolic link');
+    expect(await readFile(path.join(outside, 'target.ts'), 'utf8')).toBe('old');
+  });
+
   it('records typecheck and test failures separately', async () => {
     const cwd = await makeProject();
     const result = await verifyProposedMigration(cwd, [diff], {
