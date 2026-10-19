@@ -34,12 +34,15 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
   const applicable = new Set((await findApplicableMigrations(project)).map((item) => item.id));
   const proposals: Proposal[] = [];
   for (const migration of migrations) {
-    if (config.ignore.includes(migration.id)) continue;
     const branch = `upstreamfix/${migration.id.replace(/[^A-Za-z0-9._-]+/g, '-')}`;
     const common = {
       schema: 1 as const, migration: migration.id, base, branch,
       reviewers: config.reviewers, labels: config.labels,
     };
+    if (config.ignore.includes(migration.id)) {
+      proposals.push({ ...common, status: 'none', files: [], verification: 'skipped', report: 'This migration is ignored by the current reviewed .upstreamfix.yml.' });
+      continue;
+    }
     if (!applicable.has(migration.id)) {
       proposals.push({ ...common, status: 'none', files: [], verification: 'skipped', report: 'This migration is no longer applicable to the repository.' });
       continue;

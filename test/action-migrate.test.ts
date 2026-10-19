@@ -27,6 +27,20 @@ it('records migrations that no longer apply without writing inside the client ch
   await expect(readFile(path.join(client, 'proposals.json'), 'utf8')).rejects.toThrow();
 });
 
+it('emits a none proposal for an ignored migration so stale bot PRs can close', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-action-ignore-'));
+  roots.push(root);
+  const client = path.join(root, 'client');
+  await execFile('git', ['init', '-q', client]);
+  await writeFile(path.join(client, 'package.json'), '{"name":"safe","version":"1.0.0"}\n');
+  await writeFile(path.join(client, '.upstreamfix.yml'), 'ignore:\n  - firebase-admin@14\n');
+  await execFile('git', ['add', '.'], { cwd: client });
+  await execFile('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base'], { cwd: client });
+  const base = (await execFile('git', ['rev-parse', 'HEAD'], { cwd: client })).stdout.trim();
+  const proposals = await prepareProposals(client, path.join(root, 'output'), base, 'workflow_dispatch');
+  expect(proposals.find((item) => item.migration === 'firebase-admin@14')).toMatchObject({ status: 'none', verification: 'skipped' });
+});
+
 it('refuses pull-request events before examining a client repository', async () => {
   await expect(prepareProposals('/does-not-exist', '/tmp/upstreamfix-unused', 'a'.repeat(40), 'pull_request_target'))
     .rejects.toThrow('Only schedule and workflow_dispatch');
