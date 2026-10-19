@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { validateProposal, validateProposalEnvelope, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
+import { validateProposal, validateProposalEnvelope, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, isDismissedClosure, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
 
 const base = 'a'.repeat(40);
 const commit = 'b'.repeat(40);
@@ -11,6 +11,46 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('distinguishes a human refusal from bot closure, merged PR, and explicit dismissed label', () => {
+    const botClosure = [{ event: 'closed', actor: { login: 'github-actions[bot]' } }];
+    const humanClosure = [{ event: 'closed', actor: { login: 'maintainer' } }];
+    expect(isDismissedClosure({ state: 'closed', labels: [] }, botClosure)).toBe(false);
+    expect(isDismissedClosure({ state: 'closed', merged_at: '2026-10-19T00:00:00Z', labels: [] }, humanClosure)).toBe(false);
+    expect(isDismissedClosure({ state: 'closed', labels: [] }, humanClosure)).toBe(true);
+    expect(isDismissedClosure({ state: 'open', labels: [{ name: 'upstreamfix:dismissed' }] }, [])).toBe(true);
+  });
+  it('always closes stale managed items when the migration becomes inapplicable', async () => {
+    const publisher: ProposalPublisher = {
+      isDismissed: vi.fn(async () => true), findPullRequest: vi.fn(async () => 42),
+      pushBranch: vi.fn(async () => undefined), openPullRequest: vi.fn(async () => undefined),
+      updatePullRequest: vi.fn(async () => undefined), closePullRequest: vi.fn(async () => undefined),
+      upsertIssue: vi.fn(async () => undefined), closeIssue: vi.fn(async () => undefined),
+    };
+    await reconcileProposal({ ...proposal, status: 'none', commit: undefined, files: [] }, publisher);
+    expect(publisher.closePullRequest).toHaveBeenCalledWith(42);
+    expect(publisher.closeIssue).toHaveBeenCalled();
+  });
+  it('moves manual to ready and updates the PR after main changes despite bot-closed history', async () => {
+    let pullNumber: number | undefined;
+    const publisher: ProposalPublisher = {
+      isDismissed: vi.fn(async () => isDismissedClosure({ state: 'closed', labels: [] },
+        [{ event: 'closed', actor: { login: 'github-actions[bot]' } }])),
+      findPullRequest: vi.fn(async () => pullNumber),
+      pushBranch: vi.fn(async () => undefined),
+      openPullRequest: vi.fn(async () => { pullNumber = 42; }),
+      updatePullRequest: vi.fn(async () => undefined),
+      closePullRequest: vi.fn(async () => undefined),
+      upsertIssue: vi.fn(async () => undefined),
+      closeIssue: vi.fn(async () => undefined),
+    };
+    await reconcileProposal({ ...proposal, status: 'manual', commit: undefined, files: [] }, publisher);
+    await reconcileProposal(proposal, publisher);
+    await reconcileProposal({ ...proposal, base: 'c'.repeat(40), commit: 'd'.repeat(40) }, publisher);
+    expect(publisher.upsertIssue).toHaveBeenCalledTimes(1);
+    expect(publisher.openPullRequest).toHaveBeenCalledTimes(1);
+    expect(publisher.updatePullRequest).toHaveBeenCalledTimes(1);
+    expect(publisher.closeIssue).toHaveBeenCalledTimes(2);
+  });
   it('rejects hostile branch and commit metadata before bundle or Git access', () => {
     expect(() => validateProposalEnvelope({ ...proposal, branch: '--upload-pack=evil' }, base)).toThrow('branch');
     expect(() => validateProposalEnvelope({ ...proposal, commit: '--upload-pack=evil' }, base)).toThrow('commit');

@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { reconcileProposal, validateProposal, validateProposalEnvelope, parseSafeRawDiff, parseCommitParents, findManagedIssue, type Proposal, type ProposalPublisher } from './publish.js';
+import { reconcileProposal, validateProposal, validateProposalEnvelope, parseSafeRawDiff, parseCommitParents, findManagedIssue, isDismissedClosure, type Proposal, type ProposalPublisher } from './publish.js';
 import { parseActionConfig } from './config.js';
 import { sanitizeTerminalText } from '../core/report.js';
 
@@ -79,19 +79,46 @@ async function findPullRequest(proposal: Proposal): Promise<number | undefined> 
   return pulls[0]?.number;
 }
 
-async function hasClosedPullRequest(proposal: Proposal): Promise<boolean> {
-  const pulls = await request<Array<{ number: number }>>(`/pulls?state=closed&head=${encodeURIComponent(`${owner}:${proposal.branch}`)}&base=${encodeURIComponent(defaultBranch)}&per_page=100`);
-  return pulls.length > 0;
+async function closureEvents(number: number): Promise<Array<{ event?: string; actor?: { login?: string } }>> {
+  const events: Array<{ event?: string; actor?: { login?: string } }> = [];
+  for (let page = 1; page <= 10; page++) {
+    const batch = await request<typeof events>(`/issues/${number}/events?per_page=100&page=${page}`);
+    events.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return events;
+}
+
+async function hasDismissedPullRequest(proposal: Proposal): Promise<boolean> {
+  for (let page = 1; page <= 10; page++) {
+    const pulls = await request<Array<{ number: number; state?: string; merged_at?: string | null; labels?: Array<{ name?: string }> }>>(
+      `/pulls?state=all&head=${encodeURIComponent(`${owner}:${proposal.branch}`)}&base=${encodeURIComponent(defaultBranch)}&per_page=100&page=${page}`);
+    for (const pull of pulls) if (isDismissedClosure(pull, pull.state === 'closed' ? await closureEvents(pull.number) : [])) return true;
+    if (pulls.length < 100) break;
+  }
+  return false;
 }
 
 async function findIssue(proposal: Proposal, state = 'open'): Promise<number | undefined> {
-  for (let page = 1; page <= 100; page++) {
-    const issues = await request<Array<{ number: number; title: string; body?: string | null; state?: string; user?: { login?: string }; pull_request?: unknown }>>(`/issues?state=${state}&per_page=100&page=${page}`);
+  for (let page = 1; page <= 10; page++) {
+    const issues = await request<Array<{ number: number; title: string; body?: string | null; state?: string; user?: { login?: string }; pull_request?: unknown; labels?: Array<{ name?: string }> }>>(`/issues?state=${state}&per_page=100&page=${page}`);
     const managed = findManagedIssue(issues, proposal.migration);
     if (managed) return managed.number;
     if (issues.length < 100) break;
   }
   return undefined;
+}
+
+async function hasDismissedIssue(proposal: Proposal): Promise<boolean> {
+  for (let page = 1; page <= 10; page++) {
+    const issues = await request<Array<{ number: number; title: string; body?: string | null; state?: string; user?: { login?: string }; pull_request?: unknown; labels?: Array<{ name?: string }> }>>(`/issues?state=all&per_page=100&page=${page}`);
+    for (const issue of issues) {
+      if (!findManagedIssue([issue], proposal.migration)) continue;
+      if (isDismissedClosure(issue, issue.state === 'closed' ? await closureEvents(issue.number) : [])) return true;
+    }
+    if (issues.length < 100) break;
+  }
+  return false;
 }
 
 for (const proposal of proposals) {
@@ -113,7 +140,7 @@ for (const proposal of proposals) {
     }
     validateProposal(proposal, expectedBase, parents, changedFiles, reviewedConfig);
     const publisher: ProposalPublisher = {
-      isDismissed: async (item) => await hasClosedPullRequest(item) || Boolean(await findIssue(item, 'closed')),
+      isDismissed: async (item) => await hasDismissedPullRequest(item) || await hasDismissedIssue(item),
       findPullRequest,
       pushBranch: async (item) => {
         if (!bareRoot || !item.commit) throw new Error('Verified bundle is required before pushing.');

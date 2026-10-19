@@ -36,6 +36,21 @@ interface ManagedIssueCandidate {
   state?: string;
 }
 
+interface ClosureRecord {
+  state?: string;
+  merged_at?: string | null;
+  labels?: Array<{ name?: string }>;
+}
+
+/** A bot closing its own stale proposal does not mean the maintainer refused it. */
+export function isDismissedClosure(record: ClosureRecord, events: Array<{ event?: string; actor?: { login?: string } }>): boolean {
+  if (record.labels?.some((label) => label.name === 'upstreamfix:dismissed')) return true;
+  if (record.state !== 'closed' || record.merged_at) return false;
+  const lastClosure = [...events].reverse().find((event) => event.event === 'closed');
+  const actor = lastClosure?.actor?.login;
+  return Boolean(actor && actor !== 'github-actions[bot]' && actor !== 'upstreamfix[bot]');
+}
+
 export function findManagedIssue(issues: ManagedIssueCandidate[], migration: string): ManagedIssueCandidate | undefined {
   const marker = `<!-- upstreamfix:manual:${migration} -->`;
   return issues.find((item) => !item.pull_request && item.title === `UpstreamFix: manual ${migration}`
@@ -121,7 +136,7 @@ function sameList(left: string[], right: string[]): boolean {
 }
 
 export async function reconcileProposal(proposal: Proposal, publisher: ProposalPublisher, artifactUrl?: string): Promise<void> {
-  if (await publisher.isDismissed?.(proposal)) return;
+  if (proposal.status !== 'none' && await publisher.isDismissed?.(proposal)) return;
   const existing = await publisher.findPullRequest(proposal);
   const migration = migrations.find((candidate) => candidate.id === proposal.migration);
   if (!migration) throw new Error('Unknown migration.');
