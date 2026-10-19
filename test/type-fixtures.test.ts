@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import type { ApiReport } from '../src/core/diff-api.js';
 import { generateTypeFixtures } from '../src/core/type-fixtures.js';
 
@@ -10,6 +11,12 @@ const report = (packageName: string, symbol: string): ApiReport => ({
 });
 
 describe('type-diff fixtures', () => {
+  it('can run the real SDK check as a pinned reusable GitHub workflow', () => {
+    const workflow = readFileSync(new URL('../.github/workflows/type-fixtures.yml', import.meta.url), 'utf8');
+    expect(workflow).toContain('workflow_call:');
+    expect(workflow).toContain('repository: ivanDev237/upstreamfix');
+    expect(workflow).toContain('ref: ${{ inputs.source_sha }}');
+  });
   it('derives a Stripe removed parameter fixture with exact versions', () => {
     const generated = generateTypeFixtures(report('stripe', 'Stripe.PaymentIntentCreateParams.payment_method_types'));
     expect(generated.fixtures).toHaveLength(1);
