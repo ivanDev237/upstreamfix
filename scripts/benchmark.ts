@@ -584,7 +584,10 @@ export async function benchmarkOne(
       result.details += ' OpenAI v5 uses web platform types. Check the project TypeScript lib setting (for example DOM) and compatible Node type declarations before attributing these errors to a migration rule.';
     }
     const requiresRuntimeReview = requiresRuntimeReviewFromNotes(targetNotes);
-    result.status = result.manual > 0 || requiresRuntimeReview ? 'manual review required' : 'completed';
+    const verificationRegressed = hasVerificationRegression(before.typecheck, after.typecheck)
+      || hasVerificationRegression(before.tests, after.tests);
+    if (verificationRegressed) result.details += ' A previously passing check failed after the SDK upgrade; review the project and SDK types before accepting this migration.';
+    result.status = result.manual > 0 || requiresRuntimeReview || verificationRegressed ? 'manual review required' : 'completed';
   } catch (error) {
     result.details = [result.details, error instanceof Error ? error.message : String(error)].filter(Boolean).join(' ');
   }
@@ -593,6 +596,10 @@ export async function benchmarkOne(
 
 export function requiresRuntimeReviewFromNotes(notes: string[]): boolean {
   return notes.some((note) => /\brequires Node\.js \d+ or (?:later|newer)\b/.test(note));
+}
+
+export function hasVerificationRegression(before: string, after: string): boolean {
+  return before === 'pass' && after.startsWith('fail:');
 }
 
 export function renderBenchmarkReport(
@@ -606,6 +613,7 @@ export function renderBenchmarkReport(
   const rate = detected === 0 ? 'N/A' : `${((migrated / detected) * 100).toFixed(1)}%`;
   const lines = [
     `# ${migration.title} public repository benchmark`, '',
+    ...(migration.experimental ? ['> **Experimental migration:** these results are research evidence, not validation for automatic rollout.', ''] : []),
     `Generated: ${new Date().toISOString()}`, '',
     ...(process.env.GITHUB_RUN_ID && /^\d+$/.test(process.env.GITHUB_RUN_ID) ? [`Run ID: \`${process.env.GITHUB_RUN_ID}\``, ''] : []),
     ...((process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA) && /^[0-9a-f]{40}$/.test(process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA ?? '') ? [`Tool SHA: \`${process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA}\``, ''] : []),

@@ -115,6 +115,15 @@ describe('UpstreamFix CLI', () => {
     expect(listing).toContain('2026-06-08');
     expect(listing).toContain('stripe@22');
     expect(listing).toContain('stripe@23');
+    expect(listing).toContain('openai@5');
+    expect(listing).toContain('experimental');
+  });
+
+  it('P3.4 requires --experimental for an explicit OpenAI migration', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-openai-cli-'));
+    temporaryDirectories.push(cwd);
+    await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.0.0"},"engines":{"node":">=20"}}');
+    await expect(createProgram().parseAsync(['node', 'upstreamfix', 'migrate', 'openai@5', '--cwd', cwd])).rejects.toThrow('experimental');
   });
 
   it('prints top-level help and exits successfully', async () => {

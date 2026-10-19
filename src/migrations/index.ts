@@ -10,9 +10,9 @@ import { openaiV5 } from './openai-v5/index.js';
 /** The shipped migration catalog. Adding a migration requires registering it here, not in core or the CLI. */
 export const migrations: readonly Migration[] = [firebaseAdminV14, stripeV22, stripeV23, openaiV5];
 
-export async function findApplicableMigrations(cwd: string): Promise<Migration[]> {
+export async function findApplicableMigrations(cwd: string, options: { includeExperimental?: boolean } = {}): Promise<Migration[]> {
   const manifests = await readManifests(path.resolve(cwd));
-  return migrations.filter((migration) => manifests.some((manifest) => {
+  return migrations.filter((migration) => (!migration.experimental || options.includeExperimental) && manifests.some((manifest) => {
     const sections = [manifest.dependencies, manifest.devDependencies, manifest.peerDependencies, manifest.optionalDependencies];
     return sections.some((section) => {
       const range = section?.[migration.packageName];

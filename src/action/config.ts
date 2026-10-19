@@ -5,17 +5,18 @@ export interface ActionConfig {
   verify: string[];
   reviewers: string[];
   labels: string[];
+  experimental: string[];
 }
 
 const defaults: ActionConfig = {
-  frequency: 'daily', ignore: [], exclude: [], verify: [], reviewers: [], labels: [],
+  frequency: 'daily', ignore: [], exclude: [], verify: [], reviewers: [], labels: [], experimental: [],
 };
-const lists = new Set<keyof ActionConfig>(['ignore', 'exclude', 'verify', 'reviewers', 'labels']);
+const lists = new Set<keyof ActionConfig>(['ignore', 'exclude', 'verify', 'reviewers', 'labels', 'experimental']);
 
 /** A deliberately small, auditable YAML subset. Unsupported YAML features fail closed. */
 export function parseActionConfig(source: string): ActionConfig {
   if (source.length > 16_384) throw new Error('.upstreamfix.yml exceeds 16 KiB.');
-  const config: ActionConfig = { ...defaults, ignore: [], exclude: [], verify: [], reviewers: [], labels: [] };
+  const config: ActionConfig = { ...defaults, ignore: [], exclude: [], verify: [], reviewers: [], labels: [], experimental: [] };
   let active: keyof ActionConfig | undefined;
   const seen = new Set<string>();
   for (const [index, raw] of source.replace(/^\uFEFF/, '').split(/\r?\n/).entries()) {
@@ -47,6 +48,7 @@ export function parseActionConfig(source: string): ActionConfig {
     if (values.length >= 20) throw new Error(`${active} has too many values (maximum 20).`);
     if (values.includes(value)) throw new Error(`Duplicate ${active} value: ${value}.`);
     if (active === 'ignore' && !/^[a-z0-9][a-z0-9._-]*@\d+$/i.test(value)) throw new Error(`Invalid ignore migration: ${value}.`);
+    if (active === 'experimental' && value !== 'openai@5') throw new Error(`Unsupported experimental migration: ${value}.`);
     if (active === 'exclude' && (!/^[A-Za-z0-9._/-]+$/.test(value) || value.startsWith('/') || value.split('/').some((part) => part === '..' || part === '.' || part === '.git' || !part))) {
       throw new Error(`Invalid exclude path: ${value}.`);
     }

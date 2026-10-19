@@ -54,6 +54,8 @@ export interface MigrationInfo {
   guideUrl: string;
   /** Short names of the automated transformation rules exposed to users. */
   rules: string[];
+  /** Requires an explicit opt-in because real-project verification remains incomplete. */
+  experimental?: boolean;
 }
 
 export interface Migration extends MigrationInfo {

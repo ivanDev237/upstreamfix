@@ -4,7 +4,15 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, confirmBenchmarkNodeRuntime, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkRepos, renderBenchmarkReport, requiresRuntimeReviewFromNotes, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
+import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, confirmBenchmarkNodeRuntime, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkRepos, renderBenchmarkReport, requiresRuntimeReviewFromNotes, hasVerificationRegression, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
+
+it('P3.4 marks the LUMEN pass-to-fail typecheck as needing review', () => {
+  expect(hasVerificationRegression('pass', 'fail: src/components/ErrorBoundary.tsx TS2580')).toBe(true);
+  expect(hasVerificationRegression('fail: existing', 'fail: existing')).toBe(false);
+});
+it('P3.4 marks experimental status in benchmark reports', () => {
+  expect(renderBenchmarkReport([], 'complete', 0, openaiV5)).toContain('**Experimental migration:**');
+});
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 import { openaiV5 } from '../src/migrations/openai-v5/index.js';
 
@@ -20,8 +28,10 @@ describe('public repository benchmark helpers', () => {
   it('T34 commits a measured OpenAI report instead of the obsolete zero-percent snapshot', async () => {
     const report = await readFile(new URL('../benchmark/openai-5-results.md', import.meta.url), 'utf8');
     expect(report).toContain('Automatic migration rate: **33.3%** (4 of 12 detected migration items).');
-    expect(report).toContain('Run ID: `39310995562`');
-    expect(report).toContain('Tool SHA: `cd3a35e429a440c5eeb35aac26da5365122b169b`');
+    expect(report).toContain('Run ID: `39316982622`');
+    expect(report).toContain('Tool SHA: `88273221cdc51cdf9e228c15266cb9e319cdb6a6`');
+    expect(report).toContain('| lumen | `87ad11870352` | manual review required |');
+    expect(report).toContain('| is-even-ai | `9839c1e2018f` | manual review required |');
   });
   it('declares Node 20 only in a disposable OpenAI benchmark manifest', () => {
     const manifest = { dependencies: { openai: '^4.0.0' } } as { dependencies: { openai: string }; engines?: { node: string } };

@@ -5,7 +5,7 @@ describe('.upstreamfix.yml', () => {
   it('accepts ignored migrations, excluded folders, custom checks, reviewers and labels', () => {
     expect(parseActionConfig(`frequency: weekly\nignore:\n  - stripe@23\nexclude:\n  - examples/generated\nverify:\n  - npm run typecheck\nreviewers:\n  - ivanDev237\nlabels:\n  - dependencies\n`)).toEqual({
       frequency: 'weekly', ignore: ['stripe@23'], exclude: ['examples/generated'],
-      verify: ['npm run typecheck'], reviewers: ['ivanDev237'], labels: ['dependencies'],
+      verify: ['npm run typecheck'], reviewers: ['ivanDev237'], labels: ['dependencies'], experimental: [],
     });
   });
 

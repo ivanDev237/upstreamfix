@@ -5,9 +5,29 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, expect, it } from 'vitest';
 import { prepareProposals, boundProposalReport } from '../src/action/migrate.js';
+import { parseActionConfig } from '../src/action/config.js';
 
 const execFile = promisify(execFileCallback);
 const roots: string[] = [];
+it('P3.4 requires an explicit reviewed Action opt-in for experimental OpenAI', () => {
+  expect(parseActionConfig('').experimental).toEqual([]);
+  expect(parseActionConfig('experimental:\n  - openai@5\n').experimental).toEqual(['openai@5']);
+  expect(() => parseActionConfig('experimental:\n  - stripe@22\n')).toThrow();
+});
+it('P3.4 keeps OpenAI disabled in the Action until the reviewed config opts in', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-openai-action-'));
+  roots.push(root);
+  const client = path.join(root, 'client');
+  await execFile('git', ['init', '-q', client]);
+  await writeFile(path.join(client, 'package.json'), '{"dependencies":{"openai":"^4.0.0"},"engines":{"node":">=20"}}\n');
+  await writeFile(path.join(client, 'client.ts'), "import OpenAI from 'openai';\nconst client = new OpenAI();\nclient.files.del('file_1');\n");
+  await execFile('git', ['add', '.'], { cwd: client });
+  await execFile('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base'], { cwd: client });
+  const base = (await execFile('git', ['rev-parse', 'HEAD'], { cwd: client })).stdout.trim();
+  const disabled = await prepareProposals(client, path.join(root, 'disabled'), base, 'workflow_dispatch');
+  expect(disabled.find((item) => item.migration === 'openai@5')).toMatchObject({ status: 'none', verification: 'skipped' });
+  expect(disabled.find((item) => item.migration === 'openai@5')?.report).toContain('Experimental migration disabled');
+});
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 it('bounds a 120k report without splitting a Unicode character and keeps the full artifact', async () => {

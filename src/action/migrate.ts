@@ -42,7 +42,7 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
   const actualHead = (await execFile('git', ['rev-parse', 'HEAD'], { cwd: project, timeout: 10_000 })).stdout.trim();
   if (actualHead !== base) throw new Error('The checked-out client commit differs from the workflow base SHA.');
   await assertNoCheckoutCredentials(project);
-  const applicable = new Set((await findApplicableMigrations(project)).map((item) => item.id));
+  const applicable = new Set((await findApplicableMigrations(project, { includeExperimental: config.experimental.length > 0 })).map((item) => item.id));
   const proposals: Proposal[] = [];
   for (const migration of migrations) {
     const branch = `upstreamfix/${migration.id.replace(/[^A-Za-z0-9._-]+/g, '-')}`;
@@ -52,6 +52,10 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
     };
     if (config.ignore.includes(migration.id)) {
       proposals.push({ ...common, status: 'none', files: [], verification: 'skipped', report: 'This migration is ignored by the current reviewed .upstreamfix.yml.' });
+      continue;
+    }
+    if (migration.experimental && !config.experimental.includes(migration.id)) {
+      proposals.push({ ...common, status: 'none', files: [], verification: 'skipped', report: 'Experimental migration disabled. Add it to experimental in the reviewed .upstreamfix.yml to opt in.' });
       continue;
     }
     if (!applicable.has(migration.id)) {

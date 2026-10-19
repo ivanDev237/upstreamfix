@@ -98,10 +98,10 @@ export function createProgram(): Command {
         console.log('No migrations are available in this release.');
         return;
       }
-      console.log('| Migration | Package | From → To | Released | Automated rules |');
-      console.log('|---|---|---:|---|---|');
+      console.log('| Migration | Package | From → To | Released | Status | Automated rules |');
+      console.log('|---|---|---:|---|---|---|');
       for (const migration of migrations) {
-        console.log(`| ${migration.id} | ${migration.packageName} | ${migration.fromMajor} → ${migration.toMajor} | ${migration.releasedAt} | ${migration.rules.join(', ')} |`);
+        console.log(`| ${migration.id} | ${migration.packageName} | ${migration.fromMajor} → ${migration.toMajor} | ${migration.releasedAt} | ${migration.experimental ? 'experimental' : 'supported'} | ${migration.rules.join(', ')} |`);
       }
     });
 
@@ -113,12 +113,14 @@ export function createProgram(): Command {
     .option('--write', 'apply verified changes in a new Git branch and create a commit')
     .option('--allow-dirty', 'allow a dirty working tree; the migration branch is based on committed HEAD')
     .option('--verify', 'verify proposed changes in a temporary project copy')
+    .option('--experimental', 'explicitly opt in to an experimental migration')
     .option('--node-runtime <major>', 'confirm Node.js 22 for Firebase Admin v14 or Node.js 20 for OpenAI v5; add engines.node when absent', parseNodeRuntime)
     .option('--verify-timeout <seconds>', 'maximum time per verification command', parsePositiveInteger)
     .option('--allow-yarn-lock-install', 'allow a full Yarn Classic installation to regenerate yarn.lock (estimated 50–400 MB)')
     .option('--report <file>', 'write the Markdown report to this explicit path (relative paths use --cwd)')
-    .action(async (migrationId: string, options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 20 | 22; allowYarnLockInstall?: boolean }) => {
+    .action(async (migrationId: string, options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; experimental?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 20 | 22; allowYarnLockInstall?: boolean }) => {
       const migration = migrations.find((candidate) => candidate.id === migrationId)!;
+      if (migration.experimental && !options.experimental) throw new Error(`${migration.id} is experimental. Re-run with --experimental after reviewing its limits.`);
       if (options.nodeRuntime && !((options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (options.nodeRuntime === 20 && migration.id === 'openai@5'))) throw new Error('--node-runtime 22 applies to firebase-admin@14; --node-runtime 20 applies to openai@5.');
       const cwd = path.resolve(options.cwd);
       if (options.allowYarnLockInstall) console.log('Yarn Classic lockfile regeneration may download about 50–400 MB without a warm cache.');
@@ -162,18 +164,19 @@ export function createProgram(): Command {
     .option('--write', 'apply each verified migration in a new Git branch and create a commit')
     .option('--allow-dirty', 'allow a dirty working tree; migration branches use committed HEAD')
     .option('--verify', 'verify each proposed migration in a temporary project copy')
+    .option('--include-experimental', 'include experimental migrations in this scan')
     .option('--node-runtime <major>', 'confirm Node.js 22 for Firebase Admin v14 or Node.js 20 for OpenAI v5; add engines.node when absent', parseNodeRuntime)
     .option('--verify-timeout <seconds>', 'maximum time per verification command', parsePositiveInteger)
     .option('--allow-yarn-lock-install', 'allow a full Yarn Classic installation to regenerate yarn.lock (estimated 50–400 MB)')
     .option('--report <file>', 'write Markdown reports to this explicit path (relative paths use --cwd)')
-    .action(async (options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 20 | 22; allowYarnLockInstall?: boolean }) => {
+    .action(async (options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; includeExperimental?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 20 | 22; allowYarnLockInstall?: boolean }) => {
       const cwd = path.resolve(options.cwd);
       if (options.allowYarnLockInstall) console.log('Yarn Classic lockfile regeneration may download about 50–400 MB without a warm cache.');
       if (options.allowDirty && !options.write) throw new Error('--allow-dirty can only be used together with --write.');
       const reports: string[] = [];
       const commits: Array<{ branch: string; commit: string }> = [];
       let verificationFailed = false;
-      const applicable = await findApplicableMigrations(cwd);
+      const applicable = await findApplicableMigrations(cwd, { includeExperimental: options.includeExperimental });
       if (applicable.length === 0) {
         console.log('No supported migration applies to the dependencies declared in this project.');
         return;

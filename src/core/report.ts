@@ -14,6 +14,7 @@ export function renderMarkdownReport(
 
   lines.push(`# Migration report: ${migration.title}`);
   lines.push('');
+  if (migration.experimental) lines.push('> **Experimental migration:** real-project validation is incomplete. Review every proposed edit and verification failure before using it.\n');
   if (dryRun) lines.push('> Dry run: no file was written.\n');
   lines.push(`- Findings: **${total}**`);
   lines.push(`- ${dryRun ? 'Proposed transformations' : 'Applied transformations'}: **${outcome.changes.length}**`);
