@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { validateProposal, reconcileProposal, parseSafeRawDiff, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
+import { validateProposal, reconcileProposal, parseSafeRawDiff, parseCommitParents, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
 
 const base = 'a'.repeat(40);
 const commit = 'b'.repeat(40);
@@ -10,6 +10,11 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('does not treat a commit message containing parent metadata as a real parent', () => {
+    expect(() => parseCommitParents(`${commit}\nparent ${base}\n`, commit)).toThrow('malformed');
+    expect(parseCommitParents(commit, commit)).toEqual([]);
+    expect(parseCommitParents(`${commit} ${base}`, commit)).toEqual([base]);
+  });
   it('rejects deletions, symlinks, submodules and rename source deletions in raw bundle diffs', () => {
     expect(parseSafeRawDiff(`:100644 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} M\0server.ts\0`)).toEqual(['server.ts']);
     expect(() => parseSafeRawDiff(`:100644 000000 ${'a'.repeat(40)} ${'0'.repeat(40)} D\0.github/CODEOWNERS\0:000000 100644 ${'0'.repeat(40)} ${'b'.repeat(40)} A\0owners.json\0`)).toThrow('status');

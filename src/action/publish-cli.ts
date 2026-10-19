@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { reconcileProposal, validateProposal, parseSafeRawDiff, type Proposal, type ProposalPublisher } from './publish.js';
+import { reconcileProposal, validateProposal, parseSafeRawDiff, parseCommitParents, type Proposal, type ProposalPublisher } from './publish.js';
 import { parseActionConfig } from './config.js';
 
 const execFile = promisify(execFileCallback);
@@ -84,8 +84,8 @@ for (const proposal of proposals) {
       const bundle = path.join(artifactRoot, `${proposal.migration.replace(/[^A-Za-z0-9._-]+/g, '-')}.bundle`);
       await git(bareRoot, ['bundle', 'verify', bundle]);
       await git(bareRoot, ['fetch', '--no-tags', bundle, proposal.branch]);
-      const commitInfo = await git(bareRoot, ['cat-file', '-p', proposal.commit!]);
-      parents = [...commitInfo.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((match) => match[1]!);
+      if ((await git(bareRoot, ['cat-file', '-t', proposal.commit!])).trim() !== 'commit') throw new Error('Bundle target is not a commit.');
+      parents = parseCommitParents(await git(bareRoot, ['rev-list', '--parents', '-n1', '--end-of-options', proposal.commit!]), proposal.commit!);
       changedFiles = parseSafeRawDiff(await git(bareRoot, ['diff', '--raw', '--no-renames', '-z', expectedBase, proposal.commit!]));
     }
     validateProposal(proposal, expectedBase, parents, changedFiles, reviewedConfig);

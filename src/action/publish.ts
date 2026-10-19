@@ -29,6 +29,15 @@ export interface ProposalPublisher {
 const sha = /^[0-9a-f]{40}$/;
 const safePath = /^(?:[A-Za-z0-9_.@()+ -]+\/)*[A-Za-z0-9_.@()+ -]+$/;
 
+/** Accept only the single machine-readable line emitted by rev-list --parents. */
+export function parseCommitParents(raw: string, expectedCommit: string): string[] {
+  const fields = raw.trim().split(' ');
+  if (!sha.test(expectedCommit) || fields[0] !== expectedCommit || fields.some((field) => !sha.test(field))) {
+    throw new Error('Commit ancestry is malformed.');
+  }
+  return fields.slice(1);
+}
+
 /** Parse Git's NUL-separated raw diff; only regular file additions/edits are publishable. */
 export function parseSafeRawDiff(raw: string): string[] {
   const records = raw.split('\0');
