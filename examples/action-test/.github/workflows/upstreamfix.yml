@@ -1,0 +1,17 @@
+name: UpstreamFix API migrations
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 5 * * 1'
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  upstreamfix:
+    uses: ivanDev237/upstreamfix/.github/workflows/client-migrations.yml@e661162c6f26ef9b792ec2fc6bd8af9c61caa260
+    with:
+      upstreamfix_sha: e661162c6f26ef9b792ec2fc6bd8af9c61caa260

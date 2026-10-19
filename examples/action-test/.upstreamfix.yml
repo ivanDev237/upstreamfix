@@ -1,0 +1,3 @@
+frequency: weekly
+verify:
+  - npm run test

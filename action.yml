@@ -1,64 +1,26 @@
-name: UpstreamFix migration PR
-description: Disabled pending security review. Never run migration actions from untrusted pull request code.
+name: UpstreamFix migration preparation
+description: Prepare verified migration bundles in a read-only GitHub Actions job. Use the reusable workflow to publish PRs.
 inputs:
-  token:
-    description: GitHub token with contents:write and pull-requests:write permissions
+  output:
+    description: Absolute path outside the checkout for proposals and bundles
     required: true
-  branch:
-    description: Branch used for the migration pull request
-    required: false
-    default: upstreamfix/migration
-  title:
-    description: Pull request title
-    required: false
-    default: 'UpstreamFix: apply supported API migration'
-  commit-message:
-    description: Commit message for the migration changes
-    required: false
-    default: 'UpstreamFix: apply supported API migration'
-  body:
-    description: Pull request description
-    required: false
-    default: >-
-      UpstreamFix scanned this repository for supported migrations and prepared changes.
-      Review the diff and let this repository's CI checks pass before merging.
-  report-file:
-    description: Optional path for the migration report, relative to the checked-out repository
-    required: false
-    default: ''
 runs:
   using: composite
   steps:
-    - name: Stop while migration safety review is in progress
-      shell: bash
-      run: |
-        echo "UpstreamFix's GitHub Action is disabled until all P1 safety prerequisites are verified."
-        exit 1
-    - name: Set up Node.js
-      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-      with:
-        node-version: 22
-    - name: Build UpstreamFix
-      shell: bash
-      run: |
-        npm ci --ignore-scripts --prefix "$GITHUB_ACTION_PATH"
-        npm run build --prefix "$GITHUB_ACTION_PATH"
-    - name: Scan repository and prepare migration
+    - name: Enforce safe event and checkout
       shell: bash
       env:
-        UPSTREAMFIX_REPORT_FILE: ${{ inputs.report-file }}
+        UPSTREAMFIX_EVENT: ${{ github.event_name }}
       run: |
-        args=(scan --cwd "$GITHUB_WORKSPACE" --write)
-        if [[ -n "$UPSTREAMFIX_REPORT_FILE" ]]; then
-          args+=(--report "$UPSTREAMFIX_REPORT_FILE")
-        fi
-        node "$GITHUB_ACTION_PATH/dist/cli.js" "${args[@]}"
-    - name: Open or update migration pull request
-      id: pull-request
-      uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
-      with:
-        token: ${{ inputs.token }}
-        branch: ${{ inputs.branch }}
-        title: ${{ inputs.title }}
-        commit-message: ${{ inputs.commit-message }}
-        body: ${{ inputs.body }}
+        [[ "$UPSTREAMFIX_EVENT" == 'schedule' || "$UPSTREAMFIX_EVENT" == 'workflow_dispatch' ]] || { echo 'Only schedule and workflow_dispatch are supported'; exit 1; }
+        [[ -z "${GITHUB_TOKEN:-}" && -z "${GH_TOKEN:-}" ]] || { echo 'A token is present in the migration environment'; exit 1; }
+    - name: Install reviewed action without lifecycle scripts
+      shell: bash
+      run: npm ci --ignore-scripts --no-audit --no-fund --prefix "$GITHUB_ACTION_PATH" && npm run build --prefix "$GITHUB_ACTION_PATH"
+    - name: Prepare migrations in a read-only job
+      shell: bash
+      env:
+        UPSTREAMFIX_OUTPUT_ROOT: ${{ inputs.output }}
+        UPSTREAMFIX_CLIENT_ROOT: ${{ github.workspace }}
+        UPSTREAMFIX_BASE_SHA: ${{ github.sha }}
+      run: node "$GITHUB_ACTION_PATH/dist/action/migrate-cli.js"

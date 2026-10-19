@@ -39,4 +39,14 @@ describe('client migration workflow security boundary', () => {
     expect(migrate).not.toContain('GITHUB_TOKEN:');
     expect(migrate).not.toContain('secrets.');
   });
+
+  it('ships an enabled migration action and a client example with safe triggers', () => {
+    const action = readFileSync(path.join(root, 'action.yml'), 'utf8');
+    const example = readFileSync(path.join(root, 'examples/action-test/.github/workflows/upstreamfix.yml'), 'utf8');
+    expect(action).not.toContain('Disabled pending security review');
+    expect(example).toContain('schedule:');
+    expect(example).toContain('workflow_dispatch:');
+    expect(example).toContain('client-migrations.yml@');
+    expect(example).not.toMatch(/^\s+pull_request(?:_target)?:/m);
+  });
 });

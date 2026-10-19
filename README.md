@@ -22,6 +22,14 @@ npx --yes upstreamfix@latest migrate firebase-admin@14 --cwd /path/to/your/proje
 
 The report path is explicit; preview commands do not create report files unless `--report` is supplied. The Firebase Admin migration currently targets projects using the namespaced API and proposes modular API changes. Review the diff and manual findings against the [official migration guide](https://firebase.google.com/docs/admin/migrate-node-v10).
 
+## GitHub Action
+
+Copy the [client workflow example](examples/action-test/.github/workflows/upstreamfix.yml) into your repository and pin both references to the same reviewed UpstreamFix commit SHA. The reusable workflow runs on a schedule or by manual dispatch. Its first job checks out your code without stored credentials, uses only `contents: read`, prepares a verified migration in a temporary copy, and uploads a Git bundle and redacted report. Its second job downloads and validates that bundle, then opens or updates a pull request. It opens an issue when manual review is needed and never merges a PR.
+
+An optional `.upstreamfix.yml` supports `frequency` (`daily`, `weekly`, `manual`), `ignore`, `exclude`, `verify`, `reviewers`, and `labels`. Each list uses one `  - value` line per item. Custom `verify` commands run only in the first job's isolated verification copy. The config cannot increase permissions or turn off verification. A repository with no configured checks will not receive an automatic migration PR.
+
+Pull requests created with the default `GITHUB_TOKEN` do not trigger the repository's normal `pull_request` workflows. Run your CI manually on the proposed branch, or adapt the publication job to use a narrowly scoped GitHub App token or fine-grained PAT supplied by your organization. Review the report, the official migration guide, and the PR diff before merging.
+
 ## Supported migrations
 
 | Migration | What it previews | Status |
