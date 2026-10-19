@@ -51,6 +51,7 @@ function emptyResult(): MigrationResult {
 
 function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
   if (withholdInvalidSource(sourceFile, result)) return;
+  reportUnsupportedStripeImports(sourceFile, result);
   const edits: TextEdit[] = [];
   const before = sourceFile.getFullText();
   const stripeBindings = findStripeBindings(sourceFile);
@@ -59,6 +60,10 @@ function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
   for (const variable of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const name = variable.getNameNode();
     const initializer = variable.getInitializer();
+    if (Node.isObjectBindingPattern(name) && initializer && Node.isPropertyAccessExpression(initializer)
+      && initializer.getName() === 'default' && isRequireStripe(initializer.getExpression())) {
+      addManual(sourceFile, result.manual, variable, 'Destructuring require("stripe").default is not rewritten automatically; inspect this import shape manually.', variable.getText());
+    }
     if (!Node.isObjectBindingPattern(name) || !initializer || !isRequireStripe(initializer)) continue;
     const elements = name.getElements();
     const binding = elements[0];
@@ -114,6 +119,10 @@ function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
 
   for (const call of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
     const expression = call.getExpression();
+    if (expression.getText().startsWith('this.stripe.')
+      && call.getArguments().some((argument) => Node.isArrowFunction(argument) || Node.isFunctionExpression(argument))) {
+      addManual(sourceFile, result.manual, call, 'Stripe v22 removes callbacks from client methods reached through this.stripe; convert this call manually to promises.', call.getText());
+    }
     const [root, ...path] = propertyPath(expression);
     if (root && clients.has(root) && path.length >= 2) {
       const args = call.getArguments();
@@ -181,6 +190,7 @@ function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
 
 function migrateV23File(sourceFile: SourceFile, result: MigrationResult): void {
   if (withholdInvalidSource(sourceFile, result)) return;
+  reportUnsupportedStripeImports(sourceFile, result);
   const edits: TextEdit[] = [];
   const before = sourceFile.getFullText();
   const stripeBindings = findStripeBindings(sourceFile);
@@ -263,6 +273,18 @@ function migrateV23File(sourceFile: SourceFile, result: MigrationResult): void {
   }
 
   applyStripeEdits(sourceFile, edits, result, before);
+}
+
+function reportUnsupportedStripeImports(sourceFile: SourceFile, result: MigrationResult): void {
+  for (const declaration of sourceFile.getImportDeclarations()) {
+    if (declaration.getModuleSpecifierValue() !== PACKAGE) continue;
+    if (declaration.getNamespaceImport()) {
+      addManual(sourceFile, result.manual, declaration, 'A namespace Stripe import needs manual review before this migration.', declaration.getText());
+    }
+    if (declaration.getNamedImports().some((specifier) => specifier.getName() === 'default')) {
+      addManual(sourceFile, result.manual, declaration, 'A named default Stripe import needs manual review before this migration.', declaration.getText());
+    }
+  }
 }
 
 function findStripeBindings(sourceFile: SourceFile): { constructors: Set<string>; typeNames: Set<string> } {

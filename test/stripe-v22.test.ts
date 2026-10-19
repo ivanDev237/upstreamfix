@@ -50,6 +50,17 @@ describe('Stripe Node SDK v21 → v22 migration', () => {
     const result = stripeV22.transform(project);
     expect(result.manual).toEqual([]);
   });
+  it('flags unsupported Stripe import and callback forms for manual review', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('namespace.ts', "import * as S from 'stripe';\nconst client = new S.Stripe('key');\n");
+    project.createSourceFile('named-default.ts', "import { default as Stripe } from 'stripe';\nconst client = Stripe('key');\n");
+    project.createSourceFile('member.ts', "import Stripe from 'stripe';\nclass X { constructor(private stripe: Stripe) {} run() { this.stripe.customers.retrieve('id', () => {}); } }\n");
+    project.createSourceFile('cjs.ts', "const { default: Stripe } = require('stripe').default;\n");
+    const result = stripeV22.transform(project);
+    for (const file of ['namespace.ts', 'named-default.ts', 'member.ts', 'cjs.ts']) {
+      expect(result.manual.some((item) => item.file.endsWith(file))).toBe(true);
+    }
+  });
 
   it('reports overlapping Stripe edits instead of dropping one silently', () => {
     const project = new Project({ useInMemoryFileSystem: true });
