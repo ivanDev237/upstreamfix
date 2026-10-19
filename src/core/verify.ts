@@ -427,13 +427,9 @@ export async function executeWithProcessGroup(
     const unregisterGroup = child.pid ? trackProcessGroup(child.pid) : () => undefined;
     let stdout = '';
     let stderr = '';
-    let timedOut = false;
     let settled = false;
-    let killTimer: NodeJS.Timeout | undefined;
     const timeout = setTimeout(() => {
-      timedOut = true;
-      signalProcessGroup(child, 'SIGTERM');
-      killTimer = setTimeout(() => signalProcessGroup(child, 'SIGKILL'), 750);
+      void finish(new Error(`Command exceeded its ${timeoutMs} ms timeout.`), true);
     }, timeoutMs);
     const append = (current: string, chunk: Buffer): string => {
       const marker = '\n… [middle of command output omitted] …\n';
@@ -446,42 +442,25 @@ export async function executeWithProcessGroup(
     };
     child.stdout?.on('data', (chunk: Buffer) => { stdout = append(stdout, chunk); });
     child.stderr?.on('data', (chunk: Buffer) => { stderr = append(stderr, chunk); });
-    const finish = (error?: Error): void => {
+    const finish = async (error?: Error, timedOut = false): Promise<void> => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      if (killTimer) clearTimeout(killTimer);
-      if (error) reject(error);
+      if (!timedOut) await new Promise((done) => setTimeout(done, 50));
+      if (child.pid) await terminateProcessGroup(child.pid, timedOut ? 100 : 0);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      unregisterGroup();
+      if (error) reject(Object.assign(error, { stdout, stderr, ...(timedOut ? { code: 'ETIMEDOUT', timedOut: true } : {}) }));
+      else resolve({ stdout, stderr });
     };
-    child.once('error', async (error) => {
-      if (child.pid) await terminateProcessGroup(child.pid, 0);
-      unregisterGroup();
-      const failure = Object.assign(error, { stdout, stderr, timedOut });
-      finish(failure);
+    child.once('error', (error) => {
+      void finish(error);
     });
-    child.once('close', async (code, signal) => {
-      if (child.pid) await terminateProcessGroup(child.pid);
-      unregisterGroup();
-      if (timedOut) {
-        finish(Object.assign(new Error(`Command exceeded its ${timeoutMs} ms timeout.`), { code: 'ETIMEDOUT', stdout, stderr, timedOut: true }));
-      } else if (code === 0) {
-        finish();
-        resolve({ stdout, stderr });
-      } else {
-        finish(Object.assign(new Error(`Command exited with ${signal ? `signal ${signal}` : `code ${code}`}.`), { stdout, stderr }));
-      }
+    child.once('exit', (code, signal) => {
+      void finish(code === 0 ? undefined : new Error(`Command exited with ${signal ? `signal ${signal}` : `code ${code}`}.`));
     });
   });
-}
-
-function signalProcessGroup(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
-  if (!child.pid) return;
-  try {
-    if (process.platform === 'win32') child.kill(signal);
-    else process.kill(-child.pid, signal);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') child.kill(signal);
-  }
 }
 
 export function sanitizedEnvironment(home: string): NodeJS.ProcessEnv {

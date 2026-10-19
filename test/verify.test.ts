@@ -5,7 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { applyProposedDiffs, applyProposedFiles, verifyProposedMigration, type VerificationOptions } from '../src/core/verify.js';
+import { applyProposedDiffs, applyProposedFiles, executeWithProcessGroup, verifyProposedMigration, type VerificationOptions } from '../src/core/verify.js';
 
 const temporaryDirectories: string[] = [];
 const execFile = promisify(execFileCallback);
@@ -57,6 +57,17 @@ afterEach(async () => {
 });
 
 describe('migration verification', () => {
+  it('finishes after the parent exits even if a detached descendant holds its output pipe', async () => {
+    const started = Date.now();
+    const script = 'require("node:child_process").spawn(process.execPath,["-e","setTimeout(()=>{},1500)"],{detached:true,stdio:["ignore",process.stdout,process.stderr]}).unref(); process.exit(0);';
+    try {
+      await executeWithProcessGroup(process.execPath, ['-e', script], os.tmpdir(), { PATH: process.env.PATH }, 500);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EPERM') return;
+      throw error;
+    }
+    expect(Date.now() - started).toBeLessThan(500);
+  });
   it('checks a patched temporary copy, strips secrets, and leaves the source untouched', async () => {
     const cwd = await makeProject();
     const fsmonitorMarker = path.join(cwd, 'fsmonitor-ran');
