@@ -215,9 +215,9 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   }
   const scoped = loadScopedProject(options.cwd, migration);
   const project = scoped.project;
-  const originalSources = new Map<string, string>(
-    project.getSourceFiles().map((file): [string, string] => [file.getFilePath(), file.getFullText()]),
-  );
+  const originalSources = new Map<string, string>(await Promise.all(
+    project.getSourceFiles().map(async (file): Promise<[string, string]> => [file.getFilePath(), await readFile(file.getFilePath(), 'utf8')]),
+  ));
   const result = migration.transform(project);
   result.manual.unshift(...scoped.manual);
   const compatibilityNotes = migration.inspectManifest
@@ -242,6 +242,11 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     throw new Error('A dependency manifest needs manual review; no files were written. Resolve it and preview again.');
   }
 
+  for (const update of result.fileUpdates ?? []) {
+    if (originalSources.get(update.file)?.startsWith('\uFEFF') && !update.contents.startsWith('\uFEFF')) {
+      update.contents = `\uFEFF${update.contents}`;
+    }
+  }
   const sourceUpdates = new Map((result.fileUpdates ?? []).map((update) => [update.file, update.contents]));
   const proposedFiles: ProposedFileChange[] = [];
   const proposedDiff = result.filesChanged.flatMap((filePath) => {

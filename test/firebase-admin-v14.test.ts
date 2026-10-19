@@ -1,11 +1,15 @@
+import { execFile as execFileCallback } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadProject, runMigration } from '../src/core/runner.js';
+import { verifyProposedMigration } from '../src/core/verify.js';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 
 const temporaryDirectories: string[] = [];
+const execFile = promisify(execFileCallback);
 const lockfileNetworkTestEnabled = process.env.UPSTREAMFIX_RUN_LOCKFILE_NETWORK_TESTS === '1';
 
 async function makeProject(): Promise<string> {
@@ -124,6 +128,26 @@ describe('firebase-admin v14 migration', () => {
     const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
     expect(result.manual.some((item) => item.reason.includes('syntax errors'))).toBe(false);
     expect(result.changes.some((item) => item.rule === 'app-lifecycle')).toBe(true);
+  });
+  it('preserves a source BOM through proposed-file verification', async () => {
+    const cwd = await makeProject();
+    const source = "\uFEFFimport * as admin from 'firebase-admin';\nadmin.initializeApp();\n";
+    await writeFile(path.join(cwd, 'server.ts'), source);
+    const manifestPath = path.join(cwd, 'package.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+    manifest.scripts = { typecheck: 'node -e "process.exit(0)"' };
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await execFile('git', ['init', '-q'], { cwd });
+    await execFile('git', ['add', 'server.ts', 'package.json'], { cwd });
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    const proposed = outcome.proposedFiles.find((file) => file.relativePath === 'server.ts');
+    expect(proposed?.before).toBe(source);
+    expect(proposed?.after.startsWith('\uFEFF')).toBe(true);
+    const verification = await verifyProposedMigration(cwd, outcome.proposedDiff, {
+      fileChanges: outcome.proposedFiles,
+      execute: async (command, args) => command === 'npm' && args[0] === 'install' ? { stdout: 'offline install stub' } : undefined,
+    });
+    expect(verification.status, JSON.stringify(verification)).toBe('passed');
   });
 
   it('explains the Node.js prerequisite in a preview and proposes engines.node after explicit confirmation', async () => {
