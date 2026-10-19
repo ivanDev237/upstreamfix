@@ -478,6 +478,7 @@ async function regeneratePackageLock(
     await writeFile(path.join(temporaryDirectory, 'package.json'), updatedManifest, 'utf8');
     await writeFile(path.join(temporaryDirectory, 'package-lock.json'), before, 'utf8');
     const args = ['install', '--package-lock-only', '--lockfile-version=3', '--ignore-scripts', '--no-audit', '--no-fund'];
+    // npm_execpath may be pnpm or Yarn when launched through dlx; resolve npm from PATH instead.
     await execFile('npm', args, { cwd: temporaryDirectory, env: lockfileCommandEnvironment(temporaryDirectory), timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
     const contents = await readFile(path.join(temporaryDirectory, 'package-lock.json'), 'utf8');
     return { before, contents };

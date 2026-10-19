@@ -36,4 +36,11 @@ describe('lockfile updater isolation', () => {
     expect(env.GITHUB_TOKEN).toBeUndefined();
     expect(env.npm_execpath).toBeUndefined();
   });
+
+  it('does not inherit a pnpm dlx launcher as the npm executable', () => {
+    process.env.npm_execpath = '/opt/pnpm/bin/pnpm.cjs';
+    const env = lockfileCommandEnvironment('/tmp/upstreamfix-pnpm-launch');
+    expect(env.npm_execpath).toBeUndefined();
+    expect(env.PATH).toBe(process.env.PATH);
+  });
 });
