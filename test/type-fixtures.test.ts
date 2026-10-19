@@ -32,11 +32,13 @@ describe('type-diff fixtures', () => {
     expect(workflow).toContain('repository: ivanDev237/upstreamfix');
     expect(workflow).toContain('inputs.source_sha || github.sha');
   });
-  it('makes the temporary root traversable by the unprivileged Docker user', async () => {
+  it('keeps the cache root private while exposing only the fixture workspace to Docker', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-fixture-mode-'));
     try {
-      await makeFixtureReadable(root);
-      expect((await stat(root)).mode & 0o111).toBe(0o111);
+      const workspace = path.join(root, 'workspace');
+      await makeFixtureReadable(workspace);
+      expect((await stat(root)).mode & 0o077).toBe(0);
+      expect((await stat(workspace)).mode & 0o111).toBe(0o111);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
   it('derives a Stripe removed parameter fixture with exact versions', () => {

@@ -26,33 +26,34 @@ async function command(binary: string, args: string[], cwd: string, env: NodeJS.
 
 async function compile(fixture: TypeFixture, version: string, source = fixture.source): Promise<Array<{ code: number; line: number }>> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-type-fixture-'));
+  const workspace = path.join(root, 'workspace');
   const containerName = `upstreamfix-fixture-${randomUUID()}`;
   const removeContainer = async () => { await command('docker', ['rm', '-f', containerName], root, { PATH: process.env.PATH }).catch(() => undefined); };
   const unregisterCleanup = registerTemporaryCleanup(removeContainer);
   try {
-    await writeFile(path.join(root, 'package.json'), JSON.stringify({ private: true, type: 'module', dependencies: { [fixture.packageName]: version },
+    await makeFixtureReadable(workspace);
+    await writeFile(path.join(workspace, 'package.json'), JSON.stringify({ private: true, type: 'module', dependencies: { [fixture.packageName]: version },
       devDependencies: { typescript: '7.0.2', '@types/node': '22.10.0' } }));
-    await writeFile(path.join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, skipLibCheck: true,
+    await writeFile(path.join(workspace, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true, skipLibCheck: true,
       target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', esModuleInterop: true }, files: ['fixture.ts'] }));
-    await writeFile(path.join(root, 'fixture.ts'), source);
+    await writeFile(path.join(workspace, 'fixture.ts'), source);
     const home = path.join(root, '.home');
     const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: home, npm_config_ignore_scripts: 'true',
       npm_config_audit: 'false', npm_config_fund: 'false', npm_config_userconfig: path.join(root, 'npmrc.user'),
       npm_config_globalconfig: path.join(root, 'npmrc.global') };
     await writeFile(env.npm_config_userconfig!, '');
     await writeFile(env.npm_config_globalconfig!, '');
-    const lock = await command('npm', ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], root, env);
+    const lock = await command('npm', ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], workspace, env);
     if (lock.code !== 0) throw new Error(`Fixture lock generation failed for ${fixture.id}@${version}: ${lock.output.slice(-2000)}`);
     if (process.env.UPSTREAMFIX_DIFF_DIR) {
-      await writeFile(path.join(process.env.UPSTREAMFIX_DIFF_DIR, `fixture-lock-${fixture.packageName}-${version}.json`), await readFile(path.join(root, 'package-lock.json')));
+      await writeFile(path.join(process.env.UPSTREAMFIX_DIFF_DIR, `fixture-lock-${fixture.packageName}-${version}.json`), await readFile(path.join(workspace, 'package-lock.json')));
     }
-    const install = await command('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], root, env);
+    const install = await command('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], workspace, env);
     if (install.code !== 0) throw new Error(`Fixture install failed for ${fixture.id}@${version}: ${install.output.slice(-2000)}`);
-    await makeFixtureReadable(root);
     const result = await command('docker', [
       'run', '--rm', '--init', '--name', containerName, '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
       '--memory=1536m', '--memory-swap=1536m', '--pids-limit=128', '--user=65534:65534',
-      `--mount=type=bind,src=${root},dst=/workspace,readonly`, '-w', '/workspace', image,
+      `--mount=type=bind,src=${workspace},dst=/workspace,readonly`, '-w', '/workspace', image,
       'node', '/workspace/node_modules/typescript/bin/tsc', '--pretty', 'false', '--noEmit',
     ], root, { PATH: process.env.PATH, HOME: '/tmp' });
     if (result.code !== 0 && !/error TS\d+/.test(result.output)) throw new Error(`Typecheck could not run: ${result.output.slice(-2000)}`);

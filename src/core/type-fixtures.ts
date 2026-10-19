@@ -1,12 +1,13 @@
 import type { ApiFinding, ApiReport } from './diff-api.js';
 import { validateExactVersion } from './diff-api.js';
-import { chmod } from 'node:fs/promises';
+import { chmod, mkdir } from 'node:fs/promises';
 import { Project } from 'ts-morph';
 import { firebaseAdminV14 } from '../migrations/firebase-admin-v14/index.js';
 
-/** mkdtemp creates mode 0700; the Docker compiler runs as an unprivileged user. */
-export async function makeFixtureReadable(root: string): Promise<void> {
-  await chmod(root, 0o755);
+/** Expose only the source workspace, never the private parent with npm cache. */
+export async function makeFixtureReadable(workspace: string): Promise<void> {
+  await mkdir(workspace, { recursive: true, mode: 0o755 });
+  await chmod(workspace, 0o755);
 }
 
 /** A compile-only test case. It must never be executed as JavaScript. */
