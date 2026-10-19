@@ -56,6 +56,8 @@ export interface MigrationInfo {
   rules: string[];
   /** Requires an explicit opt-in because real-project verification remains incomplete. */
   experimental?: boolean;
+  /** Minimum Node.js major declared by a validated external recipe. */
+  requiredNodeMajor?: number;
 }
 
 export interface Migration extends MigrationInfo {

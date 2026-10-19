@@ -35,7 +35,7 @@ interface ScopedProject {
   manifestBySource: Map<string, string>;
 }
 
-function loadScopedProject(root: string, migration: Migration, excludedDirectories: readonly string[] = [], nodeRuntime?: 20 | 22): ScopedProject {
+function loadScopedProject(root: string, migration: Migration, excludedDirectories: readonly string[] = [], nodeRuntime?: number): ScopedProject {
   const project = new Project({
     skipAddingFilesFromTsConfig: true,
     compilerOptions: { allowJs: true },
@@ -192,7 +192,7 @@ export interface RunOptions {
   dryRun: boolean;
   excludedDirectories?: readonly string[];
   /** Explicit confirmation of the SDK's required Node.js runtime. */
-  nodeRuntime?: 20 | 22;
+  nodeRuntime?: number;
   /** Yarn Classic needs a full dependency installation to regenerate yarn.lock. */
   allowYarnLockInstall?: boolean;
   /** Count source findings only; never regenerate lockfiles or prepare manifest writes. */
@@ -222,8 +222,8 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   if (!options.dryRun) {
     throw new Error('Direct writes through runMigration are unavailable; use --write for verified Git branch commits.');
   }
-  if (options.nodeRuntime && !((options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (options.nodeRuntime === 20 && migration.id === 'openai@5'))) {
-    throw new Error('--node-runtime 22 applies to firebase-admin@14; --node-runtime 20 applies to openai@5.');
+  if (options.nodeRuntime && !((options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (options.nodeRuntime === 20 && migration.id === 'openai@5') || options.nodeRuntime === migration.requiredNodeMajor)) {
+    throw new Error('--node-runtime 22 applies to firebase-admin@14; --node-runtime 20 applies to openai@5; recipes require their declared nodeMajor.');
   }
   const scoped = loadScopedProject(options.cwd, migration, options.excludedDirectories, options.nodeRuntime);
   const project = scoped.project;
@@ -774,7 +774,7 @@ function findPackageManifests(root: string, excludedDirectories: readonly string
   return found;
 }
 
-function addNodeEngineToManifest(raw: string, major: 20 | 22): string | undefined {
+function addNodeEngineToManifest(raw: string, major: number): string | undefined {
   const rootStart = raw.charCodeAt(0) === 0xfeff ? 1 : 0;
   if (raw[rootStart] !== '{') return undefined;
   const engineMember = findJsonObjectMember(raw, rootStart, 'engines');
