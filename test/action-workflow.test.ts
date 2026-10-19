@@ -67,7 +67,7 @@ describe('client migration workflow security boundary', () => {
   it('never checks out or executes customer code in the write-permission job', () => {
     const source = workflow().split('\n  publish:')[1];
     expect(source).toBeDefined();
-    expect(source).toContain('actions/download-artifact@');
+    expect(source).toContain('gh run download');
     expect(source).toContain('repository: ivanDev237/upstreamfix');
     expect(source).not.toContain('npm test');
     expect(source).not.toContain('repository: ${{ github.repository }}');
@@ -90,6 +90,14 @@ describe('client migration workflow security boundary', () => {
     expect(source).toContain('none');
     expect(source).toContain('--cap-drop=ALL');
     expect(source).toContain('--read-only');
+    expect(migrate).toContain('docker pull --quiet');
+    const prCheck = readFileSync(path.join(root, '.github/workflows/client-migrations-pr.yml'), 'utf8');
+    expect(prCheck).toContain('docker pull --quiet');
+  });
+  it('T36 avoids the deprecated Buffer() path in the publisher artifact download action', () => {
+    const publish = workflow().split('\n  publish:')[1] ?? '';
+    expect(publish).toContain('gh run download');
+    expect(publish).not.toContain('actions/download-artifact@');
   });
 
   it('ships an enabled migration action and a client example with safe triggers', () => {

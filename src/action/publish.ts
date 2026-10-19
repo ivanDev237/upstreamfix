@@ -1,4 +1,4 @@
-import { maskSecrets } from '../core/report.js';
+import { sanitizeTerminalText } from '../core/report.js';
 import { migrations } from '../migrations/index.js';
 import type { ActionConfig } from './config.js';
 
@@ -156,31 +156,55 @@ function sameList(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+/** The report is Markdown already. Escape HTML once, then keep it inside a quote. */
+function quotedUntrustedReport(report: string): string {
+  return sanitizeTerminalText(report)
+    .replace(/&(?!(?:amp|lt|gt|quot|#(?:\d+|x[0-9a-f]+));)/gi, '&amp;')
+    .replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/@/g, '&#64;')
+    .split('\n').map((line) => `> ${line}`).join('\n');
+}
+
+function completeExcerpt(report: string): string {
+  const lines = report.split('\n');
+  let fence: string | undefined;
+  for (const line of lines) {
+    const marker = /^(`{3,})(?:[A-Za-z0-9_-]+)?\s*$/.exec(line);
+    if (marker) fence = fence ? undefined : marker[1];
+  }
+  return fence ? `${report}\n${fence}` : report;
+}
+
 export async function reconcileProposal(proposal: Proposal, publisher: ProposalPublisher, artifactUrl?: string): Promise<void> {
   if (proposal.status !== 'none' && await publisher.isDismissed?.(proposal)) return;
   const existing = await publisher.findPullRequest(proposal);
   const migration = migrations.find((candidate) => candidate.id === proposal.migration);
   if (!migration) throw new Error('Unknown migration.');
-  const safeReport = maskSecrets(proposal.report)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/@/g, '&#64;').replace(/\*/g, '&#42;');
-  const fullBody = [
+  const introduction = [
     ...(proposal.status === 'manual' ? [`<!-- upstreamfix:manual:${proposal.migration} -->`] : []),
     `UpstreamFix migration: \`${proposal.migration}\``,
     `Verification: **${proposal.verification}**`,
     `Official guide: ${migration.guideUrl}`,
-    '', '<details><summary>Migration report (untrusted project output)</summary>', '', '<pre>', safeReport, '</pre>', '</details>',
-    '', 'Review the diff and run your repository checks before merging. UpstreamFix never merges automatically.',
+    '', '<details><summary>Migration report (untrusted project output)</summary>', '',
   ].join('\n');
-  const suffix = `\n\nReport truncated to fit GitHub's body limit. Full report: ${artifactUrl ?? 'upstreamfix-proposals artifact in this workflow run'}`;
-  let body = fullBody;
+  const conclusion = '\n\n</details>\n\nReview the diff and run your repository checks before merging. UpstreamFix never merges automatically.';
+  const truncatedNote = `\n\n> Report truncated to fit GitHub's body limit. Full report: ${artifactUrl ?? 'upstreamfix-proposals artifact in this workflow run'}`;
+  const safeReport = sanitizeTerminalText(proposal.report);
+  const makeBody = (excerpt: string, truncated: boolean) => `${introduction}\n${quotedUntrustedReport(truncated ? completeExcerpt(excerpt) : excerpt)}${truncated ? truncatedNote : ''}${conclusion}`;
+  let body = makeBody(safeReport, false);
   if (body.length > 59_000) {
-    const reportStart = body.indexOf('<pre>') + '<pre>'.length;
-    const reportEnd = body.indexOf('</pre>', reportStart);
-    const allowedReportLength = Math.max(0, 59_000 - (body.length - safeReport.length) - suffix.length);
-    let excerpt = safeReport.slice(0, allowedReportLength);
-    if (/[\uD800-\uDBFF]$/.test(excerpt)) excerpt = excerpt.slice(0, -1);
-    body = body.slice(0, reportStart) + excerpt + suffix + body.slice(reportEnd);
+    let lower = 0;
+    let upper = safeReport.length;
+    while (lower < upper) {
+      const middle = Math.ceil((lower + upper) / 2);
+      const candidate = safeReport.slice(0, middle).replace(/[\uD800-\uDBFF]$/, '');
+      if (makeBody(candidate, true).length <= 59_000) lower = middle;
+      else upper = middle - 1;
+    }
+    let excerpt = safeReport.slice(0, lower).replace(/[\uD800-\uDBFF]$/, '');
+    const lastLine = excerpt.lastIndexOf('\n');
+    if (lastLine > excerpt.length - 2_000) excerpt = excerpt.slice(0, lastLine);
+    body = makeBody(excerpt, true);
   }
   if (proposal.status === 'ready') {
     await publisher.pushBranch(proposal);

@@ -9,6 +9,7 @@ it('grants network only through an explicit install flag for npm, pnpm and Yarn'
     expect(testArgs.slice(testArgs.indexOf('--network') + 1)[0]).toBe('none');
     expect(testArgs.join(' ')).not.toContain('/home/user/private');
     const installArgs = buildClientDockerArgs(manager, ['install'], cwd, env, true, 'test-container');
+    expect(installArgs).toContain('--pull=never');
     expect(installArgs.slice(installArgs.indexOf('--network') + 1)[0]).toBe('bridge');
     if (manager !== 'npm') expect(installArgs).toContain('corepack');
   }
