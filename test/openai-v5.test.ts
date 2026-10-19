@@ -48,6 +48,18 @@ describe('openai v4 to v5', () => {
     }
   });
 
+  it('accepts explicit Node 20 confirmation and includes the runtime declaration in the proposal', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-confirmed-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.0.0"}}\n');
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai';\nconst client = new OpenAI();\nclient.files.del('file_1');\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, nodeRuntime: 20 });
+      expect(outcome.proposedFiles.find((item) => item.relativePath === 'client.ts')?.after).toContain("files.delete('file_1')");
+      expect(outcome.proposedFiles.find((item) => item.relativePath === 'package.json')?.after).toContain('"node": ">=20"');
+      expect(outcome.proposedFiles.find((item) => item.relativePath === 'package.json')?.after).toContain('"openai":"^5.0.0"');
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
   it('rewrites only bound client methods and beta chat paths', () => {
     const outcome = migrate(`import OpenAI from 'openai';
 const client = new OpenAI();

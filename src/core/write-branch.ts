@@ -14,7 +14,7 @@ const execFile = promisify(execFileCallback);
 export interface WriteBranchOptions {
   cwd: string;
   allowDirty?: boolean;
-  nodeRuntime?: 22;
+  nodeRuntime?: 20 | 22;
   allowYarnLockInstall?: boolean;
   timeoutMs?: number;
   excludedDirectories?: readonly string[];

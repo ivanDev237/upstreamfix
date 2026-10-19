@@ -28,13 +28,19 @@ jobs:
           node-version: 24
           package-manager-cache: false
       - name: Find public OpenAI v4 usage candidates without local downloads
+        id: discovery
+        continue-on-error: true # External indexes may rate-limit CI; the script itself still exits nonzero.
         env:
           UPSTREAMFIX_CORPUS_CANDIDATES: ${{ runner.temp }}/openai-corpus-candidates.json
         run: node scripts/discover-openai-corpus.mjs
+      - name: Record unavailable discovery
+        if: steps.discovery.outcome == 'failure'
+        run: |
+          echo 'OpenAI corpus discovery failed: both public search providers were unavailable. No new repositories were qualified; review the discovery log before claiming corpus coverage.' >> "$GITHUB_STEP_SUMMARY"
       - name: Upload unreviewed candidates
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: openai-corpus-candidates-${{ github.run_id }}
           path: ${{ runner.temp }}/openai-corpus-candidates.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7

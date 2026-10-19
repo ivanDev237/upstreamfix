@@ -113,13 +113,13 @@ export function createProgram(): Command {
     .option('--write', 'apply verified changes in a new Git branch and create a commit')
     .option('--allow-dirty', 'allow a dirty working tree; the migration branch is based on committed HEAD')
     .option('--verify', 'verify proposed changes in a temporary project copy')
-    .option('--node-runtime <major>', 'confirm Firebase Admin v14 will run on Node.js 22+ and add engines.node when absent', parseNodeRuntime)
+    .option('--node-runtime <major>', 'confirm Node.js 22 for Firebase Admin v14 or Node.js 20 for OpenAI v5; add engines.node when absent', parseNodeRuntime)
     .option('--verify-timeout <seconds>', 'maximum time per verification command', parsePositiveInteger)
     .option('--allow-yarn-lock-install', 'allow a full Yarn Classic installation to regenerate yarn.lock (estimated 50–400 MB)')
     .option('--report <file>', 'write the Markdown report to this explicit path (relative paths use --cwd)')
-    .action(async (migrationId: string, options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 22; allowYarnLockInstall?: boolean }) => {
+    .action(async (migrationId: string, options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 20 | 22; allowYarnLockInstall?: boolean }) => {
       const migration = migrations.find((candidate) => candidate.id === migrationId)!;
-      if (options.nodeRuntime && migration.id !== 'firebase-admin@14') throw new Error('--node-runtime 22 is supported only for firebase-admin@14.');
+      if (options.nodeRuntime && !((options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (options.nodeRuntime === 20 && migration.id === 'openai@5'))) throw new Error('--node-runtime 22 applies to firebase-admin@14; --node-runtime 20 applies to openai@5.');
       const cwd = path.resolve(options.cwd);
       if (options.allowYarnLockInstall) console.log('Yarn Classic lockfile regeneration may download about 50–400 MB without a warm cache.');
       if (options.allowDirty && !options.write) throw new Error('--allow-dirty can only be used together with --write.');
@@ -162,11 +162,11 @@ export function createProgram(): Command {
     .option('--write', 'apply each verified migration in a new Git branch and create a commit')
     .option('--allow-dirty', 'allow a dirty working tree; migration branches use committed HEAD')
     .option('--verify', 'verify each proposed migration in a temporary project copy')
-    .option('--node-runtime <major>', 'confirm Firebase Admin v14 will run on Node.js 22+ and add engines.node when absent', parseNodeRuntime)
+    .option('--node-runtime <major>', 'confirm Node.js 22 for Firebase Admin v14 or Node.js 20 for OpenAI v5; add engines.node when absent', parseNodeRuntime)
     .option('--verify-timeout <seconds>', 'maximum time per verification command', parsePositiveInteger)
     .option('--allow-yarn-lock-install', 'allow a full Yarn Classic installation to regenerate yarn.lock (estimated 50–400 MB)')
     .option('--report <file>', 'write Markdown reports to this explicit path (relative paths use --cwd)')
-    .action(async (options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 22; allowYarnLockInstall?: boolean }) => {
+    .action(async (options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 20 | 22; allowYarnLockInstall?: boolean }) => {
       const cwd = path.resolve(options.cwd);
       if (options.allowYarnLockInstall) console.log('Yarn Classic lockfile regeneration may download about 50–400 MB without a warm cache.');
       if (options.allowDirty && !options.write) throw new Error('--allow-dirty can only be used together with --write.');
@@ -186,13 +186,13 @@ export function createProgram(): Command {
             writeResult = await writeMigrationOnBranch(migration, {
               cwd,
               allowDirty: options.allowDirty,
-              nodeRuntime: migration.id === 'firebase-admin@14' ? options.nodeRuntime : undefined,
+              nodeRuntime: (migration.id === 'firebase-admin@14' && options.nodeRuntime === 22) || (migration.id === 'openai@5' && options.nodeRuntime === 20) ? options.nodeRuntime : undefined,
               allowYarnLockInstall: options.allowYarnLockInstall,
               timeoutMs: (options.verifyTimeout ?? 300) * 1000,
             });
             recordCommit({ branch: writeResult.branch, commit: writeResult.commit });
           }
-          const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: migration.id === 'firebase-admin@14' ? options.nodeRuntime : undefined, allowYarnLockInstall: options.allowYarnLockInstall });
+          const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: (migration.id === 'firebase-admin@14' && options.nodeRuntime === 22) || (migration.id === 'openai@5' && options.nodeRuntime === 20) ? options.nodeRuntime : undefined, allowYarnLockInstall: options.allowYarnLockInstall });
           const verification = writeResult?.verification ?? (options.verify
             ? await verifyProposedMigration(cwd, outcome.proposedDiff, { packageName: migration.packageName, fileChanges: outcome.proposedFiles, timeoutMs: (options.verifyTimeout ?? 300) * 1000 })
             : undefined);
@@ -240,9 +240,9 @@ function parsePositiveInteger(value: string): number {
   return parsed;
 }
 
-function parseNodeRuntime(value: string): 22 {
-  if (value !== '22') throw new InvalidArgumentError('Only --node-runtime 22 is supported for firebase-admin@14.');
-  return 22;
+function parseNodeRuntime(value: string): 20 | 22 {
+  if (value !== '20' && value !== '22') throw new InvalidArgumentError('Use --node-runtime 22 for firebase-admin@14 or --node-runtime 20 for openai@5.');
+  return Number(value) as 20 | 22;
 }
 
 let invokedPath = '';

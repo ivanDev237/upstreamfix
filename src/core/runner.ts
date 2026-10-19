@@ -35,7 +35,7 @@ interface ScopedProject {
   manifestBySource: Map<string, string>;
 }
 
-function loadScopedProject(root: string, migration: Migration, excludedDirectories: readonly string[] = []): ScopedProject {
+function loadScopedProject(root: string, migration: Migration, excludedDirectories: readonly string[] = [], nodeRuntime?: 20 | 22): ScopedProject {
   const project = new Project({
     skipAddingFilesFromTsConfig: true,
     compilerOptions: { allowJs: true },
@@ -107,7 +107,8 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
       });
       continue;
     }
-    if (migration.id === 'openai@5' && !guaranteesNodeMajor(declaration.manifest.engines?.node ?? '', 20)) {
+    if (migration.id === 'openai@5' && !guaranteesNodeMajor(declaration.manifest.engines?.node ?? '', 20)
+      && !(nodeRuntime === 20 && declaration.manifest.engines?.node === undefined)) {
       manual.push({
         file: sourcePath,
         line: 1,
@@ -190,8 +191,8 @@ export interface RunOptions {
   cwd: string;
   dryRun: boolean;
   excludedDirectories?: readonly string[];
-  /** Explicit confirmation that Firebase Admin v14 will run on Node.js 22+. */
-  nodeRuntime?: 22;
+  /** Explicit confirmation of the SDK's required Node.js runtime. */
+  nodeRuntime?: 20 | 22;
   /** Yarn Classic needs a full dependency installation to regenerate yarn.lock. */
   allowYarnLockInstall?: boolean;
   /** Count source findings only; never regenerate lockfiles or prepare manifest writes. */
@@ -221,10 +222,10 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   if (!options.dryRun) {
     throw new Error('Direct writes through runMigration are unavailable; use --write for verified Git branch commits.');
   }
-  if (options.nodeRuntime && migration.id !== 'firebase-admin@14') {
-    throw new Error('--node-runtime 22 is supported only for firebase-admin@14.');
+  if (options.nodeRuntime && !((options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (options.nodeRuntime === 20 && migration.id === 'openai@5'))) {
+    throw new Error('--node-runtime 22 applies to firebase-admin@14; --node-runtime 20 applies to openai@5.');
   }
-  const scoped = loadScopedProject(options.cwd, migration, options.excludedDirectories);
+  const scoped = loadScopedProject(options.cwd, migration, options.excludedDirectories, options.nodeRuntime);
   const project = scoped.project;
   const originalSources = new Map<string, string>(await Promise.all(
     project.getSourceFiles().map(async (file): Promise<[string, string]> => [file.getFilePath(), await readFile(file.getFilePath(), 'utf8')]),
@@ -234,6 +235,11 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   const compatibilityNotes = migration.inspectManifest
     ? await inspectManifests(migration, options.cwd, options.excludedDirectories)
     : [];
+  if (options.analysisOnly && options.nodeRuntime === 20 && migration.id === 'openai@5') {
+    for (let index = compatibilityNotes.length - 1; index >= 0; index--) {
+      if (compatibilityNotes[index]?.includes('engines.node (not declared)')) compatibilityNotes.splice(index, 1);
+    }
+  }
   if (!options.dryRun && result.manual.length > 0) {
     throw new Error('This migration has manual review items; no files were written. Resolve them and preview again.');
   }
@@ -243,9 +249,11 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   const manifest = !options.analysisOnly && result.manual.length === 0 && result.changes.length > 0
     ? await migrateManifests(migration, options, manifestsWithChangedCode)
     : {
-        notes: [result.manual.length > 0
+        notes: [options.analysisOnly
+          ? 'Dependency versions were not modified during source-only benchmark analysis.'
+          : result.manual.length > 0
           ? 'Dependency versions were left unchanged because this migration has items requiring manual review.'
-          : 'Dependency versions were left unchanged because no automatic code transformation was applied; inspect runtime prerequisites and package declarations.'],
+          : 'Dependency versions were left unchanged because no safe source edit was proposed; inspect the source and package declarations.'],
         changes: [],
         manual: [],
       };
@@ -345,31 +353,32 @@ async function migrateManifests(
     }
 
     const before = structuredClone(manifest);
-    if (options.nodeRuntime === 22) {
+    if (options.nodeRuntime !== undefined) {
+      const major = options.nodeRuntime;
       if (manifest.engines !== undefined && (typeof manifest.engines !== 'object' || Array.isArray(manifest.engines) || manifest.engines === null)) {
         manual.push({
           file: relativePath,
           line: 1,
-          reason: 'engines must be an object in package.json before --node-runtime 22 can add a Node.js range.',
+          reason: `engines must be an object in package.json before --node-runtime ${major} can add a Node.js range.`,
           snippet: 'engines',
         });
         continue;
       }
       const declared = manifest.engines?.node;
-      if (declared !== undefined && (typeof declared !== 'string' || !/^(?:>=\s*22(?:\.\d+){0,2}|(?:\^|~)\s*22(?:\.\d+){0,2}|22(?:\.\d+){0,2})$/.test(declared.trim()))) {
+      if (declared !== undefined && (typeof declared !== 'string' || !guaranteesNodeMajor(declared, major))) {
         manual.push({
           file: relativePath,
           line: 1,
-          reason: `engines.node is already declared as ${JSON.stringify(declared)}. Review and update it manually for Node.js 22 before migrating firebase-admin v14; --node-runtime never overrides a declared range.`,
+          reason: `engines.node is already declared as ${JSON.stringify(declared)}. Review and update it manually for Node.js ${major} before migrating ${migration.id}; --node-runtime never overrides a declared range.`,
           snippet: `engines.node: ${declared}`,
         });
         continue;
       }
-      if (declared === undefined) manifest.engines = { ...manifest.engines, node: '>=22' };
+      if (declared === undefined) manifest.engines = { ...manifest.engines, node: `>=${major}` };
     }
     const fileNotes = migration.updateManifest(manifest);
-    if (options.nodeRuntime === 22 && before.engines?.node === undefined) {
-      fileNotes.unshift(`\`${relativePath}\`: added \`engines.node\` = \`>=22\` after explicit --node-runtime 22 confirmation.`);
+    if (options.nodeRuntime !== undefined && before.engines?.node === undefined) {
+      fileNotes.unshift(`\`${relativePath}\`: added \`engines.node\` = \`>=${options.nodeRuntime}\` after explicit --node-runtime ${options.nodeRuntime} confirmation.`);
     }
     if (JSON.stringify(manifest) === JSON.stringify(before)) {
       notes.push(...fileNotes);
@@ -377,8 +386,8 @@ async function migrateManifests(
     }
 
     const versionUpdated = preserveManifestFormatting(raw, before, manifest, migration.packageName);
-    const updated = versionUpdated && options.nodeRuntime === 22 && before.engines?.node === undefined
-      ? addNodeEngineToManifest(versionUpdated)
+    const updated = versionUpdated && options.nodeRuntime !== undefined && before.engines?.node === undefined
+      ? addNodeEngineToManifest(versionUpdated, options.nodeRuntime)
       : versionUpdated;
     if (updated === undefined) {
       notes.push(...fileNotes.filter((note) => !note.includes(' → ')));
@@ -765,7 +774,7 @@ function findPackageManifests(root: string, excludedDirectories: readonly string
   return found;
 }
 
-function addNodeEngineToManifest(raw: string): string | undefined {
+function addNodeEngineToManifest(raw: string, major: 20 | 22): string | undefined {
   const rootStart = raw.charCodeAt(0) === 0xfeff ? 1 : 0;
   if (raw[rootStart] !== '{') return undefined;
   const engineMember = findJsonObjectMember(raw, rootStart, 'engines');
@@ -782,12 +791,12 @@ function addNodeEngineToManifest(raw: string): string | undefined {
   const indent = raw.match(/(?:\r?\n)([ \t]+)"[^"\r\n]+"\s*:/)?.[1] ?? '  ';
   const childIndent = engineMember ? indent + indent : indent;
   const addition = raw.includes('\n')
-    ? `${hasMembers ? ',' : ''}${lineEnding}${childIndent}${engineMember ? '"node": ">=22"' : '"engines": { "node": ">=22" }'}`
-    : `${hasMembers ? ', ' : ''}${engineMember ? '"node": ">=22"' : '"engines": { "node": ">=22" }'}`;
+    ? `${hasMembers ? ',' : ''}${lineEnding}${childIndent}${engineMember ? `"node": ">=${major}"` : `"engines": { "node": ">=${major}" }`}`
+    : `${hasMembers ? ', ' : ''}${engineMember ? `"node": ">=${major}"` : `"engines": { "node": ">=${major}" }`}`;
   const updated = raw.slice(0, insertAt) + addition + raw.slice(insertAt);
   try {
     const parsed = parseManifest<PackageManifest>(updated);
-    return parsed.engines?.node === '>=22' ? updated : undefined;
+    return parsed.engines?.node === `>=${major}` ? updated : undefined;
   } catch {
     return undefined;
   }

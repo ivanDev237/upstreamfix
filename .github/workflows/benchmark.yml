@@ -63,6 +63,7 @@ jobs:
           BENCHMARK_MIGRATION: ${{ github.event_name == 'pull_request' && 'openai@5' || inputs.migration }}
           BENCHMARK_REPOSITORY: ${{ inputs.repository }}
           BENCHMARK_REPORT: ${{ runner.temp }}/upstreamfix-benchmark.md
+          UPSTREAMFIX_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           args=(--migration "$BENCHMARK_MIGRATION" --memory-mb 4096 --report "$BENCHMARK_REPORT" --yes)
           if [[ "$BENCHMARK_MIGRATION" == 'openai@5' ]]; then

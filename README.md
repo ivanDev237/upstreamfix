@@ -75,6 +75,8 @@ After reviewing a preview, `--write` verifies the migration in an isolated Git w
 
 Firebase Admin v14 requires Node.js 22 or newer. If your project omits `engines.node`, the preview explains why the dependency cannot yet be upgraded. Once you have confirmed your deployment runtime, add `"engines": { "node": ">=22" }` yourself or pass `--node-runtime 22` to `migrate firebase-admin@14` (including with `--write`). That option proposes the Node range alongside the SDK update. It never overrides an existing incompatible `engines.node` range.
 
+OpenAI SDK v5 requires Node.js 20 or newer. After confirming your deployment runtime, pass `--node-runtime 20` to `migrate openai@5` to propose `"engines": { "node": ">=20" }` when the range is absent. An existing incompatible range must be reviewed and changed by you; the option does not override it. `scan` accepts the same option and applies it only to `openai@5`.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, test guidance, and how to add a migration. Security reports belong in the private reporting process described in [SECURITY.md](SECURITY.md). UpstreamFix is licensed under the [MIT License](LICENSE).

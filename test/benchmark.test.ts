@@ -4,12 +4,30 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkRepos, renderBenchmarkReport, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
+import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, confirmBenchmarkNodeRuntime, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkRepos, renderBenchmarkReport, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
+import { openaiV5 } from '../src/migrations/openai-v5/index.js';
 
 const execFile = promisify(execFileCallback);
 
 describe('public repository benchmark helpers', () => {
+  it('declares Node 20 only in a disposable OpenAI benchmark manifest', () => {
+    const manifest = { dependencies: { openai: '^4.0.0' } } as { dependencies: { openai: string }; engines?: { node: string } };
+    expect(confirmBenchmarkNodeRuntime(manifest, openaiV5)).toContain('benchmark-only');
+    expect(manifest.engines?.node).toBe('>=20');
+  });
+  it('confirms Node 20 only in the disposable OpenAI benchmark checkout', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-benchmark-openai-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.0.0"}}\n');
+      await writeFile(path.join(cwd, 'index.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('file_1');\n");
+      const outcome = await analyzeBenchmarkMigration(openaiV5, cwd);
+      expect(outcome.changes.length).toBeGreaterThan(0);
+      expect(outcome.manual.some((item) => item.reason.includes('Node.js 20'))).toBe(false);
+      expect(outcome.manifestNotes.join(' ')).not.toContain('no safe source edit');
+      expect(outcome.manifestNotes.join(' ')).not.toContain('engines.node (not declared)');
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
   it('analyzes source changes without invoking host lockfile regeneration', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-benchmark-analysis-'));
     const originalPath = process.env.PATH;
