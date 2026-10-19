@@ -5,8 +5,10 @@ series are experimental; review proposed migrations before applying them.
 
 ## 0.1.2
 
-- Fixed the npm release workflow's OIDC authentication setup.
-- Retried publishing through a new version tag after `v0.1.1` failed.
+- Removed an empty npm token configuration from the release workflow.
+- Tagged `v0.1.2` after the failed `v0.1.1` release. npm still rejected the
+  GitHub OIDC exchange for this repository's immutable identity; `0.1.2` was
+  published manually with 2FA, without npm provenance.
 - No CLI behavior changes.
 
 ## 0.1.1
