@@ -295,7 +295,11 @@ async function findCheckDirs(root: string, packageDirs: string[]): Promise<strin
   const candidates = new Set([root, ...packageDirs]);
   const output: string[] = [];
   for (const directory of candidates) {
-    const pkg = await readPackageJson(directory).catch(() => undefined);
+    const pkg = packageDirs.includes(directory) ? await readPackageJson(directory)
+      : await readPackageJson(directory).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
+      });
     if (pkg) output.push(directory);
   }
   return output;
@@ -317,10 +321,24 @@ async function findPackageFiles(root: string): Promise<string[]> {
 }
 
 async function readPackageJson(directory: string): Promise<PackageJson> {
-  return parseManifest<PackageJson>(await readRegularFile(path.join(directory, 'package.json')));
+  try {
+    return parseManifest<PackageJson>(await readRegularFile(path.join(directory, 'package.json')));
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error('Invalid package.json used for verification.');
+    throw error;
+  }
 }
 
-async function readRegularFile(file: string): Promise<string> {
+export async function readRegularFile(file: string): Promise<string> {
+  let parent = path.dirname(path.resolve(file));
+  while (true) {
+    const info = await lstat(parent);
+    if (info.isSymbolicLink()) throw new Error('Verification metadata has a symbolic link in its parent path.');
+    if (!info.isDirectory()) throw new Error('Verification metadata parent must be a directory.');
+    const next = path.dirname(parent);
+    if (next === parent) break;
+    parent = next;
+  }
   const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     if (!(await handle.stat()).isFile()) throw new Error('Verification metadata must be a regular file.');

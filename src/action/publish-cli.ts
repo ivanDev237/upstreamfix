@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { reconcileProposal, validateProposal, validateProposalEnvelope, parseSafeRawDiff, parseCommitParents, findManagedIssue, isDismissedClosure, type Proposal, type ProposalPublisher } from './publish.js';
+import { reconcileProposal, validateProposal, validateProposalEnvelope, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from './publish.js';
 import { parseActionConfig } from './config.js';
 import { sanitizeTerminalText } from '../core/report.js';
 
@@ -100,21 +100,17 @@ async function hasDismissedPullRequest(proposal: Proposal): Promise<boolean> {
 }
 
 async function findIssue(proposal: Proposal, state = 'open'): Promise<number | undefined> {
-  for (let page = 1; page <= 10; page++) {
-    const issues = await request<Array<{ number: number; title: string; body?: string | null; state?: string; user?: { login?: string }; pull_request?: unknown; labels?: Array<{ name?: string }> }>>(`/issues?state=${state}&per_page=100&page=${page}`);
-    const managed = findManagedIssue(issues, proposal.migration);
-    if (managed) return managed.number;
-    if (issues.length < 100) break;
-  }
-  return undefined;
+  const managed = await findManagedIssuePaginated(async (page) =>
+    await request<Array<{ number: number; title: string; body?: string | null; state?: string; user?: { login?: string }; pull_request?: unknown; labels?: Array<{ name?: string }> }>>(`/issues?state=${state}&per_page=100&page=${page}`), proposal.migration);
+  return managed?.number;
 }
 
 async function hasDismissedIssue(proposal: Proposal): Promise<boolean> {
-  for (let page = 1; page <= 10; page++) {
+  for (let page = 1; page <= 1000; page++) {
     const issues = await request<Array<{ number: number; title: string; body?: string | null; state?: string; user?: { login?: string }; pull_request?: unknown; labels?: Array<{ name?: string }> }>>(`/issues?state=all&per_page=100&page=${page}`);
     for (const issue of issues) {
       if (!findManagedIssue([issue], proposal.migration)) continue;
-      if (isDismissedClosure(issue, issue.state === 'closed' ? await closureEvents(issue.number) : [])) return true;
+      if (isDismissedManualIssueForProposal(issue, issue.state === 'closed' ? await closureEvents(issue.number) : [], proposal.status)) return true;
     }
     if (issues.length < 100) break;
   }
@@ -181,7 +177,7 @@ for (const proposal of proposals) {
           try { await request(`/issues/${opened.number}/labels`, 'POST', { labels: item.labels }); }
           catch (error) { console.warn(`PR ${opened.number} was created, but label assignment failed: ${sanitizeTerminalText(String(error))}`); }
         }
-        if (pushed) await dispatchClientChecks(item.branch);
+        await dispatchClientChecks(item.branch);
       },
       updatePullRequest: async (number, body, item) => {
         await request(`/pulls/${number}`, 'PATCH', { body, title: `UpstreamFix: migrate ${item.migration}` });

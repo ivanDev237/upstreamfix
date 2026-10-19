@@ -57,6 +57,27 @@ export function findManagedIssue(issues: ManagedIssueCandidate[], migration: str
     && item.user?.login === 'github-actions[bot]' && item.body?.includes(marker));
 }
 
+export async function findManagedIssuePaginated(
+  fetchPage: (page: number) => Promise<ManagedIssueCandidate[]>, migration: string,
+): Promise<ManagedIssueCandidate | undefined> {
+  for (let page = 1; page <= 1000; page++) {
+    const issues = await fetchPage(page);
+    const managed = findManagedIssue(issues, migration);
+    if (managed) return managed;
+    if (issues.length < 100) return undefined;
+  }
+  throw new Error('GitHub issue pagination exceeded the safety limit.');
+}
+
+export function isDismissedManualIssueForProposal(
+  issue: ClosureRecord, events: Array<{ event?: string; actor?: { login?: string } }>, status: Proposal['status'],
+): boolean {
+  if (issue.labels?.some((label) => label.name === 'upstreamfix:dismissed')) return true;
+  // Closing a manual-work ticket can mean that the user completed that work.
+  // It should not prevent a later verified PR; the explicit label blocks both.
+  return status === 'manual' && isDismissedClosure(issue, events);
+}
+
 const sha = /^[0-9a-f]{40}$/;
 const safePath = /^(?:[A-Za-z0-9_.@()+ -]+\/)*[A-Za-z0-9_.@()+ -]+$/;
 

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { validateProposal, validateProposalEnvelope, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, isDismissedClosure, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
+import { validateProposal, validateProposalEnvelope, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
 
 const base = 'a'.repeat(40);
 const commit = 'b'.repeat(40);
@@ -11,6 +11,27 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('T35 searches managed issues past the tenth GitHub page', async () => {
+    const target = { number: 1101, title: 'UpstreamFix: manual firebase-admin@14', body: '<!-- upstreamfix:manual:firebase-admin@14 -->', user: { login: 'github-actions[bot]' } };
+    const page = Array.from({ length: 100 }, (_, index) => ({ number: index, title: 'unrelated', body: '', user: { login: 'other' } }));
+    const fetchPage = vi.fn(async (number: number) => number === 11 ? [target] : page);
+    expect((await findManagedIssuePaginated(fetchPage, 'firebase-admin@14'))?.number).toBe(1101);
+    expect(fetchPage).toHaveBeenCalledTimes(11);
+  });
+  it('T35 lets a ready PR proceed after a human closes a manual issue, unless explicitly dismissed', () => {
+    const closed = { state: 'closed', labels: [] };
+    const events = [{ event: 'closed', actor: { login: 'maintainer' } }];
+    expect(isDismissedManualIssueForProposal(closed, events, 'ready')).toBe(false);
+    expect(isDismissedManualIssueForProposal(closed, events, 'manual')).toBe(true);
+    expect(isDismissedManualIssueForProposal({ state: 'closed', labels: [{ name: 'upstreamfix:dismissed' }] }, events, 'ready')).toBe(true);
+  });
+  it('T35 dispatches client CI when a bot-closed PR is reopened without a branch push', () => {
+    const source = readFileSync(new URL('../src/action/publish-cli.ts', import.meta.url), 'utf8');
+    const open = source.split('openPullRequest: async')[1]?.split('updatePullRequest: async')[0] ?? '';
+    expect(open).toContain('await dispatchClientChecks(item.branch);');
+    expect(open).not.toContain('if (pushed) await dispatchClientChecks');
+    expect(source).toContain('/issues/${number}/events?per_page=100&page=${page}');
+  });
   it('keeps a bounded long PR body well formed and links its complete artifact', async () => {
     let body = '';
     const publisher: ProposalPublisher = {

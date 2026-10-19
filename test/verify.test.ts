@@ -5,7 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { applyProposedDiffs, applyProposedFiles, copyProject, executeWithProcessGroup, verifyProposedMigration, type VerificationOptions } from '../src/core/verify.js';
+import { applyProposedDiffs, applyProposedFiles, copyProject, executeWithProcessGroup, readRegularFile, verifyProposedMigration, type VerificationOptions } from '../src/core/verify.js';
 
 const temporaryDirectories: string[] = [];
 const execFile = promisify(execFileCallback);
@@ -214,6 +214,28 @@ describe('migration verification', () => {
     });
     expect(result.status).toBe('failed');
     expect(JSON.stringify(result)).not.toContain('private payload');
+  });
+
+  it('T35 refuses a regular file reached through a symlinked parent directory', async () => {
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-parent-outside-'));
+    const project = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-parent-project-'));
+    temporaryDirectories.push(outside, project);
+    await writeFile(path.join(outside, 'package.json'), '{"name":"secret"}');
+    await symlink(outside, path.join(project, 'linked'));
+    await expect(readRegularFile(path.join(project, 'linked', 'package.json'))).rejects.toThrow('symbolic link');
+  });
+
+  it('T35 never echoes invalid package contents in a verification error', async () => {
+    const cwd = await makeProject();
+    const marker = 'PRIVATE_CANARY_DO_NOT_LOG';
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args, directory) => {
+        if (args[0] === 'install') await writeFile(path.join(directory, 'package.json'), `{${marker}`);
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('failed');
+    expect(JSON.stringify(result)).not.toContain(marker);
   });
 
   it('reuses a private pnpm store across runs without exposing it to project scripts', async () => {
