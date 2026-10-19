@@ -123,6 +123,7 @@ async function hasDismissedIssue(proposal: Proposal): Promise<boolean> {
 
 for (const proposal of proposals) {
   let bareRoot: string | undefined;
+  let pushed = false;
   try {
     validateProposalEnvelope(proposal, expectedBase, reviewedConfig);
     let parents: string[] = [];
@@ -165,6 +166,7 @@ for (const proposal of proposals) {
           'push', `--force-with-lease=refs/heads/${item.branch}:${previous}`,
           gitUrl, `${item.commit}:refs/heads/${item.branch}`,
         ]);
+        pushed = true;
       },
       openPullRequest: async (body, item) => {
         const opened = await request<{ number: number }>('/pulls', 'POST', {
@@ -179,11 +181,11 @@ for (const proposal of proposals) {
           try { await request(`/issues/${opened.number}/labels`, 'POST', { labels: item.labels }); }
           catch (error) { console.warn(`PR ${opened.number} was created, but label assignment failed: ${sanitizeTerminalText(String(error))}`); }
         }
-        await dispatchClientChecks(item.branch);
+        if (pushed) await dispatchClientChecks(item.branch);
       },
       updatePullRequest: async (number, body, item) => {
         await request(`/pulls/${number}`, 'PATCH', { body, title: `UpstreamFix: migrate ${item.migration}` });
-        await dispatchClientChecks(item.branch);
+        if (pushed) await dispatchClientChecks(item.branch);
       },
       closePullRequest: async (number) => { await request(`/pulls/${number}`, 'PATCH', { state: 'closed' }); },
       upsertIssue: async (body, item) => {

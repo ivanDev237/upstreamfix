@@ -18,6 +18,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: client-migrations-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   container-smoke:
     runs-on: ubuntu-latest
@@ -35,6 +39,8 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund && npm run build
       - name: Install and test npm, pnpm and Yarn in disposable Docker containers
         run: node scripts/check-client-containers.mjs
+      - name: Prove the client container timeout kills a long running command
+        run: node scripts/check-client-timeout.mjs
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 15

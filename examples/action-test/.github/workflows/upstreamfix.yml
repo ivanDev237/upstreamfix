@@ -13,7 +13,8 @@ permissions:
 
 jobs:
   upstreamfix:
-    uses: ivanDev237/upstreamfix/.github/workflows/client-migrations.yml@6d4221f4c8f459cc19c6ab573ab49c2857697ea1
+    # Replace both placeholders with the same reviewed 40-character SHA from main after merge.
+    uses: ivanDev237/upstreamfix/.github/workflows/client-migrations.yml@REPLACE_WITH_REVIEWED_MAIN_SHA
     with:
-      upstreamfix_sha: 6d4221f4c8f459cc19c6ab573ab49c2857697ea1
+      upstreamfix_sha: REPLACE_WITH_REVIEWED_MAIN_SHA
       ci_workflow: ci.yml

@@ -95,14 +95,26 @@ describe('client migration workflow security boundary', () => {
     const policy = readFileSync(path.join(root, 'SECURITY.md'), 'utf8');
     expect(policy).not.toContain('The current GitHub Action is disabled.');
     const source = workflow();
-    expect(source).toContain('UPSTREAMFIX_POST_MIGRATE_TRAP:');
+    expect(source).toContain('UPSTREAMFIX_TRAP_SECRET:');
+    const migrate = source.split('\n  migrate:')[1]!.split('\n  publish:')[0]!;
+    expect(migrate).toContain('UPSTREAMFIX_TRAP_SECRET:');
+    expect(migrate).toContain('timeout-minutes: 35');
     const action = readFileSync(path.join(root, 'action.yml'), 'utf8');
     expect(action).toContain('GIT_AUTHOR_NAME:');
     expect(action).toContain('UPSTREAMFIX_CONTAINER_VERIFY:');
     const prCheck = readFileSync(path.join(root, '.github/workflows/client-migrations-pr.yml'), 'utf8');
     expect(prCheck).toContain('test/verify.test.ts');
+    expect(prCheck).toContain('concurrency:');
     const publisher = readFileSync(path.join(root, 'src/action/publish-cli.ts'), 'utf8');
     expect(publisher).toContain('/dispatches');
+  });
+
+  it('keeps the client example pinned to a future main commit and dispatches CI only after a push', () => {
+    const example = readFileSync(path.join(root, 'examples/action-test/.github/workflows/upstreamfix.yml'), 'utf8');
+    expect(example).toContain('REPLACE_WITH_REVIEWED_MAIN_SHA');
+    expect(example).not.toContain('6d4221f4c8f459cc19c6ab573ab49c2857697ea1');
+    const publisher = readFileSync(path.join(root, 'src/action/publish-cli.ts'), 'utf8');
+    expect(publisher).toContain('if (pushed) await dispatchClientChecks');
   });
 
   it('sets an unprivileged Git author for the read-only migration job', () => {

@@ -76,6 +76,8 @@ jobs:
           UPSTREAMFIX_OUTPUT_ROOT: ${{ runner.temp }}/upstreamfix-output
           UPSTREAMFIX_BASE_SHA: ${{ github.sha }}
           UPSTREAMFIX_CONTAINER_VERIFY: '1'
+          # Canary exists in the tool process, but must never enter client tests.
+          UPSTREAMFIX_TRAP_SECRET: ${{ github.run_id }}-${{ github.run_attempt }}-client-canary
           GIT_AUTHOR_NAME: upstreamfix[bot]
           GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
           GIT_COMMITTER_NAME: upstreamfix[bot]
@@ -83,7 +85,6 @@ jobs:
         run: node tool/dist/action/migrate-cli.js
       - name: Upload bounded migration artifact
         env:
-          UPSTREAMFIX_POST_MIGRATE_TRAP: ${{ github.run_id }}-${{ github.run_attempt }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: upstreamfix-proposals
