@@ -199,6 +199,23 @@ describe('migration verification', () => {
     expect(result.checks[0]?.output).toContain('did not provide an installation result');
   });
 
+  it('refuses a manifest replaced by a symlink during container installation', async () => {
+    const cwd = await makeProject({ test: 'node -e 1' });
+    const secret = path.join(cwd, 'outside-secret.txt');
+    await writeFile(secret, 'private payload that must not enter a report');
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args, directory) => {
+        if (args[0] === 'install') {
+          await rm(path.join(directory, 'package.json'));
+          await symlink(secret, path.join(directory, 'package.json'));
+        }
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('failed');
+    expect(JSON.stringify(result)).not.toContain('private payload');
+  });
+
   it('reuses a private pnpm store across runs without exposing it to project scripts', async () => {
     const cwd = await makeProject({ test: 'node -e "process.exit(0)"' }, 'pnpm@10.0.0');
     const cache = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-pnpm-cache-test-'));

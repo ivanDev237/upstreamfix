@@ -1,5 +1,6 @@
 import { execFile as execFileCallback, spawn } from 'node:child_process';
-import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -42,7 +43,7 @@ export interface VerificationOptions {
   fileChanges?: ProposedFileChange[];
   /** Override the UpstreamFix pnpm cache location (primarily for offline tests). */
   pnpmCacheRoot?: string;
-  execute?: (command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number) => Promise<{ stdout?: string; stderr?: string } | undefined>;
+  execute?: (command: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number, allowInstallNetwork: boolean) => Promise<{ stdout?: string; stderr?: string } | undefined>;
 }
 
 interface PackageJson {
@@ -109,7 +110,7 @@ export async function verifyProposedMigration(
       if (installedRoots.has(plan.cwd)) continue;
       installedRoots.add(plan.cwd);
       if (plan.command === 'yarn' && plan.yarnMajor && plan.yarnMajor >= 2) {
-        const versionCheck = await runCheck('Check Yarn version', 'yarn', ['--version'], plan.cwd, env, timeoutMs, options.execute);
+        const versionCheck = await runCheck('Check Yarn version', 'yarn', ['--version'], plan.cwd, env, timeoutMs, options.execute, true);
         checks.push(versionCheck);
         const actualMajor = Number(/^\s*(\d+)\./.exec(versionCheck.output)?.[1]);
         if (versionCheck.status !== 'passed' || !(actualMajor >= 2) || (plan.yarnExact && actualMajor !== plan.yarnMajor)) {
@@ -123,14 +124,17 @@ export async function verifyProposedMigration(
         plan.args.push('--store-dir', persistentPnpmStore, '--prefer-offline');
       }
       const installLabel = path.relative(projectCopy, plan.cwd) || '.';
-      const check = await runCheck(`Install dependencies (${installLabel})`, plan.command, plan.args, plan.cwd, env, timeoutMs, options.execute);
+      const check = await runCheck(`Install dependencies (${installLabel})`, plan.command, plan.args, plan.cwd, env, timeoutMs, options.execute, true);
       installChecks.push(check);
       if (check.status !== 'passed') {
         checks.push(...installChecks);
         return { status: 'failed', checks, note: 'Type checks and tests were not run because dependency installation failed.' };
       }
+      await readRegularFile(path.join(plan.cwd, 'package.json'));
     }
     checks.push(...installChecks);
+
+    for (const directory of packageDirs) await readRegularFile(path.join(directory, 'package.json'));
 
     const checkDirs = await findCheckDirs(projectCopy, packageDirs);
     for (const directory of checkDirs) {
@@ -313,7 +317,15 @@ async function findPackageFiles(root: string): Promise<string[]> {
 }
 
 async function readPackageJson(directory: string): Promise<PackageJson> {
-  return parseManifest<PackageJson>(await readFile(path.join(directory, 'package.json'), 'utf8'));
+  return parseManifest<PackageJson>(await readRegularFile(path.join(directory, 'package.json')));
+}
+
+async function readRegularFile(file: string): Promise<string> {
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    if (!(await handle.stat()).isFile()) throw new Error('Verification metadata must be a regular file.');
+    return await handle.readFile({ encoding: 'utf8' });
+  } finally { await handle.close(); }
 }
 
 function hasDependencies(pkg: PackageJson): boolean {
@@ -330,7 +342,7 @@ async function installCommand(
   if (manager === 'pnpm') return { command: 'pnpm', args: ['install', '--ignore-scripts', '--no-frozen-lockfile'], cwd: lockRoot };
   if (manager === 'yarn') {
     const version = Number(/^yarn@(\d+)/.exec(declared ?? '')?.[1] ?? 1);
-    const yarnBerry = version >= 2 || (await readFile(path.join(lockRoot, 'yarn.lock'), 'utf8').catch(() => '')).includes('__metadata:');
+    const yarnBerry = version >= 2 || (await readRegularFile(path.join(lockRoot, 'yarn.lock')).catch(() => '')).includes('__metadata:');
     return {
       command: 'yarn',
       args: ['install', ...(yarnBerry ? ['--mode=skip-builds'] : ['--ignore-scripts'])],
@@ -392,11 +404,12 @@ async function runCheck(
   env: NodeJS.ProcessEnv,
   timeoutMs: number,
   execute: VerificationOptions['execute'],
+  allowInstallNetwork = false,
 ): Promise<VerificationCheck> {
   const start = Date.now();
   const commandText = [command, ...args].join(' ');
   try {
-    const result = execute ? await execute(command, args, cwd, env, timeoutMs) : undefined;
+    const result = execute ? await execute(command, args, cwd, env, timeoutMs, allowInstallNetwork) : undefined;
     if (execute && result === undefined && name.startsWith('Install dependencies')) {
       throw new Error('The supplied executor did not provide an installation result; refusing to run a real package install.');
     }
@@ -469,7 +482,7 @@ export async function executeWithProcessGroup(
 }
 
 export function sanitizedEnvironment(home: string): NodeJS.ProcessEnv {
-  const allowed = new Set(['PATH', 'SYSTEMROOT', 'WINDIR', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ']);
+  const allowed = new Set(['PATH', 'SYSTEMROOT', 'WINDIR', 'LANG', 'LC_ALL', 'TZ']);
   const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => allowed.has(key)));
   env.HOME = home;
   env.USERPROFILE = home;
@@ -498,8 +511,7 @@ function truncate(output: string): string {
 
 async function fileExists(file: string): Promise<boolean> {
   try {
-    await readFile(file);
-    return true;
+    return (await lstat(file)).isFile();
   } catch {
     return false;
   }
