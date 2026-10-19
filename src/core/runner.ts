@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { execFile as execFileCallback } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { registerTemporaryCleanup } from './process-cleanup.js';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -471,8 +472,10 @@ async function regeneratePackageLock(
   }
 
   let temporaryDirectory: string | undefined;
+  let unregisterCleanup: (() => void) | undefined;
   try {
     temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'upstreamfix-npm-lock-'));
+    unregisterCleanup = registerTemporaryCleanup(() => rm(temporaryDirectory!, { recursive: true, force: true }));
     await writeFile(path.join(temporaryDirectory, 'package.json'), updatedManifest, 'utf8');
     await writeFile(path.join(temporaryDirectory, 'package-lock.json'), before, 'utf8');
     const args = ['install', '--package-lock-only', '--lockfile-version=3', '--ignore-scripts', '--no-audit', '--no-fund'];
@@ -483,6 +486,7 @@ async function regeneratePackageLock(
   } catch {
     return { reason: 'npm could not regenerate package-lock.json in an isolated temporary directory.' };
   } finally {
+    unregisterCleanup?.();
     if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
   }
 }
@@ -535,8 +539,10 @@ async function regeneratePnpmLock(
   }
 
   let temporaryDirectory: string | undefined;
+  let unregisterCleanup: (() => void) | undefined;
   try {
     const probeHome = await mkdtemp(path.join(tmpdir(), 'upstreamfix-pnpm-home-'));
+    const unregisterProbeHome = registerTemporaryCleanup(() => rm(probeHome, { recursive: true, force: true }));
     let versionOutput: string;
     try {
       ({ stdout: versionOutput } = await execFile('pnpm', ['--version'], {
@@ -546,6 +552,7 @@ async function regeneratePnpmLock(
       maxBuffer: 1024 * 1024,
       }));
     } finally {
+      unregisterProbeHome();
       await rm(probeHome, { recursive: true, force: true });
     }
     const installedVersion = versionOutput.trim();
@@ -560,6 +567,7 @@ async function regeneratePnpmLock(
     }
 
     temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'upstreamfix-pnpm-lock-'));
+    unregisterCleanup = registerTemporaryCleanup(() => rm(temporaryDirectory!, { recursive: true, force: true }));
     // pnpm reads packageManager and may download a different CLI automatically. The exact
     // version was checked above, so omit this metadata from the isolated temporary manifest.
     delete manifest.packageManager;
@@ -580,6 +588,7 @@ async function regeneratePnpmLock(
   } catch {
     return { reason: 'pnpm could not regenerate pnpm-lock.yaml in an isolated temporary directory; ensure the pinned pnpm version is installed and registry access is available.' };
   } finally {
+    unregisterCleanup?.();
     if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
   }
 }
@@ -635,8 +644,10 @@ async function regenerateYarnLock(
   }
 
   let temporaryDirectory: string | undefined;
+  let unregisterCleanup: (() => void) | undefined;
   try {
     const probeHome = await mkdtemp(path.join(tmpdir(), 'upstreamfix-yarn-home-'));
+    const unregisterProbeHome = registerTemporaryCleanup(() => rm(probeHome, { recursive: true, force: true }));
     let versionOutput: string;
     try {
       ({ stdout: versionOutput } = await execFile('yarn', ['--version'], {
@@ -646,6 +657,7 @@ async function regenerateYarnLock(
       maxBuffer: 1024 * 1024,
       }));
     } finally {
+      unregisterProbeHome();
       await rm(probeHome, { recursive: true, force: true });
     }
     const installedVersion = versionOutput.trim();
@@ -660,6 +672,7 @@ async function regenerateYarnLock(
     }
 
     temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'upstreamfix-yarn-lock-'));
+    unregisterCleanup = registerTemporaryCleanup(() => rm(temporaryDirectory!, { recursive: true, force: true }));
     delete manifest.packageManager;
     await writeFile(path.join(temporaryDirectory, 'package.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8');
     await writeFile(path.join(temporaryDirectory, 'yarn.lock'), before, 'utf8');
@@ -677,6 +690,7 @@ async function regenerateYarnLock(
   } catch {
     return { reason: 'Yarn Classic could not regenerate yarn.lock in an isolated temporary directory; ensure the pinned Yarn 1.x version is installed and registry access is available.' };
   } finally {
+    unregisterCleanup?.();
     if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
   }
 }

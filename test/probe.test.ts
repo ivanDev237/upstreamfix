@@ -20,9 +20,11 @@ it('reports a precise new Stripe diagnostic while preserving the original lockfi
     await execFile('git', ['init', '-q'], { cwd });
     await execFile('git', ['add', '.'], { cwd });
     let typechecks = 0;
+    const signalHandlersBefore = process.listenerCount('SIGINT');
     const result = await probeProject(cwd, 'stripe@23.0.0', {
       confirmed: true,
       execute: async (phase, _command, args, _directory, env) => {
+        expect(process.listenerCount('SIGINT')).toBeGreaterThan(signalHandlersBefore);
         expect(env.GITHUB_TOKEN).toBeUndefined();
         if (phase.endsWith('typecheck')) {
           expect(args).toContain('--network=none');
@@ -35,6 +37,7 @@ it('reports a precise new Stripe diagnostic while preserving the original lockfi
       },
     });
     expect(result.status).toBe('available');
+    expect(process.listenerCount('SIGINT')).toBe(signalHandlersBefore);
     expect(result.currentVersion).toBe('22.5.0');
     expect(result.newDiagnostics).toMatchObject([{ file: 'src/pay.ts', line: 243, code: 2561 }]);
     expect(result.preexisting).toHaveLength(1);

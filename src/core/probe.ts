@@ -5,6 +5,7 @@ import { newTypeScriptDiagnostics, parseTypeScriptDiagnostics, type TypeScriptDi
 import { copyProject, executeWithProcessGroup, sanitizedEnvironment } from './verify.js';
 import { validateExactVersion } from './diff-api.js';
 import { migrations } from '../migrations/index.js';
+import { registerTemporaryCleanup } from './process-cleanup.js';
 
 const nodeImage = 'node:24.22.0-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5';
 export type ProbePhase = 'baseline-install' | 'baseline-typecheck' | 'target-install' | 'target-typecheck';
@@ -51,6 +52,7 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
   };
   if (!options.confirmed) return base;
   const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-probe-'));
+  const unregisterCleanup = registerTemporaryCleanup(() => rm(root, { recursive: true, force: true }));
   const project = path.join(root, 'project');
   const home = path.join(root, 'home');
   const execute = options.execute ?? realExecutor;
@@ -114,6 +116,7 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
   } catch (error) {
     return { ...base, status: 'unavailable', note: error instanceof Error ? error.message : String(error) };
   } finally {
+    unregisterCleanup();
     await rm(root, { recursive: true, force: true });
   }
 }
