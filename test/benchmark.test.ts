@@ -39,6 +39,21 @@ describe('public repository benchmark helpers', () => {
     expect(report).toContain('| sample | `aaaaaaaaaaaa` | completed | 3 | 2 | 1 | pass | fail: TS error | fail: existing test | pass |  |');
   });
 
+  it('identifies the exact GitHub run and tool commit behind a benchmark report', () => {
+    const oldRun = process.env.GITHUB_RUN_ID;
+    const oldSha = process.env.GITHUB_SHA;
+    try {
+      process.env.GITHUB_RUN_ID = '123456789';
+      process.env.GITHUB_SHA = 'c'.repeat(40);
+      const report = renderBenchmarkReport([]);
+      expect(report).toContain('Run ID: `123456789`');
+      expect(report).toContain(`Tool SHA: \`${'c'.repeat(40)}\``);
+    } finally {
+      if (oldRun === undefined) delete process.env.GITHUB_RUN_ID; else process.env.GITHUB_RUN_ID = oldRun;
+      if (oldSha === undefined) delete process.env.GITHUB_SHA; else process.env.GITHUB_SHA = oldSha;
+    }
+  });
+
   it('escapes hostile test output before writing a public Markdown table', () => {
     const report = renderBenchmarkReport([{
       name: 'sample', commit: 'a'.repeat(40), status: 'failed', usages: 0, migrated: 0, manual: 0,

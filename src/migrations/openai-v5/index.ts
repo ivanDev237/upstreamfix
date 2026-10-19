@@ -190,7 +190,13 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     if (constructor && Node.isNewExpression(constructor) && imported.has(constructor.getExpression().getText()))
       addManual(result, file, property, 'httpAgent uses a different transport from fetchOptions in OpenAI v5; configure it manually.');
   }
-  if (result.manual.length !== manualStart) return;
+  if (result.manual.length !== manualStart) {
+    for (const edit of edits) {
+      result.manual.push({ file: file.getFilePath(), line: edit.line,
+        reason: `Potential ${edit.rule} transformation withheld because this file also contains manual findings.`, snippet: edit.before });
+    }
+    return;
+  }
   if (edits.length === 0) return;
   const ascending = [...edits].sort((a, b) => a.start - b.start);
   if (ascending.some((item, index) => index > 0 && item.start < ascending[index - 1]!.end)) {

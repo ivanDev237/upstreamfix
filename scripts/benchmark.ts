@@ -567,6 +567,9 @@ export async function benchmarkOne(
       );
       if (newlyReported.length > 0) {
         result.details += ` Candidate new TypeScript diagnostics after SDK update (not attributed automatically): ${newlyReported.map((item) => `${item.file}:${item.line}:${item.column} TS${item.code} ${item.message}`).join('; ')}.`;
+        if (migration.packageName === 'openai' && newlyReported.some((item) => item.code === 2304 && /\b(?:RequestInit|Headers|Blob|File|Response|FormData|AbortController)\b/.test(item.message))) {
+          result.details += ' OpenAI v5 uses web platform types. Check the project TypeScript lib setting (for example DOM) and compatible Node type declarations before attributing these errors to a migration rule.';
+        }
       }
     }
     const requiresRuntimeReview = targetNotes.some((note) => note.toLowerCase().includes('node.js'));
@@ -589,9 +592,11 @@ export function renderBenchmarkReport(
   const lines = [
     `# ${migration.title} public repository benchmark`, '',
     `Generated: ${new Date().toISOString()}`, '',
+    ...(process.env.GITHUB_RUN_ID && /^\d+$/.test(process.env.GITHUB_RUN_ID) ? [`Run ID: \`${process.env.GITHUB_RUN_ID}\``, ''] : []),
+    ...(process.env.GITHUB_SHA && /^[0-9a-f]{40}$/.test(process.env.GITHUB_SHA) ? [`Tool SHA: \`${process.env.GITHUB_SHA}\``, ''] : []),
     `Run status: **${completion}** (${results.length} of ${expectedCount} repositories recorded).`, '',
     `Automatic migration rate: **${rate}** (${migrated} of ${detected} detected migration items).`,
-    'The denominator counts migration change groups plus manual API findings; it does not count individual API callsites. Node.js runtime prerequisites and temporary benchmark-only dependency overrides are reported as notes, not manual migration findings.', '',
+    'The denominator counts migration change groups plus manual API findings, including potential edits withheld in files with manual findings; it does not count individual API callsites. Node.js runtime prerequisites and temporary benchmark-only dependency overrides are reported as notes, not manual migration findings.', '',
     '| Repository | Pinned commit | Status | Detected items | Migrated | Manual | Types before | Types after | Tests before | Tests after | Details |',
     '|---|---|---:|---:|---:|---:|---|---|---|---|---|',
     ...results.map((row) => `| ${cell(row.name)} | \`${row.commit.slice(0, 12)}\` | ${cell(row.status)} | ${row.usages} | ${row.migrated} | ${row.manual} | ${cell(row.typecheck.before)} | ${cell(row.typecheck.after)} | ${cell(row.tests.before)} | ${cell(row.tests.after)} | ${cell(row.details)} |`),

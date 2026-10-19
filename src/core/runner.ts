@@ -245,7 +245,7 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     : {
         notes: [result.manual.length > 0
           ? 'Dependency versions were left unchanged because this migration has items requiring manual review.'
-          : 'Dependency versions were left unchanged because no supported code changes were found.'],
+          : 'Dependency versions were left unchanged because no automatic code transformation was applied; inspect runtime prerequisites and package declarations.'],
         changes: [],
         manual: [],
       };

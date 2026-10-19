@@ -111,6 +111,12 @@ client.containers.files.del('container_1', 'file_1');
     expect(outcome.manual.every((item) => item.reason.includes('path parameters'))).toBe(true);
   });
 
+  it('reports otherwise safe edits withheld because the same file has a manual item', () => {
+    const outcome = migrate("import OpenAI from 'openai';\nconst client = new OpenAI();\nclient.files.del('f');\nclient.vectorStores.files.del('vs', 'f');\n");
+    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual.some((item) => item.reason.includes('del-to-delete') && item.reason.includes('withheld'))).toBe(true);
+  });
+
   it('withholds edits from malformed files', () => {
     const outcome = migrate("import OpenAI from 'openai';\nconst client = new OpenAI(\nclient.files.del('x');\n");
     expect(outcome.fileUpdates).toEqual([]);
