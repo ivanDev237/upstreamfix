@@ -53,17 +53,19 @@ export function validateProposal(proposal: Proposal, expectedBase: string, paren
   }
 }
 
-export async function reconcileProposal(proposal: Proposal, publisher: ProposalPublisher): Promise<void> {
+export async function reconcileProposal(proposal: Proposal, publisher: ProposalPublisher, artifactUrl?: string): Promise<void> {
   const existing = await publisher.findPullRequest(proposal);
   const migration = migrations.find((candidate) => candidate.id === proposal.migration);
   if (!migration) throw new Error('Unknown migration.');
-  const body = maskSecrets([
+  const fullBody = maskSecrets([
     `UpstreamFix migration: \`${proposal.migration}\``,
     `Verification: **${proposal.verification}**`,
     `Official guide: ${migration.guideUrl}`,
     '', proposal.report,
     '', 'Review the diff and run your repository checks before merging. UpstreamFix never merges automatically.',
   ].join('\n'));
+  const suffix = `\n\nReport truncated to fit GitHub's body limit. Full report: ${artifactUrl ?? 'upstreamfix-proposals artifact in this workflow run'}`;
+  const body = fullBody.length <= 59_000 ? fullBody : `${fullBody.slice(0, 59_000 - suffix.length)}${suffix}`;
   if (proposal.status === 'ready') {
     await publisher.pushBranch(proposal);
     if (existing) await publisher.updatePullRequest(existing, body, proposal);

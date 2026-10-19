@@ -98,7 +98,10 @@ for (const proposal of proposals) {
           title: `UpstreamFix: migrate ${item.migration}`, head: item.branch,
           base: defaultBranch, body,
         });
-        if (item.reviewers.length) await request(`/pulls/${opened.number}/requested_reviewers`, 'POST', { reviewers: item.reviewers });
+        if (item.reviewers.length) {
+          try { await request(`/pulls/${opened.number}/requested_reviewers`, 'POST', { reviewers: item.reviewers }); }
+          catch (error) { console.warn(`PR ${opened.number} was created, but reviewer assignment failed: ${String(error)}`); }
+        }
         if (item.labels.length) await request(`/issues/${opened.number}/labels`, 'POST', { labels: item.labels });
       },
       updatePullRequest: async (number, body, item) => {
@@ -115,7 +118,12 @@ for (const proposal of proposals) {
         if (existing) await request(`/issues/${existing}`, 'PATCH', { state: 'closed' });
       },
     };
-    await reconcileProposal(proposal, publisher);
+    const artifactUrl = process.env.GITHUB_RUN_ID && /^\d+$/.test(process.env.GITHUB_RUN_ID)
+      ? `https://github.com/${repository}/actions/runs/${process.env.GITHUB_RUN_ID}#artifacts` : undefined;
+    await reconcileProposal(proposal, publisher, artifactUrl);
+  } catch (error) {
+    console.error(`Publication of ${String(proposal.migration)} failed: ${String(error)}`);
+    process.exitCode = 1;
   } finally {
     if (bareRoot) await rm(bareRoot, { recursive: true, force: true });
   }

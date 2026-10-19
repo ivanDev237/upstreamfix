@@ -10,6 +10,18 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('bounds a large report so GitHub accepts the PR body and points to the artifact', async () => {
+    const publisher: ProposalPublisher = {
+      pushBranch: vi.fn(async () => undefined), openPullRequest: vi.fn(async () => undefined),
+      updatePullRequest: vi.fn(async () => undefined), closePullRequest: vi.fn(async () => undefined),
+      upsertIssue: vi.fn(async () => undefined), closeIssue: vi.fn(async () => undefined),
+      findPullRequest: vi.fn(async () => undefined),
+    };
+    await reconcileProposal({ ...proposal, report: 'x'.repeat(100_000) }, publisher);
+    const body = vi.mocked(publisher.openPullRequest).mock.calls[0]?.[0] ?? '';
+    expect(body.length).toBeLessThan(60_000);
+    expect(body).toContain('artifact');
+  });
   it('refuses an unexpected base, branch, parent or changed path', () => {
     expect(() => validateProposal(proposal, base, [base], ['package.json', 'server.ts'])).not.toThrow();
     expect(() => validateProposal(proposal, 'c'.repeat(40), [base], proposal.files)).toThrow('base');
