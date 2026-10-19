@@ -130,6 +130,18 @@ describe('firebase-admin v14 migration', () => {
     expect(outcome.manual.some((item) => item.reason.includes('never overrides a declared range'))).toBe(true);
     expect(outcome.proposedFiles.some((file) => file.relativePath === 'package.json')).toBe(false);
   });
+  it('accepts valid higher Node.js ranges and 22.x without false warnings', async () => {
+    for (const node of ['>=24', '22.x']) {
+      const cwd = await makeProject();
+      const file = path.join(cwd, 'package.json');
+      const manifest = JSON.parse(await readFile(file, 'utf8')) as { engines: { node: string } };
+      manifest.engines.node = node;
+      await writeFile(file, JSON.stringify(manifest));
+      const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+      expect(result.manifestNotes.join(' ')).not.toContain('review `engines.node`');
+      expect(result.proposedFiles.find((item) => item.relativePath === 'package.json')?.after).toContain('^14.0.0');
+    }
+  });
 
   it('treats an empty engines.node declaration as manual instead of adding a duplicate key', async () => {
     const cwd = await makeProject();

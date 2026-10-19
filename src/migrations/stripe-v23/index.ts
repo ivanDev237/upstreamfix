@@ -1,6 +1,7 @@
 import type { Project } from 'ts-morph';
 import type { Migration, MigrationResult, PackageManifest } from '../../core/types.js';
 import { migrateStripeV23 } from '../stripe-shared.js';
+import { guaranteesNodeMajor } from '../../core/node-range.js';
 
 export const stripeV23: Migration = {
   id: 'stripe@23',
@@ -48,5 +49,5 @@ export const stripeV23: Migration = {
 };
 
 function supportsNode20(range: string): boolean {
-  return /^(?:>=\s*20(?:\.\d+){0,2}|(?:\^|~)\s*(?:20|2[1-9]|[3-9]\d)(?:\.\d+){0,2}|(?:20|2[1-9]|[3-9]\d)(?:\.\d+){0,2})$/.test(range.trim());
+  return guaranteesNodeMajor(range, 20);
 }

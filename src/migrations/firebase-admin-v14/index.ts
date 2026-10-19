@@ -8,6 +8,7 @@ import {
   type SourceFile,
 } from 'ts-morph';
 import type { Change, ManualItem, Migration, MigrationResult, PackageManifest } from '../../core/types.js';
+import { guaranteesNodeMajor } from '../../core/node-range.js';
 import {
   APP_MODULE,
   CREDENTIAL_FACTORIES,
@@ -137,8 +138,7 @@ export const firebaseAdminV14: Migration = {
 };
 
 function supportsNode22(range: string): boolean {
-  const normalized = range.trim();
-  return /^(?:>=\s*22(?:\.\d+){0,2}|(?:\^|~)\s*22(?:\.\d+){0,2}|22(?:\.\d+){0,2})$/.test(normalized);
+  return guaranteesNodeMajor(range, 22);
 }
 
 function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
