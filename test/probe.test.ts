@@ -30,8 +30,9 @@ it('reports a precise new Stripe diagnostic while preserving the original lockfi
         if (phase.endsWith('typecheck')) {
           if (args[0] === 'rm') return { code: 0, output: 'removed' };
           expect(args).toContain('--network=none');
-          expect(args).toContain('--incremental');
-          expect(args).toContain('false');
+          expect(args).not.toContain('--incremental');
+          expect(args).toContain('--tsBuildInfoFile');
+          expect(args).toContain('/tmp/upstreamfix-probe.tsbuildinfo');
           expect(args).toContain('--init');
           expect(args).toContain('--name');
           expect(args).toContain('--mount');
