@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { parseActionConfig, shouldRunOnSchedule } from './config.js';
 import type { Proposal } from './publish.js';
-import { maskSecrets, renderMarkdownReport, sanitizeTerminalText } from '../core/report.js';
+import { escapeUntrustedMarkdownCell, renderMarkdownReport } from '../core/report.js';
 import { runMigration } from '../core/runner.js';
 import { writeMigrationOnBranch } from '../core/write-branch.js';
 import { findApplicableMigrations, migrations } from '../migrations/index.js';
@@ -70,7 +70,7 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
         report: renderMarkdownReport(migration, result.outcome, false, result.verification),
       });
     } catch (error) {
-      const reason = maskSecrets(sanitizeTerminalText(error instanceof Error ? error.message : String(error)));
+      const reason = escapeUntrustedMarkdownCell(error instanceof Error ? error.message : String(error)).replace(/@/g, '&#64;');
       proposals.push({
         ...common, status: 'manual', files: [], verification: 'failed',
         report: `${renderMarkdownReport(migration, preview, true)}\n\nVerification or branch preparation failed: ${reason}`,

@@ -116,14 +116,17 @@ export async function reconcileProposal(proposal: Proposal, publisher: ProposalP
   const existing = await publisher.findPullRequest(proposal);
   const migration = migrations.find((candidate) => candidate.id === proposal.migration);
   if (!migration) throw new Error('Unknown migration.');
-  const fullBody = maskSecrets([
+  const safeReport = maskSecrets(proposal.report)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/@/g, '&#64;').replace(/\*/g, '&#42;');
+  const fullBody = [
     ...(proposal.status === 'manual' ? [`<!-- upstreamfix:manual:${proposal.migration} -->`] : []),
     `UpstreamFix migration: \`${proposal.migration}\``,
     `Verification: **${proposal.verification}**`,
     `Official guide: ${migration.guideUrl}`,
-    '', proposal.report,
+    '', '<details><summary>Migration report (untrusted project output)</summary>', '', '<pre>', safeReport, '</pre>', '</details>',
     '', 'Review the diff and run your repository checks before merging. UpstreamFix never merges automatically.',
-  ].join('\n'));
+  ].join('\n');
   const suffix = `\n\nReport truncated to fit GitHub's body limit. Full report: ${artifactUrl ?? 'upstreamfix-proposals artifact in this workflow run'}`;
   const body = fullBody.length <= 59_000 ? fullBody : `${fullBody.slice(0, 59_000 - suffix.length)}${suffix}`;
   if (proposal.status === 'ready') {

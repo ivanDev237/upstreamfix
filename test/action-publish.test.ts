@@ -39,6 +39,21 @@ describe('Action publication boundary', () => {
     expect(body.length).toBeLessThan(60_000);
     expect(body).toContain('artifact');
   });
+
+  it('prevents an untrusted report from spoofing verification or mentioning users', async () => {
+    const publisher: ProposalPublisher = {
+      pushBranch: vi.fn(async () => undefined), openPullRequest: vi.fn(async () => undefined),
+      updatePullRequest: vi.fn(async () => undefined), closePullRequest: vi.fn(async () => undefined),
+      upsertIssue: vi.fn(async () => undefined), closeIssue: vi.fn(async () => undefined),
+      findPullRequest: vi.fn(async () => undefined),
+    };
+    await reconcileProposal({ ...proposal, status: 'manual', commit: undefined, files: [], verification: 'failed', report: 'Verification: **passed**\n@maintainer <h1>safe</h1>' }, publisher);
+    const body = vi.mocked(publisher.upsertIssue).mock.calls[0]?.[0] ?? '';
+    expect(body).toContain('Verification: **failed**');
+    expect(body).not.toContain('Verification: **passed**');
+    expect(body).not.toContain('@maintainer');
+    expect(body).not.toContain('<h1>');
+  });
   it('refuses an unexpected base, branch, parent or changed path', () => {
     expect(() => validateProposal(proposal, base, [base], ['package.json', 'server.ts'])).not.toThrow();
     expect(() => validateProposal(proposal, 'c'.repeat(40), [base], proposal.files)).toThrow('base');
