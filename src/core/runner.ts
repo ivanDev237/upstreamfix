@@ -180,6 +180,8 @@ export interface RunOptions {
   dryRun: boolean;
   /** Explicit confirmation that Firebase Admin v14 will run on Node.js 22+. */
   nodeRuntime?: 22;
+  /** Yarn Classic needs a full dependency installation to regenerate yarn.lock. */
+  allowYarnLockInstall?: boolean;
 }
 
 export interface RunOutcome extends MigrationResult {
@@ -378,7 +380,9 @@ async function migrateManifests(
         : existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'pnpm-lock.yaml'
           ? await regeneratePnpmLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd)
           : existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'yarn.lock'
-            ? await regenerateYarnLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd)
+            ? options.allowYarnLockInstall
+              ? await regenerateYarnLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd)
+              : { reason: 'Yarn Classic lockfile regeneration requires --allow-yarn-lock-install because it runs a full dependency installation (estimated 50–400 MB of downloads without a warm cache).' }
           : { reason: `This package uses unsupported lockfile(s): ${existingLocks.join(', ')}.` };
       if (!lockResult.contents) {
         notes.push(...fileNotes.filter((note) => !note.includes(' → ')));

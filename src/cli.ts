@@ -50,11 +50,13 @@ export function createProgram(): Command {
     .option('--verify', 'verify proposed changes in a temporary project copy')
     .option('--node-runtime <major>', 'confirm Firebase Admin v14 will run on Node.js 22+ and add engines.node when absent', parseNodeRuntime)
     .option('--verify-timeout <seconds>', 'maximum time per verification command', parsePositiveInteger)
+    .option('--allow-yarn-lock-install', 'allow a full Yarn Classic installation to regenerate yarn.lock (estimated 50–400 MB)')
     .option('--report <file>', 'write the Markdown report to this explicit path (relative paths use --cwd)')
-    .action(async (migrationId: string, options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 22 }) => {
+    .action(async (migrationId: string, options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 22; allowYarnLockInstall?: boolean }) => {
       const migration = migrations.find((candidate) => candidate.id === migrationId)!;
       if (options.nodeRuntime && migration.id !== 'firebase-admin@14') throw new Error('--node-runtime 22 is supported only for firebase-admin@14.');
       const cwd = path.resolve(options.cwd);
+      if (options.allowYarnLockInstall) console.log('Yarn Classic lockfile regeneration may download about 50–400 MB without a warm cache.');
       if (options.allowDirty && !options.write) throw new Error('--allow-dirty can only be used together with --write.');
       let writeResult;
       if (options.write) {
@@ -63,10 +65,11 @@ export function createProgram(): Command {
           cwd,
           allowDirty: options.allowDirty,
           nodeRuntime: options.nodeRuntime,
+          allowYarnLockInstall: options.allowYarnLockInstall,
           timeoutMs: (options.verifyTimeout ?? 300) * 1000,
         });
       }
-      const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: options.nodeRuntime });
+      const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: options.nodeRuntime, allowYarnLockInstall: options.allowYarnLockInstall });
       const verification = writeResult?.verification ?? (options.verify
         ? await verifyProposedMigration(cwd, outcome.proposedDiff, { packageName: migration.packageName, fileChanges: outcome.proposedFiles, timeoutMs: (options.verifyTimeout ?? 300) * 1000 })
         : undefined);
@@ -96,9 +99,11 @@ export function createProgram(): Command {
     .option('--verify', 'verify each proposed migration in a temporary project copy')
     .option('--node-runtime <major>', 'confirm Firebase Admin v14 will run on Node.js 22+ and add engines.node when absent', parseNodeRuntime)
     .option('--verify-timeout <seconds>', 'maximum time per verification command', parsePositiveInteger)
+    .option('--allow-yarn-lock-install', 'allow a full Yarn Classic installation to regenerate yarn.lock (estimated 50–400 MB)')
     .option('--report <file>', 'write Markdown reports to this explicit path (relative paths use --cwd)')
-    .action(async (options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 22 }) => {
+    .action(async (options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 22; allowYarnLockInstall?: boolean }) => {
       const cwd = path.resolve(options.cwd);
+      if (options.allowYarnLockInstall) console.log('Yarn Classic lockfile regeneration may download about 50–400 MB without a warm cache.');
       if (options.allowDirty && !options.write) throw new Error('--allow-dirty can only be used together with --write.');
       const reports: string[] = [];
       const commits: Array<{ branch: string; commit: string }> = [];
@@ -116,11 +121,12 @@ export function createProgram(): Command {
             cwd,
             allowDirty: options.allowDirty,
             nodeRuntime: migration.id === 'firebase-admin@14' ? options.nodeRuntime : undefined,
+            allowYarnLockInstall: options.allowYarnLockInstall,
             timeoutMs: (options.verifyTimeout ?? 300) * 1000,
           });
           commits.push({ branch: writeResult.branch, commit: writeResult.commit });
         }
-        const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: migration.id === 'firebase-admin@14' ? options.nodeRuntime : undefined });
+        const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: migration.id === 'firebase-admin@14' ? options.nodeRuntime : undefined, allowYarnLockInstall: options.allowYarnLockInstall });
         const verification = writeResult?.verification ?? (options.verify
           ? await verifyProposedMigration(cwd, outcome.proposedDiff, { packageName: migration.packageName, fileChanges: outcome.proposedFiles, timeoutMs: (options.verifyTimeout ?? 300) * 1000 })
           : undefined);
