@@ -36,6 +36,10 @@ describe('Action publication boundary', () => {
     const publisher = readFileSync(new URL('../src/action/publish-cli.ts', import.meta.url), 'utf8');
     expect(publisher).toContain("'--raw', '--no-renames', '--no-abbrev', '-z'");
   });
+  it('sanitizes untrusted proposal identifiers before printing publication failures', () => {
+    const publisher = readFileSync(new URL('../src/action/publish-cli.ts', import.meta.url), 'utf8');
+    expect(publisher).toContain('sanitizeTerminalText(String(proposal.migration))');
+  });
   it('bounds a large report so GitHub accepts the PR body and points to the artifact', async () => {
     const publisher: ProposalPublisher = {
       pushBranch: vi.fn(async () => undefined), openPullRequest: vi.fn(async () => undefined),

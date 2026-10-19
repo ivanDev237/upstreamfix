@@ -6,6 +6,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { reconcileProposal, validateProposal, validateProposalEnvelope, parseSafeRawDiff, parseCommitParents, findManagedIssue, type Proposal, type ProposalPublisher } from './publish.js';
 import { parseActionConfig } from './config.js';
+import { sanitizeTerminalText } from '../core/report.js';
 
 const execFile = promisify(execFileCallback);
 const token = process.env.GITHUB_TOKEN;
@@ -169,7 +170,7 @@ for (const proposal of proposals) {
       ? `https://github.com/${repository}/actions/runs/${process.env.GITHUB_RUN_ID}#artifacts` : undefined;
     await reconcileProposal(proposal, publisher, artifactUrl);
   } catch (error) {
-    console.error(`Publication of ${String(proposal.migration)} failed: ${String(error)}`);
+    console.error(`Publication of ${sanitizeTerminalText(String(proposal.migration))} failed: ${sanitizeTerminalText(String(error))}`);
     process.exitCode = 1;
   } finally {
     if (bareRoot) await rm(bareRoot, { recursive: true, force: true });
