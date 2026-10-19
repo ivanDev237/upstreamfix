@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { reconcileProposal, validateProposal, type Proposal, type ProposalPublisher } from './publish.js';
+import { reconcileProposal, validateProposal, parseSafeRawDiff, type Proposal, type ProposalPublisher } from './publish.js';
 import { parseActionConfig } from './config.js';
 
 const execFile = promisify(execFileCallback);
@@ -86,7 +86,7 @@ for (const proposal of proposals) {
       await git(bareRoot, ['fetch', '--no-tags', bundle, proposal.branch]);
       const commitInfo = await git(bareRoot, ['cat-file', '-p', proposal.commit!]);
       parents = [...commitInfo.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((match) => match[1]!);
-      changedFiles = (await git(bareRoot, ['diff', '--name-only', '-z', expectedBase, proposal.commit!])).split('\0').filter(Boolean);
+      changedFiles = parseSafeRawDiff(await git(bareRoot, ['diff', '--raw', '--no-renames', '-z', expectedBase, proposal.commit!]));
     }
     validateProposal(proposal, expectedBase, parents, changedFiles, reviewedConfig);
     const publisher: ProposalPublisher = {

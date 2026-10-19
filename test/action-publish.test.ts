@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { validateProposal, reconcileProposal, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
+import { validateProposal, reconcileProposal, parseSafeRawDiff, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
 
 const base = 'a'.repeat(40);
 const commit = 'b'.repeat(40);
@@ -10,6 +10,12 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('rejects deletions, symlinks, submodules and rename source deletions in raw bundle diffs', () => {
+    expect(parseSafeRawDiff(`:100644 100644 ${'a'.repeat(40)} ${'b'.repeat(40)} M\0server.ts\0`)).toEqual(['server.ts']);
+    expect(() => parseSafeRawDiff(`:100644 000000 ${'a'.repeat(40)} ${'0'.repeat(40)} D\0.github/CODEOWNERS\0:000000 100644 ${'0'.repeat(40)} ${'b'.repeat(40)} A\0owners.json\0`)).toThrow('status');
+    expect(() => parseSafeRawDiff(`:000000 120000 ${'0'.repeat(40)} ${'b'.repeat(40)} A\0server.ts\0`)).toThrow('mode');
+    expect(() => parseSafeRawDiff(`:000000 160000 ${'0'.repeat(40)} ${'b'.repeat(40)} A\0server.ts\0`)).toThrow('mode');
+  });
   it('bounds a large report so GitHub accepts the PR body and points to the artifact', async () => {
     const publisher: ProposalPublisher = {
       pushBranch: vi.fn(async () => undefined), openPullRequest: vi.fn(async () => undefined),

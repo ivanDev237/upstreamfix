@@ -29,6 +29,29 @@ export interface ProposalPublisher {
 const sha = /^[0-9a-f]{40}$/;
 const safePath = /^(?:[A-Za-z0-9_.@()+ -]+\/)*[A-Za-z0-9_.@()+ -]+$/;
 
+/** Parse Git's NUL-separated raw diff; only regular file additions/edits are publishable. */
+export function parseSafeRawDiff(raw: string): string[] {
+  const records = raw.split('\0');
+  if (records.at(-1) !== '') throw new Error('Malformed raw Git diff.');
+  records.pop();
+  if (records.length % 2 !== 0) throw new Error('Malformed raw Git diff.');
+  const files: string[] = [];
+  for (let index = 0; index < records.length; index += 2) {
+    const header = records[index]!;
+    const file = records[index + 1]!;
+    const match = /^:(\d{6}) (\d{6}) [0-9a-f]{40,64} [0-9a-f]{40,64} ([A-Z])$/.exec(header);
+    if (!match) throw new Error('Malformed raw Git diff status.');
+    if (!['A', 'M'].includes(match[3]!)) throw new Error('Raw Git diff contains a deletion or unsupported status.');
+    if (!['100644', '100755'].includes(match[2]!) || (match[3] === 'M' && !['100644', '100755'].includes(match[1]!))) {
+      throw new Error('Raw Git diff contains a symlink, submodule or other unsafe mode.');
+    }
+    if (match[3] === 'A' && match[1] !== '000000') throw new Error('Malformed addition mode.');
+    if (!file || file.includes('\n') || file.includes('\r')) throw new Error('Malformed raw Git diff path.');
+    files.push(file);
+  }
+  return files;
+}
+
 /** Metadata is untrusted until a separate Git bundle inspection confirms it. */
 export function validateProposal(proposal: Proposal, expectedBase: string, parents: string[], changedFiles: string[], config?: Pick<ActionConfig, 'reviewers' | 'labels'>): void {
   if (proposal.schema !== 1 || !migrations.some((migration) => migration.id === proposal.migration)) throw new Error('Unknown proposal schema or migration.');
