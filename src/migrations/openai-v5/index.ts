@@ -69,6 +69,11 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
   for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const initializer = variable.getInitializer();
     if (initializer && Node.isNewExpression(initializer) && imported.has(initializer.getExpression().getText())) clients.add(variable.getName());
+    // A client may be assigned in branches after its declaration. Its explicit
+    // imported OpenAI type still identifies the receiver without guessing from
+    // an arbitrary property name.
+    if (Node.isIdentifier(variable.getNameNode()) && imported.has(variable.getTypeNode()?.getText() ?? ''))
+      clients.add(variable.getName());
   }
   const edits: Edit[] = [];
   const manualStart = result.manual.length;

@@ -37,6 +37,7 @@ Pull requests created with the default `GITHUB_TOKEN` do not trigger the reposit
 | `firebase-admin@14` | Firebase Admin SDK v13 namespaced API to v14 modular API | Benchmarked on 12 valid public repositories; 316 of 340 detected change groups migrated automatically. Manual findings and runtime prerequisites still require review. |
 | `stripe@22` | Stripe Node SDK v21 to v22 | Benchmarked on 6 installable public repositories; payment-sensitive cases remain manual. See [Stripe's v22 guide](https://github.com/stripe/stripe-node/wiki/Migration-guide-for-v22). |
 | `stripe@23` | Stripe Node SDK v22 to v23 | Benchmarked on 4 public repositories; a removed payment parameter was identified for manual review. See [Stripe's v23 guide](https://github.com/stripe/stripe-node/wiki/Migration-guide-for-v23). |
+| `openai@5` | OpenAI Node SDK v4 to v5 | Conservative changes for renamed methods, beta chat paths, and moved imports. Review runtime requirements and semantic changes against the [official v5 guide](https://github.com/openai/openai-node/blob/v5.0.0/MIGRATION.md). |
 
 Run `upstreamfix list` for the catalog included in the installed version. Run `upstreamfix scan --cwd <project>` to select migrations from package versions declared in root or nested `package.json` files.
 
@@ -59,7 +60,7 @@ upstreamfix probe stripe@23.0.0 --cwd /path/to/project
 
 ## What is not supported
 
-- The GitHub Action exits without changing a repository; automatic pull requests are not available.
+- Automatic PRs require a clean, verified migration with no manual findings and a repository that permits GitHub Actions to create pull requests. The Action never merges changes.
 - `watch`, `diff-api`, and `probe` can identify new version and type-change candidates. They do not generate or approve safe migration rules automatically.
 - Only migrations shown by `upstreamfix list` are supported. Unsupported, ambiguous, or semantic API changes require manual work.
 - Lockfile previews cover standalone root projects using npm v3, pnpm, or Yarn Classic lockfiles. Regenerating a lockfile may contact the package registry; pnpm or Yarn must already be installed and match any `packageManager` pin. Workspaces, Yarn Berry, shrinkwrap, project package-manager configuration files, and local or non-registry dependencies are left for manual review.

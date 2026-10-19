@@ -44,6 +44,19 @@ unrelated.files.del('file_2');
     expect(next).toContain("unrelated.files.del('file_2')");
   });
 
+  it('rewrites beta chat on a client declared with the imported OpenAI type', () => {
+    const outcome = migrate(`import { OpenAI, ClientOptions } from 'openai';
+function make(obj: ClientOptions | OpenAI) {
+  let openAi: OpenAI;
+  if (obj instanceof OpenAI) openAi = obj;
+  else openAi = new OpenAI(obj);
+  return openAi.beta.chat.completions.stream({model: 'gpt-4o', messages: []});
+}
+`);
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('openAi.chat.completions.stream(');
+  });
+
   it('reports semantic changes without guessing a rewrite', () => {
     const outcome = migrate(`import OpenAI from 'openai';
 const client = new OpenAI({httpAgent: agent});
