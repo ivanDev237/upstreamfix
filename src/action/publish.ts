@@ -17,6 +17,7 @@ export interface Proposal {
 }
 
 export interface ProposalPublisher {
+  isDismissed?(proposal: Proposal): Promise<boolean>;
   findPullRequest(proposal: Proposal): Promise<number | undefined>;
   pushBranch(proposal: Proposal): Promise<void>;
   openPullRequest(body: string, proposal: Proposal): Promise<void>;
@@ -96,6 +97,7 @@ function sameList(left: string[], right: string[]): boolean {
 }
 
 export async function reconcileProposal(proposal: Proposal, publisher: ProposalPublisher, artifactUrl?: string): Promise<void> {
+  if (await publisher.isDismissed?.(proposal)) return;
   const existing = await publisher.findPullRequest(proposal);
   const migration = migrations.find((candidate) => candidate.id === proposal.migration);
   if (!migration) throw new Error('Unknown migration.');

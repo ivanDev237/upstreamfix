@@ -66,6 +66,11 @@ async function findPullRequest(proposal: Proposal): Promise<number | undefined> 
   return pulls[0]?.number;
 }
 
+async function hasClosedPullRequest(proposal: Proposal): Promise<boolean> {
+  const pulls = await request<Array<{ number: number }>>(`/pulls?state=closed&head=${encodeURIComponent(`${owner}:${proposal.branch}`)}&base=${encodeURIComponent(defaultBranch)}&per_page=100`);
+  return pulls.length > 0;
+}
+
 async function findIssue(proposal: Proposal): Promise<number | undefined> {
   const title = `UpstreamFix: manual ${proposal.migration}`;
   const issues = await request<Array<{ number: number; title: string; pull_request?: unknown }>>('/issues?state=open&per_page=100');
@@ -90,12 +95,27 @@ for (const proposal of proposals) {
     }
     validateProposal(proposal, expectedBase, parents, changedFiles, reviewedConfig);
     const publisher: ProposalPublisher = {
+      isDismissed: hasClosedPullRequest,
       findPullRequest,
       pushBranch: async (item) => {
         if (!bareRoot || !item.commit) throw new Error('Verified bundle is required before pushing.');
         const remote = await git(bareRoot, ['ls-remote', gitUrl, `refs/heads/${item.branch}`]);
         const previous = remote.split('\t')[0]?.trim() ?? '';
         if (previous && !/^[0-9a-f]{40}$/.test(previous)) throw new Error('Invalid existing branch SHA.');
+        if (previous) {
+          await git(bareRoot, ['fetch', '--no-tags', gitUrl, previous]);
+          const oldTree = (await git(bareRoot, ['rev-parse', `${previous}^{tree}`])).trim();
+          const newTree = (await git(bareRoot, ['rev-parse', `${item.commit}^{tree}`])).trim();
+          if (oldTree === newTree) return;
+          const previousCommit = (await git(bareRoot, ['show', '-s', '--format=%an%n%ae%n%cn%n%ce%n%s%n%P', previous])).trim().split('\n');
+          const bot = 'upstreamfix[bot]';
+          const botEmail = '41898282+github-actions[bot]@users.noreply.github.com';
+          if (previousCommit[0] !== bot || previousCommit[1] !== botEmail || previousCommit[2] !== bot
+            || previousCommit[3] !== botEmail || previousCommit[4] !== `Apply ${item.migration} migration with UpstreamFix`
+            || !/^[0-9a-f]{40}$/.test(previousCommit[5] ?? '')) {
+            throw new Error('Existing migration branch contains a non-bot commit; refusing to overwrite human work.');
+          }
+        }
         await git(bareRoot, [
           'push', `--force-with-lease=refs/heads/${item.branch}:${previous}`,
           gitUrl, `${item.commit}:refs/heads/${item.branch}`,

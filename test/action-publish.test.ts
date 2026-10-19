@@ -63,6 +63,19 @@ describe('Action publication boundary', () => {
     expect(publisher.closePullRequest).toHaveBeenCalledWith(42);
   });
 
+  it('respects a PR closed by a human and does not push or recreate its branch', async () => {
+    const publisher: ProposalPublisher = {
+      isDismissed: vi.fn(async () => true),
+      pushBranch: vi.fn(async () => undefined), openPullRequest: vi.fn(async () => undefined),
+      updatePullRequest: vi.fn(async () => undefined), closePullRequest: vi.fn(async () => undefined),
+      upsertIssue: vi.fn(async () => undefined), closeIssue: vi.fn(async () => undefined),
+      findPullRequest: vi.fn(async () => undefined),
+    };
+    await reconcileProposal(proposal, publisher);
+    expect(publisher.pushBranch).not.toHaveBeenCalled();
+    expect(publisher.openPullRequest).not.toHaveBeenCalled();
+  });
+
   it('opens one issue instead of a PR when manual work remains', async () => {
     const publisher: ProposalPublisher = {
       pushBranch: vi.fn(async () => undefined), openPullRequest: vi.fn(async () => undefined),
