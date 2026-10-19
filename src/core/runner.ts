@@ -178,6 +178,8 @@ export interface RunOptions {
   nodeRuntime?: 22;
   /** Yarn Classic needs a full dependency installation to regenerate yarn.lock. */
   allowYarnLockInstall?: boolean;
+  /** Count source findings only; never regenerate lockfiles or prepare manifest writes. */
+  analysisOnly?: boolean;
 }
 
 export interface RunOutcome extends MigrationResult {
@@ -222,7 +224,7 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   const manifestsWithChangedCode = new Set(
     result.filesChanged.map((sourcePath) => scoped.manifestBySource.get(sourcePath)).filter((file): file is string => Boolean(file)),
   );
-  const manifest = result.manual.length === 0 && result.changes.length > 0
+  const manifest = !options.analysisOnly && result.manual.length === 0 && result.changes.length > 0
     ? await migrateManifests(migration, options, manifestsWithChangedCode)
     : {
         notes: [result.manual.length > 0

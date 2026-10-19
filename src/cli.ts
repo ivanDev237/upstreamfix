@@ -11,6 +11,7 @@ import { assertWritesEnabled } from './core/safety.js';
 import { findApplicableMigrations, migrations } from './migrations/index.js';
 import { watchPackages } from './core/watch.js';
 import { diffPublishedApi } from './core/diff-api.js';
+import { analyzeImpact } from './core/impact.js';
 
 function existingMigration(value: string): string {
   if (!migrations.some((migration) => migration.id === value)) {
@@ -26,6 +27,14 @@ export function createProgram(): Command {
     .description('Prepare and review automated code migrations for breaking SDK changes.')
     .showHelpAfterError()
     .exitOverride();
+
+  program
+    .command('impact')
+    .description('Estimate affected usages of catalog SDK upgrades in a project without writing files.')
+    .option('-C, --cwd <directory>', 'project directory to analyze', process.cwd())
+    .action(async (options: { cwd: string }) => {
+      console.log(JSON.stringify(await analyzeImpact(options.cwd), null, 2));
+    });
 
   program
     .command('diff-api')
