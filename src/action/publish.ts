@@ -152,7 +152,15 @@ export async function reconcileProposal(proposal: Proposal, publisher: ProposalP
     '', 'Review the diff and run your repository checks before merging. UpstreamFix never merges automatically.',
   ].join('\n');
   const suffix = `\n\nReport truncated to fit GitHub's body limit. Full report: ${artifactUrl ?? 'upstreamfix-proposals artifact in this workflow run'}`;
-  const body = fullBody.length <= 59_000 ? fullBody : `${fullBody.slice(0, 59_000 - suffix.length)}${suffix}`;
+  let body = fullBody;
+  if (body.length > 59_000) {
+    const reportStart = body.indexOf('<pre>') + '<pre>'.length;
+    const reportEnd = body.indexOf('</pre>', reportStart);
+    const allowedReportLength = Math.max(0, 59_000 - (body.length - safeReport.length) - suffix.length);
+    let excerpt = safeReport.slice(0, allowedReportLength);
+    if (/[\uD800-\uDBFF]$/.test(excerpt)) excerpt = excerpt.slice(0, -1);
+    body = body.slice(0, reportStart) + excerpt + suffix + body.slice(reportEnd);
+  }
   if (proposal.status === 'ready') {
     await publisher.pushBranch(proposal);
     if (existing) await publisher.updatePullRequest(existing, body, proposal);

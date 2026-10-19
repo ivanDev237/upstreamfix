@@ -11,6 +11,21 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('keeps a bounded long PR body well formed and links its complete artifact', async () => {
+    let body = '';
+    const publisher: ProposalPublisher = {
+      findPullRequest: vi.fn(async () => undefined), pushBranch: vi.fn(async () => undefined),
+      openPullRequest: vi.fn(async (value) => { body = value; }), updatePullRequest: vi.fn(async () => undefined),
+      closePullRequest: vi.fn(async () => undefined), upsertIssue: vi.fn(async () => undefined),
+      closeIssue: vi.fn(async () => undefined),
+    };
+    await reconcileProposal({ ...proposal, report: '😀'.repeat(50_000) }, publisher, 'https://github.com/example/actions/runs/1#artifacts');
+    expect(body.length).toBeLessThanOrEqual(59_000);
+    expect(body).toContain('</pre>\n</details>');
+    expect(body).toContain('never merges automatically');
+    expect(body).toContain('https://github.com/example/actions/runs/1#artifacts');
+    expect(body).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+  });
   it('distinguishes a human refusal from bot closure, merged PR, and explicit dismissed label', () => {
     const botClosure = [{ event: 'closed', actor: { login: 'github-actions[bot]' } }];
     const humanClosure = [{ event: 'closed', actor: { login: 'maintainer' } }];
