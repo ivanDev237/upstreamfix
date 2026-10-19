@@ -8,6 +8,8 @@ on:
       - '.github/workflows/client-migrations.yml'
       - 'action.yml'
       - 'src/action/**'
+      - 'src/core/**'
+      - 'src/migrations/**'
       - 'test/action-*.test.ts'
       - 'examples/action-test/**'
       - 'package.json'

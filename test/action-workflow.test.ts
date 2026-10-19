@@ -22,6 +22,17 @@ describe('client migration workflow security boundary', () => {
     expect((source.match(/fetch-depth: 0/g) ?? []).length).toBeGreaterThanOrEqual(2);
   });
 
+  it('uses workflow_call input SHA, cancels stale PR runs, and covers supporting source paths', () => {
+    for (const name of ['probe.yml', 'type-fixtures.yml']) {
+      const source = readFileSync(path.join(root, '.github/workflows', name), 'utf8');
+      expect(source).toContain('inputs.source_sha || github.sha');
+      expect(source).toContain('cancel-in-progress: true');
+    }
+    expect(readFileSync(path.join(root, '.github/workflows/probe.yml'), 'utf8')).toContain('src/core/verify.ts');
+    expect(readFileSync(path.join(root, '.github/workflows/type-fixtures.yml'), 'utf8')).toContain('src/migrations/firebase-admin-v14/**');
+    expect(readFileSync(path.join(root, '.github/workflows/client-migrations-pr.yml'), 'utf8')).toContain('src/core/**');
+  });
+
   it('keeps the privileged workflow off PR events and checks it in a read-only companion', () => {
     const source = workflow();
     expect(source).toContain('workflow_call:');
