@@ -79,6 +79,13 @@ describe('UpstreamFix CLI', () => {
       .rejects.toThrow('Unknown migration');
   });
 
+  it('rejects verification timeouts longer than 24 hours before any project work', async () => {
+    await expect(createProgram().parseAsync(['node', 'upstreamfix', 'migrate', 'firebase-admin@14', '--verify-timeout', '86401']))
+      .rejects.toThrow('at most 86400 seconds');
+    await expect(createProgram().parseAsync(['node', 'upstreamfix', 'scan', '--verify-timeout', '999999999999999999']))
+      .rejects.toThrow('at most 86400 seconds');
+  });
+
   it('lists migration metadata from the catalog', async () => {
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     await createProgram().parseAsync(['node', 'upstreamfix', 'list']);

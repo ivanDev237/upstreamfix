@@ -151,7 +151,9 @@ export function createProgram(): Command {
 
 function parsePositiveInteger(value: string): number {
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1) throw new Error('Timeout must be a positive integer number of seconds.');
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 86_400) {
+    throw new InvalidArgumentError('Verification timeout must be an integer from 1 to at most 86400 seconds (24 hours).');
+  }
   return parsed;
 }
 
