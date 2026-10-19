@@ -5,9 +5,13 @@ series are experimental; review proposed migrations before applying them.
 
 ## Unreleased
 
-- Added `watch`, `diff-api`, `impact`, and `probe` for version monitoring, TypeScript API comparison, impact estimates, and isolated diagnostic probes.
-- Hardened previews and verification: bounded lockfile reports, explicit Yarn downloads, isolated package caches, package-manager detection, capped timeouts, and retained error tails.
-- Escaped untrusted benchmark output and withheld ambiguous Stripe rewrites.
+## 0.1.3
+
+- Fixed the CLI entry point: `0.1.2` exited silently when invoked through `npx` or a global installation.
+- Added `--version`, `watch`, `diff-api`, `impact`, and `probe` for version monitoring, TypeScript API comparison, impact estimates, and isolated diagnostic probes.
+- Prevented unsafe Firebase rewrites involving nested calls, retained arguments, type references, and stored app instances.
+- Hardened Git writes, package installation, verification, reports, secret masking, and benchmark isolation.
+- Improved Stripe diagnostics and migration safeguards; fixed UTF-8 BOM preservation and lockfile handling.
 
 ## 0.1.2
 
