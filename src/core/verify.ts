@@ -100,6 +100,14 @@ export async function verifyProposedMigration(
       const pkg = await readPackageJson(directory);
       if (!hasDependencies(pkg)) continue;
       const plan = await installCommand(projectCopy, directory, pkg);
+      if (plan.command === 'yarn' && plan.yarnMajor && plan.yarnMajor >= 2) {
+        const versionCheck = await runCheck('Check Yarn version', 'yarn', ['--version'], plan.cwd, env, timeoutMs, options.execute);
+        checks.push(versionCheck);
+        const actualMajor = Number(/^\s*(\d+)\./.exec(versionCheck.output)?.[1]);
+        if (versionCheck.status !== 'passed' || actualMajor < 2 || (plan.yarnExact && actualMajor !== plan.yarnMajor)) {
+          return { status: 'failed', checks, note: `Yarn ${plan.yarnMajor} is required by this project, but the temporary copy resolved ${versionCheck.output || 'an unknown version'}. Dependency installation was refused.` };
+        }
+      }
       if (plan.command === 'pnpm') {
         await copyRegularTree(persistentPnpmStore, isolatedPnpmStore);
         plan.args.push('--store-dir', isolatedPnpmStore, '--prefer-offline');
@@ -316,7 +324,7 @@ async function installCommand(
   root: string,
   directory: string,
   pkg: PackageJson,
-): Promise<{ command: string; args: string[]; cwd: string }> {
+): Promise<{ command: string; args: string[]; cwd: string; yarnMajor?: number; yarnExact?: boolean }> {
   const { lockRoot, manager, declared } = await detectPackageManager(root, directory, pkg);
   if (manager === 'pnpm') return { command: 'pnpm', args: ['install', '--ignore-scripts', '--no-frozen-lockfile'], cwd: lockRoot };
   if (manager === 'yarn') {
@@ -326,6 +334,7 @@ async function installCommand(
       command: 'yarn',
       args: ['install', ...(yarnBerry ? ['--mode=skip-builds'] : ['--ignore-scripts'])],
       cwd: lockRoot,
+      ...(yarnBerry ? { yarnMajor: Math.max(version, 2), yarnExact: version >= 2 } : {}),
     };
   }
   return { command: 'npm', args: ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--prefer-offline'], cwd: lockRoot };
@@ -483,6 +492,8 @@ export function sanitizedEnvironment(home: string): NodeJS.ProcessEnv {
   env.NPM_CONFIG_USERCONFIG = path.join(home, 'npmrc.user');
   env.NPM_CONFIG_GLOBALCONFIG = path.join(home, 'npmrc.global');
   env.NPM_CONFIG_CACHE = path.join(home, 'npm-cache');
+  env.NPM_CONFIG_IGNORE_SCRIPTS = 'true';
+  env.YARN_IGNORE_SCRIPTS = 'true';
   env.YARN_NODE_LINKER = 'node-modules';
   env.YARN_ENABLE_SCRIPTS = 'false';
   env.CI = '1';

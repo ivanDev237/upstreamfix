@@ -369,7 +369,7 @@ describe('migration verification', () => {
     const result = await verifyProposedMigration(cwd, [diff], {
       execute: async (command, args) => {
         commands.push(`${command} ${args.join(' ')}`);
-        return { stdout: 'ok' };
+        return { stdout: args[0] === '--version' ? '4.0.0' : 'ok' };
       },
     });
 
@@ -384,13 +384,30 @@ describe('migration verification', () => {
     const result = await verifyProposedMigration(cwd, [diff], {
       execute: async (command, args, _commandCwd, env) => {
         if (command === 'yarn' && args[0] === 'install') install = { args, env };
-        return { stdout: 'offline stub' };
+        return { stdout: args[0] === '--version' ? '4.0.0' : 'offline stub' };
       },
     });
     expect(result.status).toBe('passed');
     expect(install?.args).not.toContain('--non-interactive');
     expect(install?.env.YARN_NODE_LINKER).toBe('node-modules');
     expect(install?.env.YARN_ENABLE_SCRIPTS).toBe('false');
+  });
+
+  it('refuses Yarn Classic when the project declares Yarn Berry', async () => {
+    const cwd = await makeProject({ test: 'node -e "process.exit(0)"' }, 'yarn@4.0.0');
+    let installed = false;
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (command, args, _directory, env) => {
+        expect(env.NPM_CONFIG_IGNORE_SCRIPTS).toBe('true');
+        expect(env.YARN_IGNORE_SCRIPTS).toBe('true');
+        if (command === 'yarn' && args[0] === '--version') return { stdout: '1.22.22' };
+        if (args[0] === 'install') installed = true;
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('failed');
+    expect(result.note).toContain('Yarn');
+    expect(installed).toBe(false);
   });
 
   it('kills the timed out script process group, including its child process', async () => {
