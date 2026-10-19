@@ -4,13 +4,25 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, confirmBenchmarkNodeRuntime, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkRepos, renderBenchmarkReport, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
+import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, confirmBenchmarkNodeRuntime, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkRepos, renderBenchmarkReport, requiresRuntimeReviewFromNotes, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 import { openaiV5 } from '../src/migrations/openai-v5/index.js';
 
 const execFile = promisify(execFileCallback);
 
 describe('public repository benchmark helpers', () => {
+  it('T34 does not turn benchmark-only Node confirmation into manual review', () => {
+    expect(requiresRuntimeReviewFromNotes([
+      'Node.js >=20 was declared in the disposable benchmark copy after explicit benchmark-only confirmation of its Node 24 container; the repository production runtime remains unverified.',
+    ])).toBe(false);
+    expect(requiresRuntimeReviewFromNotes(['OpenAI SDK v5 requires Node.js 20 or later; review engines.node (>=18) before upgrading.'])).toBe(true);
+  });
+  it('T34 commits a measured OpenAI report instead of the obsolete zero-percent snapshot', async () => {
+    const report = await readFile(new URL('../benchmark/openai-5-results.md', import.meta.url), 'utf8');
+    expect(report).toContain('Automatic migration rate: **33.3%** (4 of 12 detected migration items).');
+    expect(report).toContain('Run ID: `39310995562`');
+    expect(report).toContain('Tool SHA: `cd3a35e429a440c5eeb35aac26da5365122b169b`');
+  });
   it('declares Node 20 only in a disposable OpenAI benchmark manifest', () => {
     const manifest = { dependencies: { openai: '^4.0.0' } } as { dependencies: { openai: string }; engines?: { node: string } };
     expect(confirmBenchmarkNodeRuntime(manifest, openaiV5)).toContain('benchmark-only');

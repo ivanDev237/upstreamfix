@@ -18,7 +18,9 @@ function migrate(source: string) {
 describe('openai v4 to v5', () => {
   it('has five pinned and reviewed public repositories for the real benchmark', () => {
     const repos = JSON.parse(readFileSync(new URL('../benchmark/openai-5-repos.json', import.meta.url), 'utf8')) as BenchRepo[];
-    expect(repos).toHaveLength(5);
+    expect(repos).toHaveLength(7);
+    expect(repos.some((repo) => repo.name === 'lumen')).toBe(true);
+    expect(repos.some((repo) => repo.name === 'ai-icon-generator')).toBe(true);
     for (const repo of repos) validateRepoEntry(repo);
   });
   it('registers one exact major transition and updates only v4 manifests', () => {

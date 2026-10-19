@@ -583,12 +583,16 @@ export async function benchmarkOne(
       && !/TS2304[^;\n]*(?:RequestInit|Headers|Blob|File|Response|FormData|AbortController)/.test(before.typecheck)) {
       result.details += ' OpenAI v5 uses web platform types. Check the project TypeScript lib setting (for example DOM) and compatible Node type declarations before attributing these errors to a migration rule.';
     }
-    const requiresRuntimeReview = targetNotes.some((note) => note.toLowerCase().includes('node.js'));
+    const requiresRuntimeReview = requiresRuntimeReviewFromNotes(targetNotes);
     result.status = result.manual > 0 || requiresRuntimeReview ? 'manual review required' : 'completed';
   } catch (error) {
     result.details = [result.details, error instanceof Error ? error.message : String(error)].filter(Boolean).join(' ');
   }
   return result;
+}
+
+export function requiresRuntimeReviewFromNotes(notes: string[]): boolean {
+  return notes.some((note) => /\brequires Node\.js \d+ or (?:later|newer)\b/.test(note));
 }
 
 export function renderBenchmarkReport(

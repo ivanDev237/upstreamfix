@@ -14,6 +14,10 @@ describe('client migration workflow security boundary', () => {
     expect(ci).toContain('8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8');
     expect(ci).toContain('actionlint -color');
   });
+  it('T34 fails discovery if every public search provider fails', () => {
+    const discovery = readFileSync(path.join(root, '.github/workflows/openai-corpus-discovery.yml'), 'utf8');
+    expect(discovery).not.toContain('continue-on-error: true');
+  });
   it('separates migration and publication into jobs with different permissions', () => {
     const source = workflow();
     expect(source).toMatch(/\n  migrate:[\s\S]*?permissions:\n      contents: read/);

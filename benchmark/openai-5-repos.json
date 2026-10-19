@@ -43,5 +43,23 @@
     "packageManager": "npm",
     "reviewed": true,
     "reviewNote": "Small JavaScript Express project with package-lock and OpenAI ^4.51.0. No TypeScript configuration and the test script intentionally exits 1, so both are recorded as not configured. This is a JavaScript control case for syntax and manifest safety."
+  },
+  {
+    "name": "lumen",
+    "url": "https://github.com/Koifman/LUMEN",
+    "branch": "main",
+    "commit": "87ad11870352c28f3ad8526a15971bcea45f43db",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Public npm project with package-lock and OpenAI ^4.28.0. src/lib/llm/providers/openai.ts calls openai.files.del(fileId). Dependencies install without lifecycle scripts; checks run only inside the isolated benchmark container."
+  },
+  {
+    "name": "ai-icon-generator",
+    "url": "https://github.com/samzong/ai-icon-generator",
+    "branch": "main",
+    "commit": "a6d34d8ed7e74d4f7e85325ceb83da59009e1102",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Public npm project with package-lock, OpenAI ^4.77.0, and Node >=20. src/lib/openai.ts imports APIError from openai/error, a path moved in v5. Checks run only inside the isolated benchmark container."
   }
 ]
