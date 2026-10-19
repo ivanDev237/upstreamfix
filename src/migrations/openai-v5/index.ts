@@ -1,5 +1,6 @@
 import { Node, SyntaxKind, type Project, type SourceFile } from 'ts-morph';
 import type { Change, ManualItem, Migration, MigrationResult, PackageManifest } from '../../core/types.js';
+import { guaranteesNodeMajor } from '../../core/node-range.js';
 
 const GUIDE = 'https://github.com/openai/openai-node/blob/v5.0.0/MIGRATION.md';
 const CHANGED_PATH_METHODS = new Set([
@@ -134,6 +135,10 @@ export const openaiV5: Migration = {
   },
   updateManifest(manifest: PackageManifest): string[] {
     const notes: string[] = [];
+    const range = manifest.engines?.node;
+    if (!range || !guaranteesNodeMajor(range, 20)) {
+      return [`OpenAI SDK v5 requires Node.js 20 or later. Declare a compatible engines.node range and confirm the deployed runtime before upgrading; current range: ${range ?? 'not declared'}.`];
+    }
     for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const) {
       const old = manifest[section]?.openai;
       if (!old) continue;
@@ -146,5 +151,10 @@ export const openaiV5: Migration = {
       }
     }
     return notes;
+  },
+  inspectManifest(manifest: PackageManifest): string[] {
+    const range = manifest.engines?.node;
+    return range && guaranteesNodeMajor(range, 20) ? []
+      : [`OpenAI SDK v5 requires Node.js 20 or later; review engines.node (${range ?? 'not declared'}) before upgrading.`];
   },
 };

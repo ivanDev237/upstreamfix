@@ -12,6 +12,7 @@ on:
           - firebase-admin@14
           - stripe@22
           - stripe@23
+          - openai@5
       repository:
         description: Optional exact repository name from the selected corpus; leave empty for all
         required: false
@@ -49,6 +50,9 @@ jobs:
           BENCHMARK_REPORT: ${{ runner.temp }}/upstreamfix-benchmark.md
         run: |
           args=(--migration "$BENCHMARK_MIGRATION" --memory-mb 4096 --report "$BENCHMARK_REPORT" --yes)
+          if [[ "$BENCHMARK_MIGRATION" == 'openai@5' ]]; then
+            args+=(--repos benchmark/openai-5-repos.json)
+          fi
           if [[ -n "$BENCHMARK_REPOSITORY" ]]; then
             args+=(--only "$BENCHMARK_REPOSITORY")
           fi

@@ -1,0 +1,47 @@
+[
+  {
+    "name": "is-even-ai",
+    "url": "https://github.com/Calvin-LL/is-even-ai",
+    "branch": "main",
+    "commit": "9839c1e2018f8eb41d2f4ffa10c010edb07900ef",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Small TypeScript npm project with a root package-lock and OpenAI ^4.28.4. src/IsEvenAiOpenAi.ts calls beta.chat.completions. The vitest script is not selected; benchmark only runs inferred tsc in isolated Docker without network."
+  },
+  {
+    "name": "auto-playwright",
+    "url": "https://github.com/lucgagan/auto-playwright",
+    "branch": "main",
+    "commit": "7f422b091a2d1108c4775d7d85d8d9475954456c",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "TypeScript npm project with a root package-lock and OpenAI 4.96.0. src/completeTask.ts and src/prompt.ts use beta.chat.completions. Playwright tests require browsers and are not selected; inferred tsc runs in network-disabled Docker."
+  },
+  {
+    "name": "llm-answer-engine",
+    "url": "https://github.com/developersdigest/llm-answer-engine",
+    "branch": "main",
+    "commit": "1984719711b0cb219f87d5de44c1d93b5f3ebd41",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Next.js TypeScript project with package-lock and OpenAI ^4.58.2. A tool under app/tools/mentionFunctions calls beta.chat.completions. No test script selected; inferred tsc checks the temporary checkout without network."
+  },
+  {
+    "name": "octagon-deep-research-mcp",
+    "url": "https://github.com/OctagonAI/octagon-deep-research-mcp",
+    "branch": "main",
+    "commit": "c44ec1ce412ba9ab4a853dae4d6ad7367f7efc31",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Small TypeScript MCP server with package-lock, OpenAI ^4.20.1, and tsconfig. The test script is only a placeholder, so it is not selected; inferred tsc checks a control case. engines.node >=18 requires manual runtime review for OpenAI v5."
+  },
+  {
+    "name": "github-roast",
+    "url": "https://github.com/Haimantika/GitHub-roast",
+    "branch": "main",
+    "commit": "23552b668173730fc5a13cf6399487f3dda1765d",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Small JavaScript Express project with package-lock and OpenAI ^4.51.0. No TypeScript configuration and the test script intentionally exits 1, so both are recorded as not configured. This is a JavaScript control case for syntax and manifest safety."
+  }
+]

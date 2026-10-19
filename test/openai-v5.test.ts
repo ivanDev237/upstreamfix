@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { Project } from 'ts-morph';
 import { openaiV5 } from '../src/migrations/openai-v5/index.js';
 import { migrations } from '../src/migrations/index.js';
+import { readFileSync } from 'node:fs';
+import { validateRepoEntry, type BenchRepo } from '../scripts/benchmark.js';
 
 function migrate(source: string) {
   const project = new Project({ useInMemoryFileSystem: true });
@@ -10,11 +12,22 @@ function migrate(source: string) {
 }
 
 describe('openai v4 to v5', () => {
+  it('has five pinned and reviewed public repositories for the real benchmark', () => {
+    const repos = JSON.parse(readFileSync(new URL('../benchmark/openai-5-repos.json', import.meta.url), 'utf8')) as BenchRepo[];
+    expect(repos).toHaveLength(5);
+    for (const repo of repos) validateRepoEntry(repo);
+  });
   it('registers one exact major transition and updates only v4 manifests', () => {
     expect(migrations.map((migration) => migration.id)).toContain('openai@5');
-    const manifest = { dependencies: { openai: '^4.0.0' } };
+    const manifest = { dependencies: { openai: '^4.0.0' }, engines: { node: '>=20' } };
     expect(openaiV5.updateManifest?.(manifest)).toContain('`dependencies.openai`: `^4.0.0` → `^5.0.0`');
     expect(manifest.dependencies.openai).toBe('^5.0.0');
+  });
+
+  it('does not upgrade a project whose declared runtime includes unsupported Node versions', () => {
+    const manifest = { dependencies: { openai: '^4.20.0' }, engines: { node: '>=18' } };
+    expect(openaiV5.updateManifest?.(manifest).join(' ')).toContain('Node.js 20');
+    expect(manifest.dependencies.openai).toBe('^4.20.0');
   });
 
   it('rewrites only bound client methods and beta chat paths', () => {
