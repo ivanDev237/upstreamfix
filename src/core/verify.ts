@@ -68,7 +68,9 @@ export async function verifyProposedMigration(
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-verify-'));
   const projectCopy = path.join(temporaryRoot, 'project');
   const isolatedHome = path.join(temporaryRoot, 'home');
-  const persistentPnpmStore = options.pnpmCacheRoot ?? path.join(os.homedir(), '.cache', 'upstreamfix', 'pnpm-store');
+  const persistentPnpmStore = options.pnpmCacheRoot ?? (options.execute
+    ? path.join(temporaryRoot, 'pnpm-store')
+    : path.join(os.homedir(), '.cache', 'upstreamfix', 'pnpm-store'));
   const checks: VerificationCheck[] = [];
   const unregisterCleanup = registerTemporaryCleanup(() => rm(temporaryRoot, { recursive: true, force: true }));
 

@@ -9,6 +9,7 @@ import { maskSecrets, renderMarkdownReport, sanitizeTerminalText } from '../core
 import { runMigration } from '../core/runner.js';
 import { writeMigrationOnBranch } from '../core/write-branch.js';
 import { findApplicableMigrations, migrations } from '../migrations/index.js';
+import { executeClientCommand } from './docker-execute.js';
 
 const execFile = promisify(execFileCallback);
 
@@ -56,6 +57,7 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
       const result = await writeMigrationOnBranch(migration, {
         cwd: project, excludedDirectories: config.exclude, customCommands: config.verify,
         timeoutMs: 10 * 60 * 1000,
+        ...(process.env.UPSTREAMFIX_CONTAINER_VERIFY === '1' ? { verificationOptions: { execute: executeClientCommand } } : {}),
       });
       const bundle = path.join(output, `${migration.id.replace(/[^A-Za-z0-9._-]+/g, '-')}.bundle`);
       await execFile('git', ['bundle', 'create', bundle, `${base}..${result.branch}`], { cwd: project, timeout: 30_000 });

@@ -52,6 +52,16 @@ describe('client migration workflow security boundary', () => {
     expect(migrate).not.toContain('secrets.');
   });
 
+  it('runs client verification commands in isolated containers before artifact upload', () => {
+    const migrate = workflow().split('\n  migrate:')[1]!.split('\n  publish:')[0]!;
+    expect(migrate).toContain('UPSTREAMFIX_CONTAINER_VERIFY:');
+    const source = readFileSync(path.join(root, 'src/action/docker-execute.ts'), 'utf8');
+    expect(source).toContain('--network');
+    expect(source).toContain('none');
+    expect(source).toContain('--cap-drop=ALL');
+    expect(source).toContain('--read-only');
+  });
+
   it('ships an enabled migration action and a client example with safe triggers', () => {
     const action = readFileSync(path.join(root, 'action.yml'), 'utf8');
     const example = readFileSync(path.join(root, 'examples/action-test/.github/workflows/upstreamfix.yml'), 'utf8');

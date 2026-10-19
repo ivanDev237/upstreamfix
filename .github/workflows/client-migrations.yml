@@ -60,6 +60,7 @@ jobs:
           UPSTREAMFIX_CLIENT_ROOT: ${{ github.workspace }}/client
           UPSTREAMFIX_OUTPUT_ROOT: ${{ runner.temp }}/upstreamfix-output
           UPSTREAMFIX_BASE_SHA: ${{ github.sha }}
+          UPSTREAMFIX_CONTAINER_VERIFY: '1'
           GIT_AUTHOR_NAME: upstreamfix[bot]
           GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
           GIT_COMMITTER_NAME: upstreamfix[bot]
