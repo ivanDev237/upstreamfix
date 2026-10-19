@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { validateProposal, validateProposalEnvelope, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
 
 const base = 'a'.repeat(40);
@@ -30,6 +31,10 @@ describe('Action publication boundary', () => {
     expect(() => parseSafeRawDiff(`:100644 000000 ${'a'.repeat(40)} ${'0'.repeat(40)} D\0.github/CODEOWNERS\0:000000 100644 ${'0'.repeat(40)} ${'b'.repeat(40)} A\0owners.json\0`)).toThrow('status');
     expect(() => parseSafeRawDiff(`:000000 120000 ${'0'.repeat(40)} ${'b'.repeat(40)} A\0server.ts\0`)).toThrow('mode');
     expect(() => parseSafeRawDiff(`:000000 160000 ${'0'.repeat(40)} ${'b'.repeat(40)} A\0server.ts\0`)).toThrow('mode');
+  });
+  it('requests full object IDs from Git raw diff before parsing the bundle', () => {
+    const publisher = readFileSync(new URL('../src/action/publish-cli.ts', import.meta.url), 'utf8');
+    expect(publisher).toContain("'--raw', '--no-renames', '--no-abbrev', '-z'");
   });
   it('bounds a large report so GitHub accepts the PR body and points to the artifact', async () => {
     const publisher: ProposalPublisher = {

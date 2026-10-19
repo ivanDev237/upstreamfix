@@ -108,7 +108,7 @@ for (const proposal of proposals) {
       await git(bareRoot, ['fetch', '--no-tags', bundle, proposal.branch]);
       if ((await git(bareRoot, ['cat-file', '-t', proposal.commit!])).trim() !== 'commit') throw new Error('Bundle target is not a commit.');
       parents = parseCommitParents(await git(bareRoot, ['rev-list', '--parents', '-n1', '--end-of-options', proposal.commit!]), proposal.commit!);
-      changedFiles = parseSafeRawDiff(await git(bareRoot, ['diff', '--raw', '--no-renames', '-z', expectedBase, proposal.commit!]));
+      changedFiles = parseSafeRawDiff(await git(bareRoot, ['diff', '--raw', '--no-renames', '--no-abbrev', '-z', expectedBase, proposal.commit!]));
     }
     validateProposal(proposal, expectedBase, parents, changedFiles, reviewedConfig);
     const publisher: ProposalPublisher = {
