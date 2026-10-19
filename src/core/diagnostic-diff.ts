@@ -11,11 +11,14 @@ export interface TypeScriptDiagnostic {
 export function parseTypeScriptDiagnostics(output: string): TypeScriptDiagnostic[] {
   const diagnostics: TypeScriptDiagnostic[] = [];
   const clean = output.replace(/\u001b\[[0-9;]*m/g, '');
-  // A failed command can prepend text on the same line as the first tsc
-  // diagnostic; begin at the source path, never at the command wrapper.
-  const pattern = /(?:^|\s)([^\s():]+\.(?:[cm]?tsx?|jsx?))(?:\((\d+),(\d+)\):|:(\d+):(\d+)\s+-) error TS(\d+): ([^\r\n]+)/g;
-  for (const match of clean.matchAll(pattern)) {
-    const file = match[1]!.replaceAll('\\', '/').replace(/^\/workspace\//, '').replace(/^\.\//, '');
+  const pattern = /^(.+?\.(?:[cm]?tsx?|jsx?))(?:\((\d+),(\d+)\):|:(\d+):(\d+)\s+-) error TS(\d+): (.+)$/;
+  for (const line of clean.split(/\r?\n/)) {
+    const match = pattern.exec(line);
+    if (!match) continue;
+    const rawPath = match[1]!.trim();
+    const pathStart = /(?:^|\s)([A-Za-z]:[\\/]|\/|\.{1,2}[\\/]|[\w.-]+[\\/])/.exec(rawPath);
+    const start = pathStart ? pathStart.index + pathStart[0].length - pathStart[1]!.length : 0;
+    const file = rawPath.slice(start).replaceAll('\\', '/').replace(/^\/workspace\//, '').replace(/^\.\//, '');
     diagnostics.push({
       file,
       line: Number(match[2] ?? match[4]),

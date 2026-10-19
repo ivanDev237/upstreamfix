@@ -11,3 +11,14 @@ it('normalizes pretty and workspace paths and detects payment_method_types', () 
   const after = parseTypeScriptDiagnostics('\u001b[31m/workspace/src/pay.ts:243:5 - error TS2561: payment_method_types does not exist\u001b[0m');
   expect(after).toMatchObject([{ file: 'src/pay.ts', line: 243, code: 2561 }]);
 });
+
+it('parses route groups, spaces, and Windows drive paths', () => {
+  const diagnostics = parseTypeScriptDiagnostics([
+    'src/app/(auth)/my page.tsx(8,3): error TS2322: wrong type',
+    'C:\\Work Space\\src\\app.ts(12,4): error TS2561: missing property',
+    'npm error src/components/My Card.ts:5:2 - error TS2304: missing name',
+  ].join('\n'));
+  expect(diagnostics.map((item) => item.file)).toEqual([
+    'src/app/(auth)/my page.tsx', 'C:/Work Space/src/app.ts', 'src/components/My Card.ts',
+  ]);
+});
