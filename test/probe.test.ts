@@ -81,3 +81,24 @@ it('marks failed installation or unreadable typecheck as unavailable', async () 
     expect(result.status).toBe('unavailable');
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
+
+it('removes the named Docker container when an active probe is interrupted', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-probe-signal-'));
+  try {
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { stripe: '22.5.0' } }));
+    await writeFile(path.join(cwd, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/stripe': { version: '22.5.0' } } }));
+    await execFile('git', ['init', '-q'], { cwd });
+    await execFile('git', ['add', '.'], { cwd });
+    const dockerCommands: string[][] = [];
+    const result = await probeProject(cwd, 'stripe@23.0.0', { confirmed: true, execute: async (phase, command, args) => {
+      if (command === 'docker') dockerCommands.push(args);
+      if (phase === 'baseline-typecheck' && args[0] === 'run') throw new Error('interrupted');
+      return { code: 0, output: 'ok' };
+    } });
+    expect(result.status).toBe('unavailable');
+    const run = dockerCommands.find((args) => args[0] === 'run');
+    const remove = dockerCommands.find((args) => args[0] === 'rm');
+    expect(run).toBeDefined();
+    expect(remove).toEqual(['rm', '-f', run?.[run.indexOf('--name') + 1]]);
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});

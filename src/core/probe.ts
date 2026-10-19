@@ -62,6 +62,8 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
   const home = path.join(root, 'home');
   const execute: ProbeExecutor = options.execute ?? ((phase, command, args, directory, env) =>
     realExecutor(phase, command, args, directory, env, options.timeoutMs ?? 5 * 60 * 1000));
+  let unregisterContainerCleanup: (() => void) | undefined;
+  let removeContainer: (() => Promise<void>) | undefined;
   try {
     await mkdir(project);
     await mkdir(home);
@@ -89,6 +91,10 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
       if (process.env[key]) dockerEnv[key] = process.env[key];
     }
     const containerName = `upstreamfix-probe-${process.pid}-${randomUUID()}`;
+    removeContainer = async () => {
+      await execute('baseline-typecheck', 'docker', ['rm', '-f', containerName], project, dockerEnv).catch(() => undefined);
+    };
+    unregisterContainerCleanup = registerTemporaryCleanup(removeContainer);
     const run = async (phase: ProbePhase, command: string, args: string[]) => {
       const result = await execute(phase, command, args, project, command === 'docker' ? dockerEnv : env);
       if (command === 'docker' && result.code !== 0) {
@@ -136,6 +142,8 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
   } catch (error) {
     return { ...base, status: 'unavailable', note: error instanceof Error ? error.message : String(error) };
   } finally {
+    if (removeContainer) await removeContainer();
+    unregisterContainerCleanup?.();
     unregisterCleanup();
     await rm(root, { recursive: true, force: true });
   }
