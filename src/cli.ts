@@ -4,7 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { renderMarkdownReport, renderTerminalReport } from './core/report.js';
+import { renderMarkdownReport, renderTerminalReport, sanitizeTerminalText } from './core/report.js';
 import { runMigration } from './core/runner.js';
 import { verifyProposedMigration } from './core/verify.js';
 import { writeMigrationOnBranch } from './core/write-branch.js';
@@ -225,6 +225,9 @@ function parseNodeRuntime(value: string): 22 {
 }
 
 let invokedPath = '';
+export function safeCliError(error: unknown): string {
+  return `upstreamfix: ${sanitizeTerminalText(error instanceof Error ? error.message : String(error))}`;
+}
 try { invokedPath = process.argv[1] ? realpathSync(process.argv[1]) : ''; } catch { /* An unresolved argv path is not this CLI. */ }
 if (invokedPath === realpathSync(fileURLToPath(import.meta.url))) {
   createProgram().parseAsync().catch((error: unknown) => {
@@ -232,8 +235,7 @@ if (invokedPath === realpathSync(fileURLToPath(import.meta.url))) {
       process.exitCode = 0;
       return;
     }
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`upstreamfix: ${message}`);
+    console.error(safeCliError(error));
     process.exitCode = 1;
   });
 }

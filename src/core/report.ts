@@ -152,7 +152,11 @@ export function renderTerminalReport(markdown: string): string {
       .replace(/&amp;/g, '&')
       .replace(/\\([\\`*_{}\[\]()#+.!])/g, '$1');
   }).join('\n');
-  return stripTerminalControls(maskSecrets(readable));
+  return sanitizeTerminalText(readable);
+}
+
+export function sanitizeTerminalText(value: string): string {
+  return maskSecrets(stripTerminalControls(value));
 }
 
 function stripTerminalControls(value: string): string {
@@ -171,7 +175,8 @@ function stripTerminalControls(value: string): string {
       } else i++;
       continue;
     }
-    if ((code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || (code >= 0x7f && code <= 0x9f)) continue;
+    if ((code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || (code >= 0x7f && code <= 0x9f)
+      || (code >= 0x202a && code <= 0x202e) || (code >= 0x2066 && code <= 0x2069)) continue;
     clean += value[i];
   }
   return clean;
@@ -182,13 +187,13 @@ function markdownCell(value: string): string {
 }
 
 function escapeMarkdownText(value: string): string {
-  return maskSecrets(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return sanitizeTerminalText(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/([\\`*_{}\[\]()#+.!])/g, '\\$1')
     .replaceAll('\\[API key redacted\\]', '[API key redacted]');
 }
 
 function inlineCode(value: string): string {
-  const normalized = maskSecrets(value).replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
+  const normalized = sanitizeTerminalText(value).replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
   const runs = [...normalized.matchAll(/`+/g)].map(([run]) => run.length);
   const delimiter = '`'.repeat(Math.max(1, ...runs) + 1);
   const needsPadding = normalized.startsWith('`') || normalized.endsWith('`') || /^\s|\s$/.test(normalized);

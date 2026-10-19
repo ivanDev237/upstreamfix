@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { maskSecrets, renderMarkdownReport, renderTerminalReport } from '../src/core/report.js';
+import { maskSecrets, renderMarkdownReport, renderTerminalReport, sanitizeTerminalText } from '../src/core/report.js';
 import type { RunOutcome } from '../src/core/runner.js';
 import type { MigrationInfo } from '../src/core/types.js';
 
@@ -50,6 +50,12 @@ describe('security of Markdown reports', () => {
     expect(markdown).not.toContain('\x07');
     expect(renderTerminalReport(markdown)).not.toContain('\x1b');
     expect(renderTerminalReport('- note: ' + injected)).not.toContain('\x1b');
+  });
+  it('removes bidi controls before escaping report prose and console errors', () => {
+    const injected = '\u202Ehidden\u202C \x1b[2J';
+    const report = renderMarkdownReport(migration, outcome({ manifestNotes: [injected], changes: [], manual: [], proposedDiff: [] }), true);
+    expect(report).not.toMatch(/[\u202a-\u202e\u2066-\u2069\x1b]/);
+    expect(sanitizeTerminalText(injected)).toBe('hidden ');
   });
   it('redacts underscored secrets in escaped table cells', () => {
     const secret = 'AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz012345678';
