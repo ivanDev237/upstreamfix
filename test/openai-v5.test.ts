@@ -67,6 +67,20 @@ client.vectorStores.files.retrieve('store', 'file');
     expect(outcome.fileUpdates).toEqual([]);
   });
 
+  it('withholds multi-argument del calls whose v5 path parameters changed', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+const client = new OpenAI();
+client.vectorStores.files.del('vs_1', 'file_1');
+client.beta.threads.messages.del('thread_1', 'message_1');
+client.fineTuning.checkpoints.permissions.del('checkpoint_1', 'permission_1');
+client.evals.runs.del('eval_1', 'run_1');
+client.containers.files.del('container_1', 'file_1');
+`);
+    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual).toHaveLength(5);
+    expect(outcome.manual.every((item) => item.reason.includes('path parameters'))).toBe(true);
+  });
+
   it('withholds edits from malformed files', () => {
     const outcome = migrate("import OpenAI from 'openai';\nconst client = new OpenAI(\nclient.files.del('x');\n");
     expect(outcome.fileUpdates).toEqual([]);

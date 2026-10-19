@@ -4,6 +4,7 @@ import { guaranteesNodeMajor } from '../../core/node-range.js';
 
 const GUIDE = 'https://github.com/openai/openai-node/blob/v5.0.0/MIGRATION.md';
 const CHANGED_PATH_METHODS = new Set([
+  'fineTuning.checkpoints.permissions.delete',
   'vectorStores.files.retrieve', 'vectorStores.files.update', 'vectorStores.files.delete',
   'vectorStores.files.content', 'vectorStores.fileBatches.retrieve', 'vectorStores.fileBatches.cancel',
   'vectorStores.fileBatches.listFiles', 'beta.threads.runs.retrieve', 'beta.threads.runs.update',
@@ -11,6 +12,7 @@ const CHANGED_PATH_METHODS = new Set([
   'beta.threads.runs.steps.list', 'beta.threads.messages.retrieve', 'beta.threads.messages.update',
   'beta.threads.messages.delete', 'evals.runs.retrieve', 'evals.runs.delete',
   'evals.runs.cancel', 'evals.runs.outputItems.retrieve', 'evals.runs.outputItems.list',
+  'containers.files.retrieve', 'containers.files.delete', 'containers.files.content.retrieve',
 ]);
 const DELETED_METHODS = new Set([
   'chat.completions.del', 'files.del', 'models.del',
@@ -92,6 +94,8 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     const method = parts.slice(1).join('.');
     if (method.endsWith('.runFunctions')) {
       addManual(result, file, call, 'OpenAI v5 removes runFunctions; migrate function definitions and handling to runTools manually.');
+    } else if (DELETED_METHODS.has(method) && call.getArguments().length >= 2) {
+      addManual(result, file, call, 'OpenAI v5 changes path parameters for this delete call; review the argument names and order in the official guide.');
     } else if (CHANGED_PATH_METHODS.has(method) && call.getArguments().length >= 2) {
       addManual(result, file, call, 'OpenAI v5 uses named path parameters here; check argument names and order in the official guide.');
     } else if (DELETED_METHODS.has(method)) {
