@@ -145,7 +145,7 @@ describe('migration verification', () => {
         execute: async (command, args, _directory, env) => {
           if (command === 'pnpm' && args[0] === 'install') {
             const temporaryStore = args[args.indexOf('--store-dir') + 1]!;
-            expect(temporaryStore).not.toBe(store);
+            expect(temporaryStore).toBe(store);
             if (run === 1) reused = (await readFile(path.join(temporaryStore, 'marker'), 'utf8')) === 'cached';
             await mkdir(temporaryStore, { recursive: true });
             await writeFile(path.join(temporaryStore, 'marker'), 'cached');

@@ -1,5 +1,5 @@
 import { execFile as execFileCallback, spawn } from 'node:child_process';
-import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -64,7 +64,6 @@ export async function verifyProposedMigration(
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-verify-'));
   const projectCopy = path.join(temporaryRoot, 'project');
   const isolatedHome = path.join(temporaryRoot, 'home');
-  const isolatedPnpmStore = path.join(temporaryRoot, 'pnpm-store');
   const persistentPnpmStore = options.pnpmCacheRoot ?? path.join(os.homedir(), '.cache', 'upstreamfix', 'pnpm-store');
   const checks: VerificationCheck[] = [];
   const unregisterCleanup = registerTemporaryCleanup(() => rm(temporaryRoot, { recursive: true, force: true }));
@@ -109,8 +108,10 @@ export async function verifyProposedMigration(
         }
       }
       if (plan.command === 'pnpm') {
-        await copyRegularTree(persistentPnpmStore, isolatedPnpmStore);
-        plan.args.push('--store-dir', isolatedPnpmStore, '--prefer-offline');
+        const cacheInfo = await lstat(persistentPnpmStore).catch(() => undefined);
+        if (cacheInfo?.isSymbolicLink() || (cacheInfo && !cacheInfo.isDirectory())) throw new Error('The private pnpm cache path is not a regular directory.');
+        await mkdir(persistentPnpmStore, { recursive: true, mode: 0o700 });
+        plan.args.push('--store-dir', persistentPnpmStore, '--prefer-offline');
       }
       const installLabel = path.relative(projectCopy, plan.cwd) || '.';
       const check = await runCheck(`Install dependencies (${installLabel})`, plan.command, plan.args, plan.cwd, env, timeoutMs, options.execute);
@@ -119,7 +120,6 @@ export async function verifyProposedMigration(
         checks.push(...installChecks);
         return { status: 'failed', checks, note: 'Type checks and tests were not run because dependency installation failed.' };
       }
-      if (plan.command === 'pnpm') await copyRegularTree(isolatedPnpmStore, persistentPnpmStore);
     }
     checks.push(...installChecks);
 
@@ -162,20 +162,6 @@ export async function verifyProposedMigration(
     unregisterCleanup();
     await rm(temporaryRoot, { recursive: true, force: true });
   }
-}
-
-async function copyRegularTree(source: string, destination: string): Promise<void> {
-  const info = await lstat(source).catch(() => undefined);
-  if (!info?.isDirectory() || info.isSymbolicLink()) return;
-  await mkdir(destination, { recursive: true, mode: 0o700 });
-  await cp(source, destination, {
-    recursive: true,
-    force: true,
-    filter: async (entry) => {
-      const item = await lstat(entry);
-      return !item.isSymbolicLink() && (item.isDirectory() || item.isFile());
-    },
-  });
 }
 
 export async function copyProject(source: string, destination: string): Promise<void> {
