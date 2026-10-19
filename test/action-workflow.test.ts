@@ -49,4 +49,12 @@ describe('client migration workflow security boundary', () => {
     expect(example).toContain('client-migrations.yml@');
     expect(example).not.toMatch(/^\s+pull_request(?:_target)?:/m);
   });
+
+  it('sets an unprivileged Git author for the read-only migration job', () => {
+    const migrate = workflow().split('\n  migrate:')[1]!.split('\n  publish:')[0]!;
+    expect(migrate).toContain('GIT_AUTHOR_NAME:');
+    expect(migrate).toContain('GIT_AUTHOR_EMAIL:');
+    expect(migrate).toContain('GIT_COMMITTER_NAME:');
+    expect(migrate).toContain('GIT_COMMITTER_EMAIL:');
+  });
 });
