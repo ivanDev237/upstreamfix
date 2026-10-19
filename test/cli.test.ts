@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createProgram } from '../src/cli.js';
+import { createProgram, completedBranchNotice } from '../src/cli.js';
 
 const execFile = promisify(execFileCallback);
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -25,6 +25,10 @@ afterEach(async () => {
 });
 
 describe('UpstreamFix CLI', () => {
+  it('summarizes branches already created before a scan fails', () => {
+    expect(completedBranchNotice([{ branch: 'upstreamfix/firebase-admin-14', commit: 'abc123' }]))
+      .toContain('upstreamfix/firebase-admin-14: abc123');
+  });
   it('previews by default and requires Git for --write without modifying files', async () => {
     const cwd = await makeProject();
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);

@@ -166,25 +166,30 @@ export function createProgram(): Command {
         console.log('No supported migration applies to the dependencies declared in this project.');
         return;
       }
-      for (const migration of applicable) {
-        let writeResult;
-        if (options.write) {
-          assertWritesEnabled(false);
-          writeResult = await writeMigrationOnBranch(migration, {
-            cwd,
-            allowDirty: options.allowDirty,
-            nodeRuntime: migration.id === 'firebase-admin@14' ? options.nodeRuntime : undefined,
-            allowYarnLockInstall: options.allowYarnLockInstall,
-            timeoutMs: (options.verifyTimeout ?? 300) * 1000,
-          });
-          commits.push({ branch: writeResult.branch, commit: writeResult.commit });
+      try {
+        for (const migration of applicable) {
+          let writeResult;
+          if (options.write) {
+            assertWritesEnabled(false);
+            writeResult = await writeMigrationOnBranch(migration, {
+              cwd,
+              allowDirty: options.allowDirty,
+              nodeRuntime: migration.id === 'firebase-admin@14' ? options.nodeRuntime : undefined,
+              allowYarnLockInstall: options.allowYarnLockInstall,
+              timeoutMs: (options.verifyTimeout ?? 300) * 1000,
+            });
+            commits.push({ branch: writeResult.branch, commit: writeResult.commit });
+          }
+          const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: migration.id === 'firebase-admin@14' ? options.nodeRuntime : undefined, allowYarnLockInstall: options.allowYarnLockInstall });
+          const verification = writeResult?.verification ?? (options.verify
+            ? await verifyProposedMigration(cwd, outcome.proposedDiff, { packageName: migration.packageName, fileChanges: outcome.proposedFiles, timeoutMs: (options.verifyTimeout ?? 300) * 1000 })
+            : undefined);
+          if (verification?.status === 'failed') verificationFailed = true;
+          reports.push(renderMarkdownReport(migration, outcome, !options.write, verification));
         }
-        const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: migration.id === 'firebase-admin@14' ? options.nodeRuntime : undefined, allowYarnLockInstall: options.allowYarnLockInstall });
-        const verification = writeResult?.verification ?? (options.verify
-          ? await verifyProposedMigration(cwd, outcome.proposedDiff, { packageName: migration.packageName, fileChanges: outcome.proposedFiles, timeoutMs: (options.verifyTimeout ?? 300) * 1000 })
-          : undefined);
-        if (verification?.status === 'failed') verificationFailed = true;
-        reports.push(renderMarkdownReport(migration, outcome, !options.write, verification));
+      } catch (error) {
+        if (commits.length > 0) console.error(completedBranchNotice(commits));
+        throw error;
       }
       const report = reports.join('\n---\n\n');
       console.log(renderTerminalReport(report));
@@ -200,6 +205,10 @@ export function createProgram(): Command {
     });
 
   return program;
+}
+
+export function completedBranchNotice(commits: Array<{ branch: string; commit: string }>): string {
+  return `The scan stopped after creating these branches:\n${commits.map((item) => `- ${item.branch}: ${item.commit}`).join('\n')}`;
 }
 
 function parsePositiveInteger(value: string): number {
