@@ -1,6 +1,8 @@
 import type { ApiFinding, ApiReport } from './diff-api.js';
 import { validateExactVersion } from './diff-api.js';
 import { chmod } from 'node:fs/promises';
+import { Project } from 'ts-morph';
+import { firebaseAdminV14 } from '../migrations/firebase-admin-v14/index.js';
 
 /** mkdtemp creates mode 0700; the Docker compiler runs as an unprivileged user. */
 export async function makeFixtureReadable(root: string): Promise<void> {
@@ -41,17 +43,24 @@ export function generateTypeFixtures(report: ApiReport): TypeFixtureSet {
     if (report.package === 'stripe' && /^Stripe\.[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*$/.test(symbol)) {
       const [, typeName, member] = symbol.split('.');
       source = `import type Stripe from 'stripe';\ntype Removed = Stripe.${typeName}['${member}'];\n`;
+    } else if (report.package === 'firebase-admin' && symbol === 'firestore') {
+      source = "import * as admin from 'firebase-admin';\nconst db = admin.firestore();\n";
     } else if (report.package === 'firebase-admin' && /^[A-Za-z_$][\w$]*$/.test(symbol)) {
       source = `import * as admin from 'firebase-admin';\ntype Removed = typeof admin.${symbol};\n`;
     }
     if (!source) { manual.push(finding); continue; }
+    let migratedSource: string | undefined;
+    if (report.package === 'firebase-admin' && symbol === 'firestore') {
+      const project = new Project({ useInMemoryFileSystem: true });
+      project.createSourceFile('/fixture.ts', source);
+      const migrated = firebaseAdminV14.transform(project);
+      if (migrated.manual.length === 0) migratedSource = migrated.fileUpdates?.[0]?.contents;
+    }
     fixtures.push({
       id: `${report.package}:${finding.symbol}`, packageName: report.package,
       oldVersion: report.oldVersion, newVersion: report.newVersion,
       source, expectedNewDiagnostic: 2339, expectedLine: 2,
-      ...(report.package === 'firebase-admin' && symbol === 'firestore'
-        ? { migratedSource: "import { getFirestore } from 'firebase-admin/firestore';\ntype Migrated = typeof getFirestore;\n" }
-        : {}),
+      ...(migratedSource ? { migratedSource } : {}),
       derivedFrom: { symbol: finding.symbol, source: finding.source },
     });
   }

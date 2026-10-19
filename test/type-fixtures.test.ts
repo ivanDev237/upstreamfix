@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import type { ApiReport } from '../src/core/diff-api.js';
 import { generateTypeFixtures, makeFixtureReadable, selectFixtureForMember } from '../src/core/type-fixtures.js';
+import { Project } from 'ts-morph';
+import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 
 const report = (packageName: string, symbol: string): ApiReport => ({
   package: packageName, oldVersion: packageName === 'stripe' ? '22.5.0' : '13.10.0',
@@ -20,8 +22,8 @@ describe('type-diff fixtures', () => {
     expect(workflow).toContain('pull_request:');
     expect(workflow).toContain('branches: [main]');
     expect(workflow).toContain('contents: read');
-    expect(workflow).toContain("|| 'ivanDev237/upstreamfix'");
-    expect(workflow).toContain("github.event_name == 'pull_request' && github.sha || inputs.source_sha");
+    expect(workflow).toContain('repository: ivanDev237/upstreamfix');
+    expect(workflow).toContain('inputs.source_sha || github.sha');
   });
   it('makes the temporary root traversable by the unprivileged Docker user', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-fixture-mode-'));
@@ -46,10 +48,12 @@ describe('type-diff fixtures', () => {
 
   it('derives a Firebase namespace removal fixture', () => {
     const generated = generateTypeFixtures(report('firebase-admin', 'firestore'));
-    expect(generated.fixtures[0]?.source).toContain('typeof admin.firestore');
+    expect(generated.fixtures[0]?.source).toContain('admin.firestore()');
     expect(generated.fixtures[0]?.expectedNewDiagnostic).toBe(2339);
     expect(generated.fixtures[0]?.migratedSource).toContain("from 'firebase-admin/firestore'");
-    expect(generated.fixtures[0]?.migratedSource).toContain('typeof getFirestore');
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('/fixture.ts', generated.fixtures[0]!.source);
+    expect(generated.fixtures[0]?.migratedSource).toBe(firebaseAdminV14.transform(project).fileUpdates?.[0]?.contents);
   });
   it('selects a removed member despite the declaration entrypoint prefix', () => {
     const set = generateTypeFixtures(report('firebase-admin', 'lib/index.d.ts:firestore'));
