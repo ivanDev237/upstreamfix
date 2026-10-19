@@ -388,6 +388,9 @@ async function runCheck(
   const commandText = [command, ...args].join(' ');
   try {
     const result = execute ? await execute(command, args, cwd, env, timeoutMs) : undefined;
+    if (execute && result === undefined && name.startsWith('Install dependencies')) {
+      throw new Error('The supplied executor did not provide an installation result; refusing to run a real package install.');
+    }
     const output = result ?? await executeWithProcessGroup(command, args, cwd, env, timeoutMs);
     return { name, command: commandText, status: 'passed', durationMs: Date.now() - start, output: truncate(`${output.stdout ?? ''}${output.stderr ?? ''}`) };
   } catch (error) {

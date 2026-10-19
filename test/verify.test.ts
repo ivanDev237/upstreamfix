@@ -113,6 +113,15 @@ describe('migration verification', () => {
     await Promise.all(seen.map(async (cache) => await expect(stat(cache)).rejects.toMatchObject({ code: 'ENOENT' })));
   });
 
+  it('never falls through to a real installation when an install stub returns nothing', async () => {
+    const cwd = await makeProject();
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async () => undefined,
+    });
+    expect(result.status).toBe('failed');
+    expect(result.checks[0]?.output).toContain('did not provide an installation result');
+  });
+
   it('reuses a private pnpm store across runs without exposing it to project scripts', async () => {
     const cwd = await makeProject({ test: 'node -e "process.exit(0)"' }, 'pnpm@10.0.0');
     const cache = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-pnpm-cache-test-'));
