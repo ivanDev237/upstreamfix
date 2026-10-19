@@ -42,6 +42,7 @@ jobs:
       - name: Compile generated fixtures against exact SDK versions
         env:
           UPSTREAMFIX_FIXTURE_REPORT: ${{ runner.temp }}/type-fixtures.md
+          UPSTREAMFIX_DIFF_DIR: ${{ runner.temp }}
         working-directory: tool
         run: npx tsx scripts/run-type-fixtures.ts
       - name: Upload report
@@ -49,6 +50,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: type-fixtures-${{ github.run_id }}
-          path: ${{ runner.temp }}/type-fixtures.md
+          path: |
+            ${{ runner.temp }}/type-fixtures.md
+            ${{ runner.temp }}/api-diff-*.json
           if-no-files-found: warn
           retention-days: 30

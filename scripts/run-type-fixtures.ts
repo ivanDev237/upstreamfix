@@ -6,7 +6,7 @@ import { diffPublishedApi } from '../src/core/diff-api.js';
 import { generateTypeFixtures, validateFixtureDiagnostics, type TypeFixture } from '../src/core/type-fixtures.js';
 
 const cases = [
-  { packageName: 'stripe', oldVersion: '22.5.0', newVersion: '23.0.0', member: 'payment_method_types' },
+  { packageName: 'stripe', oldVersion: '22.4.0', newVersion: '23.0.0', member: 'payment_method_types' },
   { packageName: 'firebase-admin', oldVersion: '13.10.0', newVersion: '14.0.0', member: 'firestore' },
 ] as const;
 const image = 'node:24.22.0-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5';
@@ -57,10 +57,11 @@ async function compile(fixture: TypeFixture, version: string): Promise<Array<{ c
 const findings: Array<{ package: string; oldVersion: string; newVersion: string; symbol: string; oldDiagnostics: unknown; newDiagnostics: unknown; passed: boolean }> = [];
 for (const target of cases) {
   const report = await diffPublishedApi(target.packageName, target.oldVersion, target.newVersion);
+  if (process.env.UPSTREAMFIX_DIFF_DIR) await writeFile(path.join(process.env.UPSTREAMFIX_DIFF_DIR, `api-diff-${target.packageName}.json`), JSON.stringify(report, null, 2));
   const generated = generateTypeFixtures(report);
   const fixture = generated.fixtures.find((item) => item.derivedFrom.symbol.endsWith(`.${target.member}`)
     || item.derivedFrom.symbol === target.member);
-  if (!fixture) throw new Error(`No reproducible ${target.member} fixture derived from ${target.packageName} declarations; review the type diff.`);
+  if (!fixture) throw new Error(`No reproducible ${target.member} fixture derived from ${target.packageName} declarations. Removed candidates: ${report.removed.filter((item) => item.symbol.includes(target.member)).map((item) => item.symbol).join(', ') || 'none'}. Changed candidates: ${report.changed.filter((item) => item.symbol.includes(target.member)).map((item) => item.symbol).join(', ') || 'none'}. Review the full uploaded type diff.`);
   const oldDiagnostics = await compile(fixture, target.oldVersion);
   const newDiagnostics = await compile(fixture, target.newVersion);
   const passed = validateFixtureDiagnostics(fixture, oldDiagnostics, newDiagnostics);
