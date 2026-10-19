@@ -7,6 +7,13 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const workflow = () => readFileSync(path.join(root, '.github/workflows/client-migrations.yml'), 'utf8');
 
 describe('client migration workflow security boundary', () => {
+  it('has no empty step env mapping and lints every workflow in CI with a pinned actionlint release', () => {
+    expect(workflow()).not.toMatch(/^\s+env:\s*\n\s+uses:/m);
+    const ci = readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8');
+    expect(ci).toContain('actionlint_1.7.12_linux_amd64.tar.gz');
+    expect(ci).toContain('8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8');
+    expect(ci).toContain('actionlint -color');
+  });
   it('separates migration and publication into jobs with different permissions', () => {
     const source = workflow();
     expect(source).toMatch(/\n  migrate:[\s\S]*?permissions:\n      contents: read/);

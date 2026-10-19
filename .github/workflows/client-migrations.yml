@@ -84,7 +84,6 @@ jobs:
           GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: node tool/dist/action/migrate-cli.js
       - name: Upload bounded migration artifact
-        env:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: upstreamfix-proposals
