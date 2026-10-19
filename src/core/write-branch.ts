@@ -291,7 +291,7 @@ async function readGitConfig(
 async function assertSafeLocalGitConfig(repositoryRoot: string): Promise<void> {
   const { stdout } = await execFile('git', [
     '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'protocol.file.allow=never',
-    'config', '--local', '--get-regexp', String.raw`^(core\.fsmonitor|filter\..*\.(clean|smudge|process|required)|diff\.external|diff\..*\.command)$`,
+    'config', '--local', '--includes', '--show-origin', '--null', '--list',
   ], {
     cwd: repositoryRoot,
     env: {
@@ -304,16 +304,20 @@ async function assertSafeLocalGitConfig(repositoryRoot: string): Promise<void> {
     timeout: 10_000,
     maxBuffer: 1024 * 1024,
     windowsHide: true,
-  }).catch((error: NodeJS.ErrnoException & { code?: string | number; stdout?: string }) => {
-    if (String(error.code) !== '1') throw error;
-    return { stdout: error.stdout ?? '' };
   });
-  const dangerous = stdout.split(/\r?\n/).filter((line) => {
-    const [key, ...value] = line.trim().split(/\s+/);
-    if (!key) return false;
-    if (key.toLowerCase() === 'core.fsmonitor') return value.join(' ') !== '' && !/^false$/i.test(value.join(' '));
-    return value.join(' ').trim() !== '';
-  });
+  const fields = stdout.split('\0');
+  const dangerous: string[] = [];
+  for (let index = 0; index + 1 < fields.length; index += 2) {
+    const origin = fields[index] ?? '';
+    const record = fields[index + 1] ?? '';
+    const separator = record.indexOf('\n');
+    if (separator < 0) continue;
+    const key = record.slice(0, separator).toLowerCase();
+    const value = record.slice(separator + 1).trim();
+    if (/^include(?:if\..*)?\.path$/.test(key)) dangerous.push(`${origin}: ${key}`);
+    else if (key === 'core.fsmonitor' && value && !/^false$/i.test(value)) dangerous.push(`${origin}: ${key}`);
+    else if (/^(?:filter\..*\.(?:clean|smudge|process|required)|diff\.external|diff\..*\.command|gpg\.program|gpg\.(?:ssh|x509)\.program)$/.test(key) && value) dangerous.push(`${origin}: ${key}`);
+  }
   if (dangerous.length > 0) {
     throw new Error('The repository has configured Git filters, diff commands, or fsmonitor hooks. Remove them before using --write.');
   }

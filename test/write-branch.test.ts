@@ -212,4 +212,22 @@ describe('verified Git branch writes', () => {
       .rejects.toThrow('configured Git filters, diff commands, or fsmonitor hooks');
     await expect(readFile(marker, 'utf8')).rejects.toThrow();
   });
+
+  it('refuses a clean filter supplied through a local Git include', async () => {
+    const cwd = await makeRepository();
+    const configDir = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-git-include-'));
+    roots.push(configDir);
+    const included = path.join(configDir, 'unsafe-git-config');
+    await writeFile(included, '[filter "hidden"]\n\tclean = echo unsafe\n');
+    await git(cwd, 'config', 'include.path', included);
+    await expect(writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions }))
+      .rejects.toThrow('configured Git filters, diff commands, or fsmonitor hooks');
+  });
+
+  it('refuses a local GPG program override', async () => {
+    const cwd = await makeRepository();
+    await git(cwd, 'config', 'gpg.ssh.program', '/tmp/untrusted-signer');
+    await expect(writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions }))
+      .rejects.toThrow('configured Git filters, diff commands, or fsmonitor hooks');
+  });
 });
