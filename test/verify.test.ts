@@ -1,4 +1,4 @@
-import { execFile as execFileCallback, spawn } from 'node:child_process';
+import { execFile as execFileCallback, spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat, writeFile, mkdir, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,6 +9,8 @@ import { applyProposedDiffs, applyProposedFiles, copyProject, executeWithProcess
 
 const temporaryDirectories: string[] = [];
 const execFile = promisify(execFileCallback);
+const processGroupProbe = spawnSync(process.execPath, ['-e', 'process.stdout.write("ready")'], { encoding: 'utf8', timeout: 3_000 });
+const processGroupsAvailable = process.env.CODEX_PERMISSION_PROFILE !== 'managed' && processGroupProbe.status === 0 && processGroupProbe.stdout === 'ready';
 
 async function makeProject(
   scripts: Record<string, string> = { typecheck: 'tsc --noEmit', test: 'vitest run' },
@@ -105,27 +107,16 @@ describe('migration verification', () => {
     const result = await verifyProposedMigration(cwd, [diff], { execute: async () => ({ stdout: 'ok' }) });
     expect(result.status).toBe('passed');
   });
-  it('finishes after the parent exits even if a detached descendant holds its output pipe', async () => {
+  it.skipIf(!processGroupsAvailable)('finishes after the parent exits even if a detached descendant holds its output pipe (requires process groups)', async () => {
     const started = Date.now();
     const script = 'require("node:child_process").spawn(process.execPath,["-e","setTimeout(()=>{},1500)"],{detached:true,stdio:["ignore",process.stdout,process.stderr]}).unref(); process.exit(0);';
-    try {
-      await executeWithProcessGroup(process.execPath, ['-e', script], os.tmpdir(), { PATH: process.env.PATH }, 500);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EPERM') return;
-      throw error;
-    }
+    await executeWithProcessGroup(process.execPath, ['-e', script], os.tmpdir(), { PATH: process.env.PATH }, 500);
     expect(Date.now() - started).toBeLessThan(500);
   });
-  it('preserves UTF-8 characters split across process output chunks', async () => {
+  it.skipIf(!processGroupsAvailable)('preserves UTF-8 characters split across process output chunks (requires process groups)', async () => {
     const script = 'process.stdout.write(Buffer.from([0xe2])); setTimeout(() => process.stdout.write(Buffer.from([0x82,0xac])), 20);';
-    try {
-      const result = await executeWithProcessGroup(process.execPath, ['-e', script], os.tmpdir(), { PATH: process.env.PATH }, 1000);
-      if (result.stdout === '' && process.env.CI !== 'true') return;
-      expect(result.stdout).toBe('€');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EPERM') return;
-      throw error;
-    }
+    const result = await executeWithProcessGroup(process.execPath, ['-e', script], os.tmpdir(), { PATH: process.env.PATH }, 1000);
+    expect(result.stdout).toBe('€');
   });
   it('checks a patched temporary copy, strips secrets, and leaves the source untouched', async () => {
     const cwd = await makeProject();

@@ -166,7 +166,7 @@ export function createProgram(): Command {
         console.log('No supported migration applies to the dependencies declared in this project.');
         return;
       }
-      try {
+      await withCompletedBranchNotice(async (recordCommit) => {
         for (const migration of applicable) {
           let writeResult;
           if (options.write) {
@@ -178,7 +178,7 @@ export function createProgram(): Command {
               allowYarnLockInstall: options.allowYarnLockInstall,
               timeoutMs: (options.verifyTimeout ?? 300) * 1000,
             });
-            commits.push({ branch: writeResult.branch, commit: writeResult.commit });
+            recordCommit({ branch: writeResult.branch, commit: writeResult.commit });
           }
           const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: migration.id === 'firebase-admin@14' ? options.nodeRuntime : undefined, allowYarnLockInstall: options.allowYarnLockInstall });
           const verification = writeResult?.verification ?? (options.verify
@@ -187,10 +187,7 @@ export function createProgram(): Command {
           if (verification?.status === 'failed') verificationFailed = true;
           reports.push(renderMarkdownReport(migration, outcome, !options.write, verification));
         }
-      } catch (error) {
-        if (commits.length > 0) console.error(completedBranchNotice(commits));
-        throw error;
-      }
+      }, commits);
       const report = reports.join('\n---\n\n');
       console.log(renderTerminalReport(report));
       if (options.report) {
@@ -209,6 +206,18 @@ export function createProgram(): Command {
 
 export function completedBranchNotice(commits: Array<{ branch: string; commit: string }>): string {
   return `The scan stopped after creating these branches:\n${commits.map((item) => `- ${item.branch}: ${item.commit}`).join('\n')}`;
+}
+
+export async function withCompletedBranchNotice<T>(
+  work: (record: (commit: { branch: string; commit: string }) => void) => Promise<T>,
+  commits: Array<{ branch: string; commit: string }> = [],
+): Promise<T> {
+  try {
+    return await work((commit) => commits.push(commit));
+  } catch (error) {
+    if (commits.length > 0) console.error(completedBranchNotice(commits));
+    throw error;
+  }
 }
 
 function parsePositiveInteger(value: string): number {

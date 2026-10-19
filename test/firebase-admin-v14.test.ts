@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadProject, runMigration } from '../src/core/runner.js';
 import { verifyProposedMigration } from '../src/core/verify.js';
-import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
+import { firebaseAdminV14, hasOverlappingEdits } from '../src/migrations/firebase-admin-v14/index.js';
 
 const temporaryDirectories: string[] = [];
 const execFile = promisify(execFileCallback);
@@ -31,6 +31,10 @@ afterEach(async () => {
 });
 
 describe('firebase-admin v14 migration', () => {
+  it('detects nested text edits even when the outer edit starts first', () => {
+    expect(hasOverlappingEdits([{ start: 10, end: 30 }, { start: 15, end: 20 }])).toBe(true);
+    expect(hasOverlappingEdits([{ start: 10, end: 15 }, { start: 15, end: 20 }])).toBe(false);
+  });
   it('withholds a file when Firebase edits overlap instead of corrupting its text', async () => {
     const cwd = await makeProject();
     await writeFile(path.join(cwd, 'server.ts'), "import * as admin from 'firebase-admin';\nconst db = admin.app().database(admin.app().options.databaseURL);\nconsole.log(db);\n");

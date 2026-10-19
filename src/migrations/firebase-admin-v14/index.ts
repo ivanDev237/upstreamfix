@@ -281,10 +281,11 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
   }
 
   const orderedEdits = [...edits].sort((a, b) => a.start - b.start || a.end - b.end);
-  for (let index = 1; index < orderedEdits.length; index++) {
-    const previous = orderedEdits[index - 1]!;
-    const current = orderedEdits[index]!;
-    if (current.start < previous.end) {
+  if (hasOverlappingEdits(orderedEdits)) {
+    for (let index = 1; index < orderedEdits.length; index++) {
+      const previous = orderedEdits[index - 1]!;
+      const current = orderedEdits[index]!;
+      if (current.start >= previous.end) continue;
       result.manual.push({
         file,
         line: current.line,
@@ -326,6 +327,16 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
 
   if (result.manual.length > manualBefore) sortManual(result.manual, manualBefore);
   return true;
+}
+
+export function hasOverlappingEdits(edits: Array<{ start: number; end: number }>): boolean {
+  const ordered = [...edits].sort((left, right) => left.start - right.start || left.end - right.end);
+  let boundary = -1;
+  for (const edit of ordered) {
+    if (edit.start < boundary) return true;
+    boundary = Math.max(boundary, edit.end);
+  }
+  return false;
 }
 
 function aliasMemberPattern(alias: string): RegExp {

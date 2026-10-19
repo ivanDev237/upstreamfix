@@ -5,11 +5,13 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createProgram, completedBranchNotice, safeCliError } from '../src/cli.js';
+import { createProgram, completedBranchNotice, safeCliError, withCompletedBranchNotice } from '../src/cli.js';
 
 const execFile = promisify(execFileCallback);
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temporaryDirectories: string[] = [];
+const subprocessProbe = spawnSync(process.execPath, ['-e', 'process.stdout.write("ready")'], { encoding: 'utf8', timeout: 3_000 });
+const subprocessAvailable = subprocessProbe.status === 0 && subprocessProbe.stdout === 'ready';
 
 async function makeProject(firebaseAdminRange = '^13.0.0'): Promise<string> {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-cli-'));
@@ -32,6 +34,14 @@ describe('UpstreamFix CLI', () => {
   it('summarizes branches already created before a scan fails', () => {
     expect(completedBranchNotice([{ branch: 'upstreamfix/firebase-admin-14', commit: 'abc123' }]))
       .toContain('upstreamfix/firebase-admin-14: abc123');
+  });
+  it('reports an already committed branch when a later scan step throws', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await expect(withCompletedBranchNotice(async (record) => {
+      record({ branch: 'upstreamfix/firebase-admin-14', commit: 'abc123' });
+      throw new Error('second migration failed');
+    })).rejects.toThrow('second migration failed');
+    expect(errors.mock.calls.map(([message]) => String(message)).join('\n')).toContain('upstreamfix/firebase-admin-14: abc123');
   });
   it('previews by default and requires Git for --write without modifying files', async () => {
     const cwd = await makeProject();
@@ -114,13 +124,12 @@ describe('UpstreamFix CLI', () => {
     });
   });
 
-  it('runs the compiled CLI through a bin symlink and prints its version', async () => {
+  it.skipIf(!subprocessAvailable)('runs the compiled CLI through a bin symlink and prints its version (requires subprocess support)', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-bin-link-'));
     temporaryDirectories.push(cwd);
     const bin = path.join(cwd, 'upstreamfix');
     await symlink(path.join(projectRoot, 'dist', 'cli.js'), bin);
     const help = spawnSync(process.execPath, [bin, '--help'], { cwd, encoding: 'utf8', timeout: 10_000 });
-    if (help.error && 'code' in help.error && help.error.code === 'EPERM') return;
     expect(help.error).toBeUndefined();
     expect(help.status).toBe(0);
     expect(help.stdout).toContain('Usage: upstreamfix');
