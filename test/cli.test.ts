@@ -145,7 +145,7 @@ describe('UpstreamFix CLI', () => {
     const version = spawnSync(process.execPath, [bin, '--version'], { cwd, encoding: 'utf8', timeout: 10_000 });
     expect(version.error).toBeUndefined();
     expect(version.status).toBe(0);
-    expect(version.stdout.trim()).toBe('0.1.3');
+    expect(version.stdout.trim()).toBe('0.2.0');
   });
 
   it('scans only migrations matching dependencies in the project', async () => {
