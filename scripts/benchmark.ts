@@ -11,6 +11,7 @@ import { escapeUntrustedMarkdownCell as cell, maskSecrets } from '../src/core/re
 import { newTypeScriptDiagnostics, parseTypeScriptDiagnostics } from '../src/core/diagnostic-diff.js';
 import { runMigration } from '../src/core/runner.js';
 import { applyProposedFiles } from '../src/core/verify.js';
+import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from '../src/core/project-discovery.js';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 import { migrations } from '../src/migrations/index.js';
 
@@ -146,12 +147,11 @@ async function run(command: string, args: string[], cwd: string, home: string, t
 }
 
 async function filesBelow(root: string): Promise<string[]> {
-  const ignored = new Set(['.git', 'node_modules', 'dist', 'coverage', '.next', '.yarn']);
   const files: string[] = [];
   async function visit(directory: string): Promise<void> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        if (!ignored.has(entry.name)) await visit(path.join(directory, entry.name));
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) await visit(path.join(directory, entry.name));
       } else if (entry.isFile() && /\.(?:[cm]?js|jsx|tsx?)$/i.test(entry.name) && !entry.name.endsWith('.d.ts')) {
         files.push(path.join(directory, entry.name));
       }
@@ -166,7 +166,7 @@ async function packageFilesBelow(root: string): Promise<string[]> {
   async function visit(directory: string): Promise<void> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        if (!new Set(['.git', 'node_modules', 'dist', 'coverage', '.next', '.yarn']).has(entry.name)) await visit(path.join(directory, entry.name));
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) await visit(path.join(directory, entry.name));
       } else if (entry.isFile() && entry.name === 'package.json') files.push(path.join(directory, entry.name));
     }
   }
@@ -247,13 +247,9 @@ async function findMigrationPackages(root: string, migration: Migration): Promis
     const range = [manifest.dependencies, manifest.devDependencies, manifest.optionalDependencies, manifest.peerDependencies]
       .map((section) => section?.[migration.packageName])
       .find((value): value is string => typeof value === 'string');
-    if (range && isMajorRange(range, migration.fromMajor)) dirs.push(path.dirname(file));
+    if (range && isSupportedSourceMajor(range, migration.fromMajor)) dirs.push(path.dirname(file));
   }
   return dirs;
-}
-
-function isMajorRange(range: string, major: number): boolean {
-  return new RegExp(`^\\s*(?:[~^=]|>=?\\s*)?${major}(?:\\.(?:\\d+|x|\\*)){0,2}(?:\\s|$)`, 'i').test(range);
 }
 
 async function installDirs(root: string, migrationDirs: string[], repo: BenchRepo): Promise<string[]> {
@@ -282,7 +278,7 @@ async function clearPackageManagerCredentialFiles(root: string): Promise<void> {
   async function visit(directory: string): Promise<void> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        if (!new Set(['.git', 'node_modules', 'dist', 'coverage', '.next', '.yarn']).has(entry.name)) await visit(path.join(directory, entry.name));
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) await visit(path.join(directory, entry.name));
       } else if (entry.isFile() && secretBearingConfigNames.has(entry.name)) {
         await rm(path.join(directory, entry.name), { force: true });
       }
@@ -394,7 +390,7 @@ async function ensureTargetMajorInBenchmarkCopy(root: string, packageDirs: strin
     const exactTarget = `${migration.toMajor}.0.0`;
     for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'] as const) {
       const current = manifest[section]?.[migration.packageName];
-      if (current && (isMajorRange(current, migration.fromMajor) || isMajorRange(current, migration.toMajor)) && current !== exactTarget) {
+      if (current && (isSupportedSourceMajor(current, migration.fromMajor) || isSupportedSourceMajor(current, migration.toMajor)) && current !== exactTarget) {
         manifest[section]![migration.packageName] = exactTarget;
         changed = true;
       }

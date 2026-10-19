@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -22,6 +22,21 @@ async function makeProject(source: string, range = '^21.0.0'): Promise<string> {
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
 
 describe('Stripe Node SDK v21 → v22 migration', () => {
+  it('uses the same conservative major parser and ignored folders in scan and migrate', async () => {
+    const cwd = await makeProject("import Stripe from 'stripe';\nStripe('key');\n", '>=21');
+    expect(await findApplicableMigrations(cwd)).toEqual([]);
+    const outcome = await runMigration(stripeV22, { cwd, dryRun: true });
+    expect(outcome.manual.some((item) => item.reason.includes('only analyzes major v21'))).toBe(true);
+
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { stripe: '^24.0.0' } }));
+    await mkdir(path.join(cwd, '.codex'));
+    await writeFile(path.join(cwd, '.codex', 'package.json'), JSON.stringify({ dependencies: { stripe: '^21.0.0' } }));
+    await writeFile(path.join(cwd, '.codex', 'private.ts'), "import Stripe from 'stripe';\nStripe('key');\n");
+    expect(await findApplicableMigrations(cwd)).toEqual([]);
+    const ignored = await runMigration(stripeV22, { cwd, dryRun: true });
+    expect(ignored.filesChanged).not.toContain('.codex/private.ts');
+  });
+
   it('withholds all edits from a Stripe file with syntax errors', () => {
     const project = new Project({ useInMemoryFileSystem: true });
     project.createSourceFile('broken.ts', "import Stripe from 'stripe';\nconst stripe = Stripe(\n");

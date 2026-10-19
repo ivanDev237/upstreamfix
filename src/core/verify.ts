@@ -6,8 +6,8 @@ import { promisify } from 'node:util';
 import { applyPatch, parsePatch } from 'diff';
 import type { ProposedFileChange } from './types.js';
 import { registerTemporaryCleanup, terminateProcessGroup, trackProcessGroup } from './process-cleanup.js';
+import { IGNORED_PROJECT_DIRECTORIES } from './project-discovery.js';
 
-const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'coverage', '.next', '.nuxt', '.turbo', '.cache', '.codex', '.claude']);
 const ignoredFiles = new Set(['.npmrc', '.yarnrc', '.yarnrc.yml', '.pnpmfile.cjs', '.pnpmfile.mjs', 'yarn.config.cjs']);
 const maxOutputLength = 4_000;
 const maxCopyBytes = 100 * 1024 * 1024;
@@ -165,7 +165,7 @@ async function copyProject(source: string, destination: string): Promise<void> {
   for (const relative of listing.split('\0').filter(Boolean)) {
     const portable = relative.replaceAll('\\', '/');
     const parts = portable.split('/');
-    if (parts.some((part) => ignoredDirectories.has(part))
+    if (parts.some((part) => IGNORED_PROJECT_DIRECTORIES.has(part))
       || ignoredFiles.has(parts.at(-1)!) || isSensitivePath(portable)) continue;
     const sourcePath = path.resolve(source, relative);
     const relativeCheck = path.relative(source, sourcePath);
@@ -272,7 +272,7 @@ async function findPackageFiles(root: string): Promise<string[]> {
       if (entry.isSymbolicLink()) continue;
       const absolute = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!ignoredDirectories.has(entry.name)) await visit(absolute);
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) await visit(absolute);
       } else if (entry.isFile() && entry.name === 'package.json') found.push(absolute);
     }
   }

@@ -7,11 +7,11 @@ import { tmpdir } from 'node:os';
 import { structuredPatch } from 'diff';
 import { Project } from 'ts-morph';
 import type { ManualItem, Migration, MigrationResult, PackageManifest, ProposedFileChange } from './types.js';
+import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from './project-discovery.js';
 
 const execFile = promisify(execFileCallback);
 
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs']);
-const IGNORED_DIRS = new Set(['node_modules', 'dist', 'coverage', '.next', '.git', '.venv', 'venv']);
 const MAX_DIFF_INPUT_BYTES = 1024 * 1024;
 const MAX_DIFF_OUTPUT_CHARS = 64 * 1024;
 const MAX_REPORT_DIFF_CHARS = 256 * 1024;
@@ -95,7 +95,7 @@ function loadScopedProject(root: string, migration: Migration): ScopedProject {
       });
       continue;
     }
-    if (!isSourceMajorRange(declaration.range, migration.fromMajor)) {
+    if (!isSupportedSourceMajor(declaration.range, migration.fromMajor)) {
       manual.push({
         file: sourcePath,
         line: 1,
@@ -109,10 +109,6 @@ function loadScopedProject(root: string, migration: Migration): ScopedProject {
   }
 
   return { project, manual, manifestBySource };
-}
-
-function isSourceMajorRange(range: string, major: number): boolean {
-  return new RegExp(`^\\s*[~^]?${major}(?:\\.(?:\\d+|x|\\*)){0,2}\\s*$`, 'i').test(range);
 }
 
 function isRegistryVersionSpec(spec: string): boolean {
@@ -163,7 +159,7 @@ function findSourceFiles(root: string, packageName: string): string[] {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const absolutePath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRS.has(entry.name)) visit(absolutePath);
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) visit(absolutePath);
         continue;
       }
       if (!entry.isFile() || entry.name.endsWith('.d.ts')) continue;
@@ -718,7 +714,7 @@ function findPackageManifests(root: string): string[] {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const absolutePath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!IGNORED_DIRS.has(entry.name)) visit(absolutePath);
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) visit(absolutePath);
       } else if (entry.isFile() && entry.name === 'package.json') {
         found.push(absolutePath);
       }
