@@ -7,6 +7,7 @@ import type { Migration, PackageManifest } from './types.js';
 import { runMigration, type RunOutcome } from './runner.js';
 import { applyProposedFiles, verifyProposedMigration, type VerificationOptions, type VerificationResult } from './verify.js';
 import { registerTemporaryCleanup } from './process-cleanup.js';
+import { parseManifest } from './manifest.js';
 
 const execFile = promisify(execFileCallback);
 
@@ -159,7 +160,7 @@ async function assertChangedSourcesUseTargetSdk(projectRoot: string, migration: 
       const manifestFile = path.join(directory, 'package.json');
       const raw = proposed.get(manifestFile) ?? await readFile(manifestFile, 'utf8').catch(() => undefined);
       if (raw) {
-        const manifest = JSON.parse(raw) as PackageManifest;
+        const manifest = parseManifest<PackageManifest>(raw);
         const ranges = (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
           .map((section) => manifest[section]?.[migration.packageName])
           .filter((range): range is string => typeof range === 'string');

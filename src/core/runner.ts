@@ -9,6 +9,7 @@ import { structuredPatch } from 'diff';
 import { Project } from 'ts-morph';
 import type { ManualItem, Migration, MigrationResult, PackageManifest, ProposedFileChange } from './types.js';
 import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from './project-discovery.js';
+import { parseManifest } from './manifest.js';
 
 const execFile = promisify(execFileCallback);
 
@@ -42,7 +43,7 @@ function loadScopedProject(root: string, migration: Migration): ScopedProject {
     let parsed: PackageManifest | undefined;
     let invalid = false;
     try {
-      parsed = JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, '')) as PackageManifest;
+      parsed = parseManifest<PackageManifest>(readFileSync(file, 'utf8'));
     } catch {
       invalid = true;
     }
@@ -284,7 +285,7 @@ async function inspectManifests(migration: Migration, cwd: string): Promise<stri
     const raw = await readFile(manifestPath, 'utf8');
     if (!raw.includes(JSON.stringify(migration.packageName))) continue;
     try {
-      const manifest = JSON.parse(raw.replace(/^\uFEFF/, '')) as PackageManifest;
+      const manifest = parseManifest<PackageManifest>(raw);
       notes.push(...(migration.inspectManifest?.(manifest) ?? []));
     } catch {
       // Invalid manifests are already surfaced as manual review items for source files.
@@ -313,7 +314,7 @@ async function migrateManifests(
     }
     let manifest: PackageManifest;
     try {
-      manifest = JSON.parse(raw.replace(/^\uFEFF/, '')) as PackageManifest;
+      manifest = parseManifest<PackageManifest>(raw);
     } catch {
       manual.push({
         file: relativePath,
@@ -446,7 +447,7 @@ async function regeneratePackageLock(
   let before: string;
   let lock: { lockfileVersion?: unknown };
   try {
-    manifest = JSON.parse(updatedManifest.replace(/^\uFEFF/, '')) as PackageManifest;
+    manifest = parseManifest<PackageManifest>(updatedManifest);
     before = await readFile(lockPath, 'utf8');
     lock = JSON.parse(before) as { lockfileVersion?: unknown };
   } catch {
@@ -508,7 +509,7 @@ async function regeneratePnpmLock(
   let manifest: PackageManifest;
   let before: string;
   try {
-    manifest = JSON.parse(updatedManifest.replace(/^\uFEFF/, '')) as PackageManifest;
+    manifest = parseManifest<PackageManifest>(updatedManifest);
     before = await readFile(lockPath, 'utf8');
   } catch {
     return { reason: 'The package.json or pnpm-lock.yaml could not be read for a safe lockfile update.' };
@@ -610,7 +611,7 @@ async function regenerateYarnLock(
   let manifest: PackageManifest;
   let before: string;
   try {
-    manifest = JSON.parse(updatedManifest.replace(/^\uFEFF/, '')) as PackageManifest;
+    manifest = parseManifest<PackageManifest>(updatedManifest);
     before = await readFile(lockPath, 'utf8');
   } catch {
     return { reason: 'The package.json or yarn.lock could not be read for a safe lockfile update.' };
@@ -744,7 +745,7 @@ function addNodeEngineToManifest(raw: string): string | undefined {
   const rootStart = raw.charCodeAt(0) === 0xfeff ? 1 : 0;
   if (raw[rootStart] !== '{') return undefined;
   const engineMember = findJsonObjectMember(raw, rootStart, 'engines');
-  if (!engineMember && Object.hasOwn(JSON.parse(raw.replace(/^\uFEFF/, '')) as PackageManifest, 'engines')) return undefined;
+  if (!engineMember && Object.hasOwn(parseManifest<PackageManifest>(raw), 'engines')) return undefined;
   const objectStart = engineMember?.valueStart ?? rootStart;
   if (raw[objectStart] !== '{') return undefined;
   const objectEnd = jsonValueEnd(raw, objectStart);
@@ -761,7 +762,7 @@ function addNodeEngineToManifest(raw: string): string | undefined {
     : `${hasMembers ? ', ' : ''}${engineMember ? '"node": ">=22"' : '"engines": { "node": ">=22" }'}`;
   const updated = raw.slice(0, insertAt) + addition + raw.slice(insertAt);
   try {
-    const parsed = JSON.parse(updated.replace(/^\uFEFF/, '')) as PackageManifest;
+    const parsed = parseManifest<PackageManifest>(updated);
     return parsed.engines?.node === '>=22' ? updated : undefined;
   } catch {
     return undefined;

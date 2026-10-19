@@ -7,6 +7,7 @@ import { validateExactVersion } from './diff-api.js';
 import { migrations } from '../migrations/index.js';
 import { registerTemporaryCleanup } from './process-cleanup.js';
 import { randomUUID } from 'node:crypto';
+import { parseManifest } from './manifest.js';
 
 const nodeImage = 'node:24.22.0-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5';
 export type ProbePhase = 'baseline-install' | 'baseline-typecheck' | 'target-install' | 'target-typecheck';
@@ -68,7 +69,7 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
     await writeFile(path.join(home, 'npmrc.global'), '');
     await copyProject(path.resolve(cwd), project);
     const manifestPath = path.join(project, 'package.json');
-    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, Record<string, string>>;
+    const manifest = parseManifest<Record<string, Record<string, string>>>(await readFile(manifestPath, 'utf8'));
     const sections = ['dependencies', 'devDependencies', 'optionalDependencies'];
     const section = sections.find((name) => typeof manifest[name]?.[packageName] === 'string');
     if (!section) return { ...base, status: 'unavailable', note: `${packageName} is not declared in the root package.json.` };

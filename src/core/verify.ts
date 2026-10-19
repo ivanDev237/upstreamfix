@@ -7,6 +7,7 @@ import { applyPatch, parsePatch } from 'diff';
 import type { ProposedFileChange } from './types.js';
 import { registerTemporaryCleanup, terminateProcessGroup, trackProcessGroup } from './process-cleanup.js';
 import { IGNORED_PROJECT_DIRECTORIES } from './project-discovery.js';
+import { parseManifest } from './manifest.js';
 
 const ignoredFiles = new Set(['.npmrc', '.yarnrc', '.yarnrc.yml', '.pnpmfile.cjs', '.pnpmfile.mjs', 'yarn.config.cjs']);
 const maxOutputLength = 4_000;
@@ -298,7 +299,7 @@ async function findPackageFiles(root: string): Promise<string[]> {
 }
 
 async function readPackageJson(directory: string): Promise<PackageJson> {
-  return JSON.parse(await readFile(path.join(directory, 'package.json'), 'utf8')) as PackageJson;
+  return parseManifest<PackageJson>(await readFile(path.join(directory, 'package.json'), 'utf8'));
 }
 
 function hasDependencies(pkg: PackageJson): boolean {

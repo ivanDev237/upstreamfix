@@ -90,6 +90,15 @@ describe('firebase-admin v14 migration', () => {
     expect(source).toContain('admin.firestore()');
     expect(manifest.dependencies['firebase-admin']).toBe('^13.0.0');
   });
+  it('accepts UTF-8 BOMs in TypeScript and package manifests', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'server.ts'), "\uFEFFimport * as admin from 'firebase-admin';\nadmin.initializeApp();\n");
+    const manifest = await readFile(path.join(cwd, 'package.json'), 'utf8');
+    await writeFile(path.join(cwd, 'package.json'), `\uFEFF${manifest}`);
+    const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.reason.includes('syntax errors'))).toBe(false);
+    expect(result.changes.some((item) => item.rule === 'app-lifecycle')).toBe(true);
+  });
 
   it('explains the Node.js prerequisite in a preview and proposes engines.node after explicit confirmation', async () => {
     const cwd = await makeProject();

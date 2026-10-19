@@ -57,6 +57,13 @@ afterEach(async () => {
 });
 
 describe('migration verification', () => {
+  it('parses a package manifest with a UTF-8 BOM', async () => {
+    const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"' });
+    const manifest = await readFile(path.join(cwd, 'package.json'), 'utf8');
+    await writeFile(path.join(cwd, 'package.json'), `\uFEFF${manifest}`);
+    const result = await verifyProposedMigration(cwd, [diff], { execute: async () => ({ stdout: 'ok' }) });
+    expect(result.status).toBe('passed');
+  });
   it('finishes after the parent exits even if a detached descendant holds its output pipe', async () => {
     const started = Date.now();
     const script = 'require("node:child_process").spawn(process.execPath,["-e","setTimeout(()=>{},1500)"],{detached:true,stdio:["ignore",process.stdout,process.stderr]}).unref(); process.exit(0);';
