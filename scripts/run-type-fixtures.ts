@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { diffPublishedApi } from '../src/core/diff-api.js';
 import { generateTypeFixtures, makeFixtureReadable, selectFixtureForMember, validateFixtureDiagnostics, type TypeFixture } from '../src/core/type-fixtures.js';
+import { registerTemporaryCleanup } from '../src/core/process-cleanup.js';
 
 const cases = [
   { packageName: 'stripe', oldVersion: '22.4.0', newVersion: '23.0.0', member: 'payment_method_types' },
@@ -24,6 +26,9 @@ async function command(binary: string, args: string[], cwd: string, env: NodeJS.
 
 async function compile(fixture: TypeFixture, version: string, source = fixture.source): Promise<Array<{ code: number; line: number }>> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-type-fixture-'));
+  const containerName = `upstreamfix-fixture-${randomUUID()}`;
+  const removeContainer = async () => { await command('docker', ['rm', '-f', containerName], root, { PATH: process.env.PATH }).catch(() => undefined); };
+  const unregisterCleanup = registerTemporaryCleanup(removeContainer);
   try {
     await writeFile(path.join(root, 'package.json'), JSON.stringify({ private: true, type: 'module', dependencies: { [fixture.packageName]: version },
       devDependencies: { typescript: '7.0.2', '@types/node': '22.10.0' } }));
@@ -36,11 +41,16 @@ async function compile(fixture: TypeFixture, version: string, source = fixture.s
       npm_config_globalconfig: path.join(root, 'npmrc.global') };
     await writeFile(env.npm_config_userconfig!, '');
     await writeFile(env.npm_config_globalconfig!, '');
-    const install = await command('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--package-lock=false'], root, env);
+    const lock = await command('npm', ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], root, env);
+    if (lock.code !== 0) throw new Error(`Fixture lock generation failed for ${fixture.id}@${version}: ${lock.output.slice(-2000)}`);
+    if (process.env.UPSTREAMFIX_DIFF_DIR) {
+      await writeFile(path.join(process.env.UPSTREAMFIX_DIFF_DIR, `fixture-lock-${fixture.packageName}-${version}.json`), await readFile(path.join(root, 'package-lock.json')));
+    }
+    const install = await command('npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], root, env);
     if (install.code !== 0) throw new Error(`Fixture install failed for ${fixture.id}@${version}: ${install.output.slice(-2000)}`);
     await makeFixtureReadable(root);
     const result = await command('docker', [
-      'run', '--rm', '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
+      'run', '--rm', '--init', '--name', containerName, '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
       '--memory=1536m', '--memory-swap=1536m', '--pids-limit=128', '--user=65534:65534',
       `--mount=type=bind,src=${root},dst=/workspace,readonly`, '-w', '/workspace', image,
       'node', '/workspace/node_modules/typescript/bin/tsc', '--pretty', 'false', '--noEmit',
@@ -51,6 +61,8 @@ async function compile(fixture: TypeFixture, version: string, source = fixture.s
     if (result.code !== 0 && diagnostics.length === 0) throw new Error(`No fixture diagnostics found: ${result.output.slice(-2000)}`);
     return diagnostics;
   } finally {
+    await removeContainer();
+    unregisterCleanup();
     await rm(root, { recursive: true, force: true });
   }
 }

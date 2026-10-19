@@ -16,6 +16,13 @@ const report = (packageName: string, symbol: string): ApiReport => ({
 });
 
 describe('type-diff fixtures', () => {
+  it('names and cleans Docker checks and keeps their resolved dependency lockfiles', () => {
+    const script = readFileSync(new URL('../scripts/run-type-fixtures.ts', import.meta.url), 'utf8');
+    expect(script).toContain("'--init'");
+    expect(script).toContain("'--name'");
+    expect(script).toContain('registerTemporaryCleanup');
+    expect(script).not.toContain('--package-lock=false');
+  });
   it('can run the real SDK check as a pinned reusable GitHub workflow', () => {
     const workflow = readFileSync(new URL('../.github/workflows/type-fixtures.yml', import.meta.url), 'utf8');
     expect(workflow).toContain('workflow_call:');

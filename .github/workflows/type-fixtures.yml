@@ -67,5 +67,6 @@ jobs:
           path: |
             ${{ runner.temp }}/type-fixtures.md
             ${{ runner.temp }}/api-diff-*.json
+            ${{ runner.temp }}/fixture-lock-*.json
           if-no-files-found: warn
           retention-days: 30
