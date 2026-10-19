@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Project } from 'ts-morph';
 import { findApplicableMigrations } from '../src/migrations/index.js';
 import { runMigration } from '../src/core/runner.js';
+import type { MigrationResult } from '../src/core/types.js';
 import { stripeV22 } from '../src/migrations/stripe-v22/index.js';
+import { applyStripeEdits } from '../src/migrations/stripe-shared.js';
 
 const roots: string[] = [];
 
@@ -20,6 +22,27 @@ async function makeProject(source: string, range = '^21.0.0'): Promise<string> {
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
 
 describe('Stripe Node SDK v21 → v22 migration', () => {
+  it('withholds all edits from a Stripe file with syntax errors', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('broken.ts', "import Stripe from 'stripe';\nconst stripe = Stripe(\n");
+    const result = stripeV22.transform(project);
+    expect(result.manual.some((item) => item.reason.includes('syntax'))).toBe(true);
+    expect(result.fileUpdates).toEqual([]);
+  });
+
+  it('reports overlapping Stripe edits instead of dropping one silently', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    const source = project.createSourceFile('nested.js', 'const stripe = original;\n');
+    const result: MigrationResult = { changes: [], manual: [], filesChanged: [], fileUpdates: [] };
+    const original = source.getFullText();
+    applyStripeEdits(source, [
+      { start: 6, end: 12, replacement: 'client', rule: 'first', before: 'stripe', line: 1 },
+      { start: 8, end: 14, replacement: 'other', rule: 'second', before: 'ripe =', line: 1 },
+    ], result, original);
+    expect(result.manual.some((item) => item.reason.includes('overlap'))).toBe(true);
+    expect(result.fileUpdates).toEqual([]);
+  });
+
   it('migrates the constructor and unambiguous RequestOptions position, plus the package range, in preview', async () => {
     const cwd = await makeProject(
       "import Stripe from 'stripe';\nconst stripe = Stripe(process.env.STRIPE_KEY!);\nexport const customer = stripe.customers.retrieve('cus_123', {stripeAccount: process.env.CONNECTED_ACCOUNT!});\n",

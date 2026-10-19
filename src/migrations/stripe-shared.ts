@@ -50,6 +50,7 @@ function emptyResult(): MigrationResult {
 }
 
 function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
+  if (withholdInvalidSource(sourceFile, result)) return;
   const edits: TextEdit[] = [];
   const before = sourceFile.getFullText();
   const stripeBindings = findStripeBindings(sourceFile);
@@ -175,10 +176,11 @@ function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
     }
   }
 
-  applyEdits(sourceFile, edits, result, before);
+  applyStripeEdits(sourceFile, edits, result, before);
 }
 
 function migrateV23File(sourceFile: SourceFile, result: MigrationResult): void {
+  if (withholdInvalidSource(sourceFile, result)) return;
   const edits: TextEdit[] = [];
   const before = sourceFile.getFullText();
   const stripeBindings = findStripeBindings(sourceFile);
@@ -260,7 +262,7 @@ function migrateV23File(sourceFile: SourceFile, result: MigrationResult): void {
     }
   }
 
-  applyEdits(sourceFile, edits, result, before);
+  applyStripeEdits(sourceFile, edits, result, before);
 }
 
 function findStripeBindings(sourceFile: SourceFile): { constructors: Set<string>; typeNames: Set<string> } {
@@ -374,17 +376,30 @@ function edit(sourceFile: SourceFile, node: Node, replacement: string, rule: str
   };
 }
 
-function applyEdits(sourceFile: SourceFile, edits: TextEdit[], result: MigrationResult, original: string): void {
+export function applyStripeEdits(sourceFile: SourceFile, edits: TextEdit[], result: MigrationResult, original: string): void {
   if (edits.length === 0) return;
   const unique = new Map<string, TextEdit>();
-  for (const change of edits) unique.set(`${change.start}:${change.end}`, change);
+  for (const change of edits) {
+    const key = `${change.start}:${change.end}`;
+    const previous = unique.get(key);
+    if (previous && previous.replacement !== change.replacement) {
+      reportOverlap(sourceFile, result, change);
+      return;
+    }
+    unique.set(key, change);
+  }
   const ordered = [...unique.values()].sort((left, right) => right.start - left.start || right.end - left.end);
-  let migrated = original;
   let boundary = original.length + 1;
   for (const change of ordered) {
-    if (change.end > boundary) continue;
-    migrated = migrated.slice(0, change.start) + change.replacement + migrated.slice(change.end);
+    if (change.end > boundary) {
+      reportOverlap(sourceFile, result, change);
+      return;
+    }
     boundary = change.start;
+  }
+  let migrated = original;
+  for (const change of ordered) {
+    migrated = migrated.slice(0, change.start) + change.replacement + migrated.slice(change.end);
     const after = change.rule === 'request-options-position'
       ? `undefined, ${change.before}`
       : change.replacement;
@@ -393,6 +408,25 @@ function applyEdits(sourceFile: SourceFile, edits: TextEdit[], result: Migration
   if (migrated === original) return;
   result.filesChanged.push(sourceFile.getFilePath());
   result.fileUpdates?.push({ file: sourceFile.getFilePath(), contents: migrated });
+}
+
+function withholdInvalidSource(sourceFile: SourceFile, result: MigrationResult): boolean {
+  const diagnostics = (sourceFile.compilerNode as unknown as { parseDiagnostics?: unknown[] }).parseDiagnostics ?? [];
+  if (diagnostics.length === 0) return false;
+  result.manual.push({
+    file: sourceFile.getFilePath(), line: 1,
+    reason: `This Stripe source file has ${diagnostics.length} syntax error(s); automatic edits were withheld until the file parses cleanly.`,
+    snippet: redactedSnippet(sourceFile.getFullText().split(/\r?\n/, 1)[0] ?? ''),
+  });
+  return true;
+}
+
+function reportOverlap(sourceFile: SourceFile, result: MigrationResult, change: TextEdit): void {
+  result.manual.push({
+    file: sourceFile.getFilePath(), line: change.line,
+    reason: 'Two Stripe migration edits overlap; automatic edits for this file were withheld for manual review.',
+    snippet: redactedSnippet(change.before),
+  });
 }
 
 function addManual(sourceFile: SourceFile, findings: ManualItem[], node: Node, reason: string, snippet: string): void {
