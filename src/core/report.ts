@@ -97,7 +97,7 @@ export function renderMarkdownReport(
     lines.push('3. Handle the items listed under "Needs your attention".');
   }
   lines.push('');
-  const raw = lines.join('\n');
+  const raw = stripTerminalControls(lines.join('\n'));
   const sanitized = maskSecrets(raw);
   return sanitized === raw ? raw : `${sanitized}\n> Warning: possible credentials were detected in the report and redacted. Review the source before sharing this report.`;
 }
@@ -114,9 +114,7 @@ export function maskSecrets(value: string): string {
 
 /** Escape third-party command output before placing it in a public Markdown table. */
 export function escapeUntrustedMarkdownCell(value: string): string {
-  return maskSecrets(value)
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
+  return maskSecrets(stripTerminalControls(value))
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/`/g, '&#96;').replace(/\[/g, '&#91;').replace(/\]/g, '&#93;')
     .replaceAll('|', '&#124;').replace(/[\r\n\u2028\u2029]+/g, ' ').trim();
@@ -137,7 +135,29 @@ export function renderTerminalReport(markdown: string): string {
       .replace(/&amp;/g, '&')
       .replace(/\\([\\`*_{}\[\]()#+.!])/g, '$1');
   }).join('\n');
-  return maskSecrets(readable);
+  return stripTerminalControls(maskSecrets(readable));
+}
+
+function stripTerminalControls(value: string): string {
+  let clean = '';
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code === 0x1b) {
+      const kind = value[i + 1];
+      if (kind === '[') {
+        i += 2;
+        while (i < value.length && !(value.charCodeAt(i) >= 0x40 && value.charCodeAt(i) <= 0x7e)) i++;
+      } else if (kind === ']' || kind === 'P' || kind === 'X' || kind === '^' || kind === '_') {
+        i += 2;
+        while (i < value.length && value.charCodeAt(i) !== 0x07 && !(value[i] === '\x1b' && value[i + 1] === '\\')) i++;
+        if (value[i] === '\x1b') i++;
+      } else i++;
+      continue;
+    }
+    if ((code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || (code >= 0x7f && code <= 0x9f)) continue;
+    clean += value[i];
+  }
+  return clean;
 }
 
 function markdownCell(value: string): string {

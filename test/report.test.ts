@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { maskSecrets, renderMarkdownReport } from '../src/core/report.js';
+import { maskSecrets, renderMarkdownReport, renderTerminalReport } from '../src/core/report.js';
 import type { RunOutcome } from '../src/core/runner.js';
 import type { MigrationInfo } from '../src/core/types.js';
 
@@ -20,6 +20,16 @@ function outcome(overrides: Partial<RunOutcome> = {}): RunOutcome {
 }
 
 describe('security of Markdown reports', () => {
+  it('removes terminal controls from reports and terminal output', () => {
+    const injected = 'normal\x1b]8;;https://evil.invalid\x07link\x1b]8;;\x07\x1b[2J';
+    const markdown = renderMarkdownReport(migration, outcome({
+      manual: [{ file: 'x.ts', line: 1, reason: injected, snippet: injected }], proposedDiff: [injected], changes: [],
+    }), true);
+    expect(markdown).not.toContain('\x1b');
+    expect(markdown).not.toContain('\x07');
+    expect(renderTerminalReport(markdown)).not.toContain('\x1b');
+    expect(renderTerminalReport('- note: ' + injected)).not.toContain('\x1b');
+  });
   it('redacts underscored secrets in escaped table cells', () => {
     const secret = 'AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz012345678';
     const report = renderMarkdownReport(migration, outcome({
