@@ -23,4 +23,9 @@ runs:
         UPSTREAMFIX_OUTPUT_ROOT: ${{ inputs.output }}
         UPSTREAMFIX_CLIENT_ROOT: ${{ github.workspace }}
         UPSTREAMFIX_BASE_SHA: ${{ github.sha }}
+        UPSTREAMFIX_CONTAINER_VERIFY: '1'
+        GIT_AUTHOR_NAME: upstreamfix[bot]
+        GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        GIT_COMMITTER_NAME: upstreamfix[bot]
+        GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
       run: node "$GITHUB_ACTION_PATH/dist/action/migrate-cli.js"

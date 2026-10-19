@@ -11,6 +11,7 @@ describe('client migration workflow security boundary', () => {
     const source = workflow();
     expect(source).toMatch(/\n  migrate:[\s\S]*?permissions:\n      contents: read/);
     expect(source).toMatch(/\n  publish:[\s\S]*?permissions:\n      contents: write\n      pull-requests: write\n      issues: write/);
+    expect(source.split('\n  publish:')[1]).toContain('actions: write');
     expect(source).toContain('persist-credentials: false');
     expect(source).toContain('timeout-minutes:');
   });
@@ -88,6 +89,20 @@ describe('client migration workflow security boundary', () => {
     expect(example).toContain('workflow_dispatch:');
     expect(example).toContain('client-migrations.yml@');
     expect(example).not.toMatch(/^\s+pull_request(?:_target)?:/m);
+  });
+
+  it('documents the live action boundary and exercises timeout and post-migrate trap', () => {
+    const policy = readFileSync(path.join(root, 'SECURITY.md'), 'utf8');
+    expect(policy).not.toContain('The current GitHub Action is disabled.');
+    const source = workflow();
+    expect(source).toContain('UPSTREAMFIX_POST_MIGRATE_TRAP:');
+    const action = readFileSync(path.join(root, 'action.yml'), 'utf8');
+    expect(action).toContain('GIT_AUTHOR_NAME:');
+    expect(action).toContain('UPSTREAMFIX_CONTAINER_VERIFY:');
+    const prCheck = readFileSync(path.join(root, '.github/workflows/client-migrations-pr.yml'), 'utf8');
+    expect(prCheck).toContain('test/verify.test.ts');
+    const publisher = readFileSync(path.join(root, 'src/action/publish-cli.ts'), 'utf8');
+    expect(publisher).toContain('/dispatches');
   });
 
   it('sets an unprivileged Git author for the read-only migration job', () => {

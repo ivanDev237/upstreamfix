@@ -12,8 +12,10 @@ const token = process.env.GITHUB_TOKEN;
 const repository = process.env.UPSTREAMFIX_REPOSITORY;
 const artifactRoot = process.env.UPSTREAMFIX_INPUT_ROOT;
 const expectedBase = process.env.UPSTREAMFIX_BASE_SHA;
+const clientCiWorkflow = process.env.UPSTREAMFIX_CLIENT_CI_WORKFLOW?.trim();
 if (!token || !repository || !artifactRoot || !expectedBase) throw new Error('Missing trusted publication environment.');
 if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || !/^[0-9a-f]{40}$/.test(expectedBase)) throw new Error('Invalid repository or base commit.');
+if (clientCiWorkflow && !/^[A-Za-z0-9_.-]+\.ya?ml$/.test(clientCiWorkflow)) throw new Error('Invalid client CI workflow filename.');
 const [owner] = repository.split('/');
 const apiRoot = `https://api.github.com/repos/${repository}`;
 const gitUrl = `https://github.com/${repository}.git`;
@@ -35,7 +37,17 @@ async function request<T>(suffix: string, method = 'GET', body?: unknown): Promi
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   if (!response.ok) throw new Error(`GitHub API ${method} ${suffix} failed with HTTP ${response.status}.`);
+  if (response.status === 204) return undefined as T;
   return await response.json() as T;
+}
+
+async function dispatchClientChecks(branch: string): Promise<void> {
+  if (!clientCiWorkflow) return;
+  try {
+    await request(`/actions/workflows/${encodeURIComponent(clientCiWorkflow)}/dispatches`, 'POST', { ref: branch });
+  } catch (error) {
+    console.warn(`Migration PR exists, but client CI dispatch failed: ${String(error)}`);
+  }
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
@@ -136,9 +148,11 @@ for (const proposal of proposals) {
           catch (error) { console.warn(`PR ${opened.number} was created, but reviewer assignment failed: ${String(error)}`); }
         }
         if (item.labels.length) await request(`/issues/${opened.number}/labels`, 'POST', { labels: item.labels });
+        await dispatchClientChecks(item.branch);
       },
       updatePullRequest: async (number, body, item) => {
         await request(`/pulls/${number}`, 'PATCH', { body, title: `UpstreamFix: migrate ${item.migration}` });
+        await dispatchClientChecks(item.branch);
       },
       closePullRequest: async (number) => { await request(`/pulls/${number}`, 'PATCH', { state: 'closed' }); },
       upsertIssue: async (body, item) => {

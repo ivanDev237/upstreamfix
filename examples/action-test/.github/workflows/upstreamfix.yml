@@ -9,9 +9,11 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  actions: write
 
 jobs:
   upstreamfix:
     uses: ivanDev237/upstreamfix/.github/workflows/client-migrations.yml@6d4221f4c8f459cc19c6ab573ab49c2857697ea1
     with:
       upstreamfix_sha: 6d4221f4c8f459cc19c6ab573ab49c2857697ea1
+      ci_workflow: ci.yml

@@ -35,4 +35,4 @@ jobs:
       - name: Install without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Test client Action safety and publication decisions
-        run: npx vitest run test/action-config.test.ts test/action-migrate.test.ts test/action-publish.test.ts test/action-workflow.test.ts
+        run: npx vitest run --maxWorkers=1 test/action-config.test.ts test/action-migrate.test.ts test/action-publish.test.ts test/action-workflow.test.ts test/verify.test.ts

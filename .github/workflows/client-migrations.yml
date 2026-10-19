@@ -7,11 +7,19 @@ on:
         description: Reviewed 40-character commit of ivanDev237/upstreamfix
         required: true
         type: string
+      ci_workflow:
+        description: Optional client workflow filename to dispatch on the verified migration branch
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       upstreamfix_sha:
         description: Reviewed 40-character commit of ivanDev237/upstreamfix
         required: true
+        type: string
+      ci_workflow:
+        description: Optional client workflow filename to dispatch on the verified migration branch
+        required: false
         type: string
 
 permissions:
@@ -74,6 +82,8 @@ jobs:
           GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: node tool/dist/action/migrate-cli.js
       - name: Upload bounded migration artifact
+        env:
+          UPSTREAMFIX_POST_MIGRATE_TRAP: ${{ github.run_id }}-${{ github.run_attempt }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: upstreamfix-proposals
@@ -90,6 +100,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+      actions: write
     steps:
       - name: Validate immutable source reference
         shell: bash
@@ -129,4 +140,5 @@ jobs:
           UPSTREAMFIX_INPUT_ROOT: ${{ runner.temp }}/upstreamfix-input
           UPSTREAMFIX_REPOSITORY: ${{ github.repository }}
           UPSTREAMFIX_BASE_SHA: ${{ github.sha }}
+          UPSTREAMFIX_CLIENT_CI_WORKFLOW: ${{ inputs.ci_workflow }}
         run: node tool/dist/action/publish-cli.js
