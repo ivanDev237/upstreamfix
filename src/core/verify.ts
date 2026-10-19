@@ -317,18 +317,7 @@ async function installCommand(
   directory: string,
   pkg: PackageJson,
 ): Promise<{ command: string; args: string[]; cwd: string }> {
-  const lockRoot = await findLockfileRoot(root, directory);
-  const lockfile = await findLockfileName(lockRoot);
-  const rootPackage = await readPackageJson(lockRoot).catch(() => undefined);
-  const declared: unknown = pkg.packageManager ?? rootPackage?.packageManager;
-  let manager: string;
-  if (declared === undefined) manager = lockfile === 'pnpm-lock.yaml' ? 'pnpm' : lockfile === 'yarn.lock' ? 'yarn' : 'npm';
-  else {
-    if (typeof declared !== 'string' || !/^(npm|pnpm|yarn)@\d+\.\d+\.\d+(?:\+sha\d+\.[0-9a-f]+)?$/.test(declared)) {
-      throw new Error(`Unsupported or unsafe packageManager field: ${String(declared)}. Use an exact npm, pnpm, or Yarn version.`);
-    }
-    manager = declared.slice(0, declared.indexOf('@'));
-  }
+  const { lockRoot, manager, declared } = await detectPackageManager(root, directory, pkg);
   if (manager === 'pnpm') return { command: 'pnpm', args: ['install', '--ignore-scripts', '--no-frozen-lockfile'], cwd: lockRoot };
   if (manager === 'yarn') {
     const version = Number(/^yarn@(\d+)/.exec(declared ?? '')?.[1] ?? 1);
@@ -365,14 +354,24 @@ async function findLockfileName(directory: string): Promise<string | undefined> 
 }
 
 async function scriptCommand(root: string, directory: string, pkg: PackageJson, script: string): Promise<{ command: string; args: string[] }> {
-  const lockRoot = await findLockfileRoot(root, directory);
-  const lockfile = await findLockfileName(lockRoot);
-  const rootPackage = await readPackageJson(lockRoot).catch(() => undefined);
-  const manager = pkg.packageManager?.split('@')[0] ?? rootPackage?.packageManager?.split('@')[0]
-    ?? (lockfile === 'pnpm-lock.yaml' ? 'pnpm' : lockfile === 'yarn.lock' ? 'yarn' : 'npm');
+  const { manager } = await detectPackageManager(root, directory, pkg);
   if (manager === 'pnpm') return { command: 'pnpm', args: ['run', script] };
   if (manager === 'yarn') return { command: 'yarn', args: ['run', script] };
   return { command: 'npm', args: ['--ignore-scripts', 'run', script] };
+}
+
+async function detectPackageManager(root: string, directory: string, pkg: PackageJson): Promise<{ lockRoot: string; manager: 'npm' | 'pnpm' | 'yarn'; declared?: string }> {
+  const lockRoot = await findLockfileRoot(root, directory);
+  const lockfile = await findLockfileName(lockRoot);
+  const rootPackage = await readPackageJson(lockRoot).catch(() => undefined);
+  const declared: unknown = pkg.packageManager ?? rootPackage?.packageManager;
+  if (declared !== undefined && (typeof declared !== 'string' || !/^(npm|pnpm|yarn)@\d+\.\d+\.\d+(?:\+sha\d+\.[0-9a-f]+)?$/.test(declared))) {
+    throw new Error(`Unsupported or unsafe packageManager field: ${String(declared)}. Use an exact npm, pnpm, or Yarn version.`);
+  }
+  const manager = declared === undefined
+    ? lockfile === 'pnpm-lock.yaml' ? 'pnpm' : lockfile === 'yarn.lock' ? 'yarn' : 'npm'
+    : declared.slice(0, declared.indexOf('@')) as 'npm' | 'pnpm' | 'yarn';
+  return { lockRoot, manager, ...(typeof declared === 'string' ? { declared } : {}) };
 }
 
 async function runCheck(

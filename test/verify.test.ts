@@ -197,6 +197,20 @@ describe('migration verification', () => {
     expect(commandRan).toBe(false);
   });
 
+  it('uses the same validated package manager for installation and scripts', async () => {
+    const cwd = await makeProject({ typecheck: 'echo types', test: 'echo tests' }, 'pnpm@10.0.0');
+    const commands: string[] = [];
+    const result = await verifyProposedMigration(cwd, [diff], {
+      pnpmCacheRoot: path.join(cwd, 'private-pnpm-cache'),
+      execute: async (command) => {
+        commands.push(command);
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('passed');
+    expect(commands).toEqual(['pnpm', 'pnpm', 'pnpm']);
+  });
+
   it('applies structured migration contents to filenames containing tabs', async () => {
     const cwd = await makeProject();
     const oddPath = path.join(cwd, 'src', 'x\ty.ts');
