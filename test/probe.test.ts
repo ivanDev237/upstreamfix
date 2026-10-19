@@ -1,5 +1,5 @@
 import { execFile as callback } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -17,13 +17,14 @@ it('reports a precise new Stripe diagnostic while preserving the original lockfi
     await writeFile(path.join(cwd, 'package-lock.json'), lock);
     await writeFile(path.join(cwd, 'tsconfig.json'), '{}');
     await writeFile(path.join(cwd, 'pay.ts'), 'const payment_method_types = true;');
+    await chmod(path.join(cwd, 'pay.ts'), 0o600);
     await execFile('git', ['init', '-q'], { cwd });
     await execFile('git', ['add', '.'], { cwd });
     let typechecks = 0;
     const signalHandlersBefore = process.listenerCount('SIGINT');
     const result = await probeProject(cwd, 'stripe@23.0.0', {
       confirmed: true,
-      execute: async (phase, _command, args, _directory, env) => {
+      execute: async (phase, _command, args, directory, env) => {
         expect(process.listenerCount('SIGINT')).toBeGreaterThan(signalHandlersBefore);
         expect(env.GITHUB_TOKEN).toBeUndefined();
         if (phase.endsWith('typecheck')) {
@@ -31,6 +32,9 @@ it('reports a precise new Stripe diagnostic while preserving the original lockfi
           expect(args).toContain('--network=none');
           expect(args).toContain('--init');
           expect(args).toContain('--name');
+          expect(args).toContain('--mount');
+          expect(args).not.toContain('-v');
+          expect((await stat(path.join(directory, 'pay.ts'))).mode & 0o444).toBe(0o444);
           typechecks++;
           return { code: 2, output: typechecks === 1
             ? 'src/pay.ts(2,1): error TS2322: preexisting'
@@ -51,6 +55,7 @@ it('reports a precise new Stripe diagnostic while preserving the original lockfi
 
 it('refuses non-exact targets and requires confirmation before downloads', async () => {
   await expect(probeProject('/tmp', 'stripe@^23')).rejects.toThrow('exact');
+  await expect(probeProject('/tmp', '-stripe@23.0.0')).rejects.toThrow('Invalid npm package name');
   const preview = await probeProject('/tmp', 'stripe@23.0.0');
   expect(preview.status).toBe('confirmation-required');
   expect(preview.estimatedDownload).toContain('MB');

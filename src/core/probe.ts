@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { newTypeScriptDiagnostics, parseTypeScriptDiagnostics, type TypeScriptDiagnostic } from './diagnostic-diff.js';
@@ -30,7 +30,7 @@ function parseTarget(target: string): { packageName: string; version: string } {
   if (at <= 0) throw new Error('Probe target must be a package with an exact version, such as stripe@23.0.0.');
   const packageName = target.slice(0, at);
   const version = target.slice(at + 1);
-  if (!/^(?:@[a-z0-9_.-]+\/)?[a-z0-9_.-]+$/i.test(packageName)) throw new Error('Invalid npm package name.');
+  if (!/^(?:@[a-z0-9_][a-z0-9_.-]*\/)?[a-z0-9_][a-z0-9_.-]*$/i.test(packageName)) throw new Error('Invalid npm package name.');
   validateExactVersion(version);
   return { packageName, version };
 }
@@ -84,21 +84,27 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
     }
     const currentVersion = lockedVersion;
     const env = sanitizedEnvironment(home);
+    const dockerEnv = { ...env };
+    for (const key of ['DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH']) {
+      if (process.env[key]) dockerEnv[key] = process.env[key];
+    }
     const containerName = `upstreamfix-probe-${process.pid}-${randomUUID()}`;
     const run = async (phase: ProbePhase, command: string, args: string[]) => {
-      const result = await execute(phase, command, args, project, env);
+      const result = await execute(phase, command, args, project, command === 'docker' ? dockerEnv : env);
       if (command === 'docker' && result.code !== 0) {
-        await execute(phase, 'docker', ['rm', '-f', containerName], project, env).catch(() => undefined);
+        await execute(phase, 'docker', ['rm', '-f', containerName], project, dockerEnv).catch(() => undefined);
       }
       return result;
     };
     const baselineInstall = await run('baseline-install', 'npm', ['ci', '--ignore-scripts', '--no-audit', '--no-fund', '--prefer-offline']);
     if (baselineInstall.code !== 0) return { ...base, currentVersion, status: 'unavailable', note: `Baseline installation failed: ${baselineInstall.output.slice(-2000)}` };
 
+    await makeDockerReadable(project);
+
     const typeArgs = [
       'run', '--rm', '--init', '--name', containerName, '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
       '--memory=1536m', '--memory-swap=1536m', '--pids-limit=128', '--user=65534:65534',
-      '--tmpfs=/tmp:rw,nosuid,nodev,size=64m', '-v', `${project}:/workspace:ro`, '-w', '/workspace',
+      '--tmpfs=/tmp:rw,nosuid,nodev,size=64m', '--mount', `type=bind,source=${project},target=/workspace,readonly`, '-w', '/workspace',
       nodeImage, 'node', '/workspace/node_modules/typescript/bin/tsc', '--noEmit', '--pretty', 'false',
     ];
     const before = await run('baseline-typecheck', 'docker', typeArgs);
@@ -109,6 +115,7 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
 
     const targetInstall = await run('target-install', 'npm', ['install', `${packageName}@${version}`, '--save-exact', '--ignore-scripts', '--no-audit', '--no-fund', '--prefer-offline']);
     if (targetInstall.code !== 0) return { ...base, currentVersion, status: 'unavailable', preexisting: baselineDiagnostics, note: `Target installation failed: ${targetInstall.output.slice(-2000)}` };
+    await makeDockerReadable(project);
     const after = await run('target-typecheck', 'docker', typeArgs);
     const afterDiagnostics = parseTypeScriptDiagnostics(after.output);
     if (after.code !== 0 && afterDiagnostics.length === 0) {
@@ -131,5 +138,17 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
   } finally {
     unregisterCleanup();
     await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function makeDockerReadable(directory: string): Promise<void> {
+  await chmod(directory, 0o755);
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (entry.name === '.git') continue;
+    const absolute = path.join(directory, entry.name);
+    const info = await lstat(absolute);
+    if (info.isSymbolicLink()) continue;
+    if (info.isDirectory()) await makeDockerReadable(absolute);
+    else if (info.isFile()) await chmod(absolute, info.mode | 0o444);
   }
 }
