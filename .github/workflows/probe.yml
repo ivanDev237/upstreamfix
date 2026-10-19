@@ -54,7 +54,10 @@ jobs:
           PROBE_REPORT: ${{ runner.temp }}/signet-probe.md
         run: |
           set -o pipefail
-          node tool/dist/cli.js probe stripe@23.0.0 -C signet --yes > "$RUNNER_TEMP/probe-output.txt"
+          set +e
+          node tool/dist/cli.js probe stripe@23.0.0 -C signet --yes > "$RUNNER_TEMP/probe-output.txt" 2>&1
+          probe_exit=$?
+          set -e
           tail -n +2 "$RUNNER_TEMP/probe-output.txt" > "$PROBE_JSON"
           node --input-type=module <<'NODE'
           import { readFileSync, writeFileSync } from 'node:fs';
@@ -69,8 +72,12 @@ jobs:
             finding ? `Candidate: ${finding.file}:${finding.line} — ${finding.message}` : 'No payment_method_types candidate found.', '',
             'A new diagnostic locates a possible incompatibility; it does not prove causality or justify an automatic rewrite.', ''];
           writeFileSync(process.env.PROBE_REPORT, report.join('\n'));
-          if (result.status !== 'available' || !finding) process.exitCode = 1;
+          if (result.status !== 'available' || !finding) {
+            console.error(`Probe unavailable or missing candidate: ${result.note ?? 'no further detail'}`);
+            process.exitCode = 1;
+          }
           NODE
+          test "$probe_exit" -eq 0
       - name: Upload full and readable reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -79,5 +86,6 @@ jobs:
           path: |
             ${{ runner.temp }}/signet-probe.json
             ${{ runner.temp }}/signet-probe.md
+            ${{ runner.temp }}/probe-output.txt
           if-no-files-found: warn
           retention-days: 30
