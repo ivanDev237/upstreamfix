@@ -87,6 +87,38 @@ function make(obj: ClientOptions | OpenAI) {
     expect(outcome.fileUpdates?.[0]?.contents).toContain('openAi.chat.completions.stream(');
   });
 
+  it('rewrites a parameter explicitly typed as the imported OpenAI client', () => {
+    const outcome = migrate("import type OpenAI from 'openai';\nfunction run(client: OpenAI) { return client.beta.chat.completions.parse({model:'gpt-4o',messages:[]}); }\n");
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('client.chat.completions.parse(');
+  });
+
+  it('withholds the removed fileFromPath export instead of moving it to an invalid module', () => {
+    const outcome = migrate("import { fileFromPath } from 'openai/uploads';\nfileFromPath('/tmp/x');\n");
+    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual.some((item) => item.reason.includes('fileFromPath'))).toBe(true);
+  });
+
+  it('flags changed path calls, destructured subclients and aliased runner methods', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+const client = new OpenAI();
+client.beta.threads.runs.submitToolOutputsStream('run', 'thread', {tool_outputs: []});
+const { vectorStores } = client;
+const runner = client.chat.completions.runTools({tools: []});
+const finish = runner.finalFunctionCall;
+`);
+    expect(outcome.fileUpdates).toEqual([]);
+    const reasons = outcome.manual.map((item) => item.reason).join(' ');
+    expect(reasons).toMatch(/named path|path parameters/);
+    expect(reasons).toContain('subclient');
+    expect(reasons).toContain('finalFunctionToolCall');
+  });
+  it('withholds spread delete arguments whose v5 path shape cannot be proven', () => {
+    const outcome = migrate("import OpenAI from 'openai';\nconst client = new OpenAI();\nclient.vectorStores.files.del(...args);\n");
+    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual.some((item) => item.reason.includes('path parameters'))).toBe(true);
+  });
+
   it('reports semantic changes without guessing a rewrite', () => {
     const outcome = migrate(`import OpenAI from 'openai';
 const client = new OpenAI({httpAgent: agent});

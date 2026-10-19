@@ -9,6 +9,7 @@ const CHANGED_PATH_METHODS = new Set([
   'vectorStores.files.content', 'vectorStores.fileBatches.retrieve', 'vectorStores.fileBatches.cancel',
   'vectorStores.fileBatches.listFiles', 'beta.threads.runs.retrieve', 'beta.threads.runs.update',
   'beta.threads.runs.cancel', 'beta.threads.runs.submitToolOutputs', 'beta.threads.runs.steps.retrieve',
+  'beta.threads.runs.submitToolOutputsStream',
   'beta.threads.runs.steps.list', 'beta.threads.messages.retrieve', 'beta.threads.messages.update',
   'beta.threads.messages.delete', 'evals.runs.retrieve', 'evals.runs.delete',
   'evals.runs.cancel', 'evals.runs.outputItems.retrieve', 'evals.runs.outputItems.list',
@@ -70,6 +71,10 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
         if (named.getName() === 'fileFromPath') addManual(result, file, named, 'OpenAI v5 removed fileFromPath; choose the supported upload helper manually.');
       }
     }
+    if (declaration.getModuleSpecifierValue() === 'openai/uploads'
+      && declaration.getNamedImports().some((named) => named.getName() === 'fileFromPath')) {
+      addManual(result, file, declaration, 'openai/core/uploads does not export fileFromPath; choose an upload helper manually.');
+    }
   }
   for (const declaration of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const initializer = declaration.getInitializer();
@@ -85,6 +90,12 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     return;
   }
   const clients = new Set<MorphSymbol>();
+  for (const parameter of file.getDescendantsOfKind(SyntaxKind.Parameter)) {
+    if (imported.has(parameter.getTypeNode()?.getText() ?? '')) {
+      const symbol = parameter.getNameNode().getSymbol();
+      if (symbol) clients.add(symbol);
+    }
+  }
   for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const initializer = variable.getInitializer();
     if (initializer && Node.isNewExpression(initializer) && imported.has(initializer.getExpression().getText())) {
@@ -121,6 +132,16 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
   }
   for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const initializer = variable.getInitializer();
+    if (initializer && Node.isIdentifier(initializer) && initializer.getSymbol() && clients.has(initializer.getSymbol()!)
+      && Node.isObjectBindingPattern(variable.getNameNode())) {
+      addManual(result, file, variable, 'A destructured OpenAI subclient needs manual review of its v5 methods.');
+    }
+    if (initializer && Node.isPropertyAccessExpression(initializer)) {
+      const root = rootIdentifier(initializer);
+      if (root?.getSymbol() && runners.has(root.getSymbol()!) && initializer.getName().startsWith('finalFunctionCall')) {
+        addManual(result, file, variable, `OpenAI v5 renames aliased ${initializer.getName()} to ${initializer.getName().replace('FunctionCall', 'FunctionToolCall')}; review the returned value manually.`);
+      }
+    }
     if (!initializer || !Node.isPropertyAccessExpression(initializer)) continue;
     const root = rootIdentifier(initializer);
     if (root?.getSymbol() && clients.has(root.getSymbol()!) && pathParts(initializer).length >= 2) {
@@ -165,9 +186,9 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       addManual(result, file, call, 'OpenAI v5 removes runFunctions; migrate function definitions and handling to runTools manually.');
     } else if (method === 'beta.threads.runs.poll' || method === 'beta.threads.runs.submitToolOutputsAndPoll') {
       addManual(result, file, call, 'OpenAI v5 changes this run helper; review its replacement and arguments manually.');
-    } else if (DELETED_METHODS.has(method) && call.getArguments().length >= 2) {
+    } else if (DELETED_METHODS.has(method) && (call.getArguments().length >= 2 || call.getArguments().some(Node.isSpreadElement))) {
       addManual(result, file, call, 'OpenAI v5 changes path parameters for this delete call; review the argument names and order in the official guide.');
-    } else if (CHANGED_PATH_METHODS.has(method) && call.getArguments().length >= 2) {
+    } else if (CHANGED_PATH_METHODS.has(method) && (call.getArguments().length >= 2 || call.getArguments().some(Node.isSpreadElement))) {
       addManual(result, file, call, 'OpenAI v5 uses named path parameters here; check argument names and order in the official guide.');
     } else if (DELETED_METHODS.has(method)) {
       addEdit(edits, file, expression.getNameNode(), 'delete', 'del-to-delete');
