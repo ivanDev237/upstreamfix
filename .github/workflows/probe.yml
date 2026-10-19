@@ -37,6 +37,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  compiler-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Exercise probe compiler flags on ordinary and composite projects
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ts4" "$RUNNER_TEMP/ts5" "$RUNNER_TEMP/simple" "$RUNNER_TEMP/composite"
+          npm install --prefix "$RUNNER_TEMP/ts4" --ignore-scripts --no-package-lock --no-audit --no-fund typescript@4.9.5
+          npm install --prefix "$RUNNER_TEMP/ts5" --ignore-scripts --no-package-lock --no-audit --no-fund typescript@5.9.3
+          printf 'const value: string = "ok";\n' > "$RUNNER_TEMP/simple/index.ts"
+          cp "$RUNNER_TEMP/simple/index.ts" "$RUNNER_TEMP/composite/index.ts"
+          printf '{"compilerOptions":{"strict":true}}\n' > "$RUNNER_TEMP/simple/tsconfig.json"
+          printf '{"compilerOptions":{"strict":true,"composite":true}}\n' > "$RUNNER_TEMP/composite/tsconfig.json"
+          for major in 4 5; do
+            for kind in simple composite; do
+              node "$RUNNER_TEMP/ts$major/node_modules/typescript/bin/tsc" \
+                --project "$RUNNER_TEMP/$kind/tsconfig.json" --noEmit --pretty false \
+                --incremental --tsBuildInfoFile "$RUNNER_TEMP/$kind-$major.tsbuildinfo"
+              echo "TypeScript $major $kind: available"
+            done
+          done
   signet:
     runs-on: ubuntu-latest
     timeout-minutes: 45
