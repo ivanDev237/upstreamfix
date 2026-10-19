@@ -1,0 +1,28 @@
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, expect, it } from 'vitest';
+import { watchPackages } from '../src/core/watch.js';
+
+const roots: string[] = [];
+afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
+
+it('records a major upgrade while ignoring a minor release', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-watch-'));
+  roots.push(root);
+  const state = path.join(root, 'watch.json');
+  await writeFile(state, JSON.stringify({ versions: { stripe: '22.1.0', 'firebase-admin': '13.9.0' }, events: [] }));
+  const result = await watchPackages(state, ['stripe', 'firebase-admin'], async (name) => name === 'stripe' ? '22.5.0' : '14.0.0');
+  expect(result.events).toEqual([{ package: 'firebase-admin', from: '13.9.0', to: '14.0.0' }]);
+  expect(JSON.parse(await readFile(state, 'utf8')).versions.stripe).toBe('22.5.0');
+});
+
+it('preserves the previous state when one registry request fails', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-watch-'));
+  roots.push(root);
+  const state = path.join(root, 'watch.json');
+  const original = JSON.stringify({ versions: { stripe: '22.1.0' }, events: [] });
+  await writeFile(state, original);
+  await expect(watchPackages(state, ['stripe'], async () => { throw new Error('offline'); })).rejects.toThrow('offline');
+  expect(await readFile(state, 'utf8')).toBe(original);
+});

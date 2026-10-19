@@ -9,6 +9,7 @@ import { verifyProposedMigration } from './core/verify.js';
 import { writeMigrationOnBranch } from './core/write-branch.js';
 import { assertWritesEnabled } from './core/safety.js';
 import { findApplicableMigrations, migrations } from './migrations/index.js';
+import { watchPackages } from './core/watch.js';
 
 function existingMigration(value: string): string {
   if (!migrations.some((migration) => migration.id === value)) {
@@ -24,6 +25,15 @@ export function createProgram(): Command {
     .description('Prepare and review automated code migrations for breaking SDK changes.')
     .showHelpAfterError()
     .exitOverride();
+
+  program
+    .command('watch')
+    .description('Check npm for new major versions of catalog packages and update a JSON state file.')
+    .requiredOption('--state <file>', 'JSON state file to update atomically')
+    .action(async (options: { state: string }) => {
+      const result = await watchPackages(options.state, migrations.map((migration) => migration.packageName));
+      console.log(result.events.length ? JSON.stringify(result.events, null, 2) : 'No new major versions since the previous check.');
+    });
 
   program
     .command('list')
