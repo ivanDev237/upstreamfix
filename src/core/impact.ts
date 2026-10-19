@@ -71,7 +71,8 @@ export async function analyzeImpact(cwd: string, lookup: (packageName: string) =
     const automatic = outcome.changes.length;
     const manual = outcome.manual.length;
     const affected = automatic + manual;
-    results.push({ package: packageName, declaredVersion, latestVersion, latestMajor, migration: migration.id, affected, automatic, manual, automaticShare: affected ? automatic / affected : null, ...(warnings.length ? { note: warnings.join('; ') } : {}) });
+    results.push({ package: packageName, declaredVersion, latestVersion, latestMajor, migration: migration.id, affected, automatic, manual, automaticShare: affected ? automatic / affected : null,
+      ...((migration.experimental || warnings.length) ? { note: [migration.experimental ? 'Experimental migration; explicit opt-in and verification are required.' : '', ...warnings].filter(Boolean).join(' ') } : {}) });
   }
   return results;
 }

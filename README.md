@@ -6,7 +6,7 @@
 
 ## Demo
 
-[View the illustrative terminal walkthrough](https://github.com/ivanDev237/upstreamfix/blob/main/docs/upstreamfix-demo.gif) of listing, scanning, and previewing a migration.
+[View the Firebase Admin migration walkthrough](https://github.com/ivanDev237/upstreamfix/blob/main/docs/upstreamfix-demo.gif), composed from real CLI preview output on a local example project. It shows the proposed diff; no project files are written.
 
 The frames show the intended command flow. Output varies with the project and migration findings.
 
@@ -26,7 +26,7 @@ The report path is explicit; preview commands do not create report files unless 
 
 Copy the [client workflow example](examples/action-test/.github/workflows/upstreamfix.yml) into your repository and pin both references to the same reviewed UpstreamFix commit SHA. The reusable workflow runs on a schedule or by manual dispatch. Its first job checks out your code without stored credentials, uses only `contents: read`, prepares a verified migration in a temporary copy, and uploads a Git bundle and redacted report. Its second job downloads and validates that bundle, then opens or updates a pull request. It opens an issue when manual review is needed and never merges a PR.
 
-An optional `.upstreamfix.yml` supports `frequency` (`daily`, `weekly`, `manual`), `ignore`, `exclude`, `verify`, `reviewers`, and `labels`. Each list uses one `  - value` line per item. Custom `verify` commands run only in the first job's isolated verification copy. The config cannot increase permissions or turn off verification. A repository with no configured checks will not receive an automatic migration PR.
+An optional `.upstreamfix.yml` supports `frequency` (`daily`, `weekly`, `manual`), `ignore`, `exclude`, `verify`, `reviewers`, `labels`, and `experimental`. Each list uses one `  - value` line per item. Custom `verify` commands run only in the first job's isolated verification copy. The config cannot increase permissions or turn off verification. A repository with no configured checks will not receive an automatic migration PR. To try OpenAI v5 in the Action, add `experimental:` and put `  - openai@5` on the next line of the reviewed config; it is excluded by default.
 
 Pull requests created with the default `GITHUB_TOKEN` do not trigger the repository's normal `pull_request` workflows. Run your CI manually on the proposed branch, or adapt the publication job to use a narrowly scoped GitHub App token or fine-grained PAT supplied by your organization. Review the report, the official migration guide, and the PR diff before merging.
 
@@ -37,9 +37,9 @@ Pull requests created with the default `GITHUB_TOKEN` do not trigger the reposit
 | `firebase-admin@14` | Firebase Admin SDK v13 namespaced API to v14 modular API | Benchmarked on 12 valid public repositories; 316 of 340 detected change groups migrated automatically. Manual findings and runtime prerequisites still require review. |
 | `stripe@22` | Stripe Node SDK v21 to v22 | Benchmarked on 6 installable public repositories; payment-sensitive cases remain manual. See [Stripe's v22 guide](https://github.com/stripe/stripe-node/wiki/Migration-guide-for-v22). |
 | `stripe@23` | Stripe Node SDK v22 to v23 | Benchmarked on 4 public repositories; a removed payment parameter was identified for manual review. See [Stripe's v23 guide](https://github.com/stripe/stripe-node/wiki/Migration-guide-for-v23). |
-| `openai@5` | OpenAI Node SDK v4 to v5 | Conservative changes for renamed methods, beta chat paths, and moved imports. Review runtime requirements and semantic changes against the [official v5 guide](https://github.com/openai/openai-node/blob/v5.0.0/MIGRATION.md). |
+| `openai@5` | OpenAI Node SDK v4 to v5 | **Experimental.** The seven-repository public benchmark exercised `del`, `beta.chat`, and a moved import, but automatic coverage was 4/12 detected items and two projects gained TypeScript failures after the exact SDK upgrade. Explicit opt-in and review are required; see the [official v5 guide](https://github.com/openai/openai-node/blob/v5.0.0/MIGRATION.md). |
 
-Run `upstreamfix list` for the catalog included in the installed version. Run `upstreamfix scan --cwd <project>` to select migrations from package versions declared in root or nested `package.json` files.
+Run `upstreamfix list` for the catalog included in the installed version. Run `upstreamfix scan --cwd <project>` to select stable migrations from package versions declared in root or nested `package.json` files. Use `--include-experimental` on `scan` or `--experimental` on `migrate openai@5` only after reviewing the current limits.
 
 ## Detecting SDK changes
 
@@ -75,7 +75,7 @@ After reviewing a preview, `--write` verifies the migration in an isolated Git w
 
 Firebase Admin v14 requires Node.js 22 or newer. If your project omits `engines.node`, the preview explains why the dependency cannot yet be upgraded. Once you have confirmed your deployment runtime, add `"engines": { "node": ">=22" }` yourself or pass `--node-runtime 22` to `migrate firebase-admin@14` (including with `--write`). That option proposes the Node range alongside the SDK update. It never overrides an existing incompatible `engines.node` range.
 
-OpenAI SDK v5 requires Node.js 20 or newer. After confirming your deployment runtime, pass `--node-runtime 20` to `migrate openai@5` to propose `"engines": { "node": ">=20" }` when the range is absent. An existing incompatible range must be reviewed and changed by you; the option does not override it. `scan` accepts the same option and applies it only to `openai@5`.
+OpenAI SDK v5 requires Node.js 20 or newer. This migration remains experimental because a real-project upgrade exposed missing Node and Web types, even when a source rewrite was mechanical. After confirming your deployment runtime, pass `--experimental --node-runtime 20` to `migrate openai@5` to propose `"engines": { "node": ">=20" }` when the range is absent. An existing incompatible range must be reviewed and changed by you; the option does not override it. `scan --include-experimental` accepts the same runtime option and applies it only to `openai@5`. A failed verification blocks `--write`.
 
 ## Contributing
 

@@ -295,6 +295,7 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
 
 export const openaiV5: Migration = {
   id: 'openai@5', packageName: 'openai', fromMajor: 4, toMajor: 5,
+  experimental: true,
   releasedAt: '2025-05-29', title: 'openai v4 → v5', guideUrl: GUIDE,
   rules: ['del-to-delete', 'beta-chat', 'moved-import'],
   transform(project: Project): MigrationResult {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Project, ModuleKind, ScriptTarget } from 'ts-morph';
 import { openaiV5 } from '../src/migrations/openai-v5/index.js';
-import { migrations } from '../src/migrations/index.js';
+import { findApplicableMigrations, migrations } from '../src/migrations/index.js';
 import { readFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -16,6 +16,15 @@ function migrate(source: string) {
 }
 
 describe('openai v4 to v5', () => {
+  it('P3.4 requires explicit selection before discovering an experimental OpenAI migration', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-optin-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.28.0"}}');
+      expect(openaiV5.experimental).toBe(true);
+      expect((await findApplicableMigrations(cwd)).map((item) => item.id)).not.toContain('openai@5');
+      expect((await findApplicableMigrations(cwd, { includeExperimental: true })).map((item) => item.id)).toContain('openai@5');
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
   it('has five pinned and reviewed public repositories for the real benchmark', () => {
     const repos = JSON.parse(readFileSync(new URL('../benchmark/openai-5-repos.json', import.meta.url), 'utf8')) as BenchRepo[];
     expect(repos).toHaveLength(7);

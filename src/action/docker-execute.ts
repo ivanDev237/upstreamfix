@@ -22,7 +22,7 @@ export function buildClientDockerArgs(command: string, args: string[], cwd: stri
     ? [command, ...args]
     : args;
   return [
-    'run', '--rm', '--init', '--name', name,
+    'run', '--rm', '--pull=never', '--init', '--name', name,
     '--network', allowInstallNetwork ? 'bridge' : 'none',
     '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
     '--pids-limit=256', '--memory=2g', '--memory-swap=2g',

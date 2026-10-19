@@ -11,6 +11,21 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('T36 renders an already escaped migration report as Markdown exactly once', async () => {
+    let body = '';
+    const publisher: ProposalPublisher = {
+      findPullRequest: async () => undefined, pushBranch: async () => undefined,
+      openPullRequest: async (value) => { body = value; }, updatePullRequest: async () => undefined,
+      closePullRequest: async () => undefined, upsertIssue: async () => undefined,
+      closeIssue: async () => undefined,
+    };
+    await reconcileProposal({ ...proposal, report: '## Verification\n\n- Result: **passed**\n- Note: &gt; check \\(\\.\\)\n\n```diff\n+ getFirestore()\n```' }, publisher);
+    expect(body).toContain('> - Result: **passed**');
+    expect(body).toContain('&gt; check');
+    expect(body).not.toContain('&amp;gt;');
+    expect(body).not.toContain('&#42;');
+    expect(body).not.toContain('<pre>');
+  });
   it('T35 searches managed issues past the tenth GitHub page', async () => {
     const target = { number: 1101, title: 'UpstreamFix: manual firebase-admin@14', body: '<!-- upstreamfix:manual:firebase-admin@14 -->', user: { login: 'github-actions[bot]' } };
     const page = Array.from({ length: 100 }, (_, index) => ({ number: index, title: 'unrelated', body: '', user: { login: 'other' } }));
@@ -42,7 +57,7 @@ describe('Action publication boundary', () => {
     };
     await reconcileProposal({ ...proposal, report: '😀'.repeat(50_000) }, publisher, 'https://github.com/example/actions/runs/1#artifacts');
     expect(body.length).toBeLessThanOrEqual(59_000);
-    expect(body).toContain('</pre>\n</details>');
+    expect(body).toContain('\n</details>');
     expect(body).toContain('never merges automatically');
     expect(body).toContain('https://github.com/example/actions/runs/1#artifacts');
     expect(body).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
@@ -139,7 +154,8 @@ describe('Action publication boundary', () => {
     await reconcileProposal({ ...proposal, status: 'manual', commit: undefined, files: [], verification: 'failed', report: 'Verification: **passed**\n@maintainer <h1>safe</h1>' }, publisher);
     const body = vi.mocked(publisher.upsertIssue).mock.calls[0]?.[0] ?? '';
     expect(body).toContain('Verification: **failed**');
-    expect(body).not.toContain('Verification: **passed**');
+    expect(body).not.toMatch(/^Verification: \*\*passed\*\*$/m);
+    expect(body).toContain('> Verification: **passed**');
     expect(body).not.toContain('@maintainer');
     expect(body).not.toContain('<h1>');
   });

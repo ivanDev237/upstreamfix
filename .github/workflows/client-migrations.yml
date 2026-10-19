@@ -70,6 +70,8 @@ jobs:
       - name: Install reviewed tool without lifecycle scripts
         working-directory: tool
         run: npm ci --ignore-scripts --no-audit --no-fund && npm run build
+      - name: Prepare pinned verification image quietly
+        run: docker pull --quiet node:24.22.0-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
       - name: Analyze, verify and bundle migrations without a write token
         env:
           UPSTREAMFIX_CLIENT_ROOT: ${{ github.workspace }}/client
@@ -130,10 +132,13 @@ jobs:
         working-directory: tool
         run: npm ci --ignore-scripts --no-audit --no-fund && npm run build
       - name: Download migration artifact outside the workspace
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: upstreamfix-proposals
-          path: ${{ runner.temp }}/upstreamfix-input
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/upstreamfix-input"
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name upstreamfix-proposals --dir "$RUNNER_TEMP/upstreamfix-input"
       - name: Validate bundle and publish PRs or issues
         env:
           GITHUB_TOKEN: ${{ github.token }}
