@@ -61,6 +61,8 @@ describe('UpstreamFix CLI', () => {
     const report = await readFile(reportPath, 'utf8');
     expect(report).toContain('Dry run: no file was written.');
     expect((await readdir(path.dirname(reportPath))).sort()).toEqual(['migration.md']);
+    expect(vi.mocked(console.log).mock.calls.map(([message]) => String(message)).join('\n'))
+      .not.toContain('No project files were written');
   });
 
   it('prints Node.js guidance cleanly while keeping the saved Markdown escaped', async () => {

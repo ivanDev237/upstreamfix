@@ -3,6 +3,7 @@ import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { StringDecoder } from 'node:string_decoder';
 import { applyPatch, parsePatch } from 'diff';
 import type { ProposedFileChange } from './types.js';
 import { registerTemporaryCleanup, terminateProcessGroup, trackProcessGroup } from './process-cleanup.js';
@@ -168,19 +169,19 @@ export async function verifyProposedMigration(
   }
 }
 
-export async function copyProject(source: string, destination: string): Promise<void> {
+export async function copyProject(source: string, destination: string, operation = '--verify'): Promise<void> {
   let listing: string;
   try {
     ({ stdout: listing } = await execFile('git', [
       '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', 'ls-files', '-co', '--exclude-standard', '-z',
     ], {
       cwd: source,
-      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: os.tmpdir(), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull, GIT_TERMINAL_PROMPT: '0' },
+      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: process.env.HOME ?? os.homedir(), GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' },
       timeout: 15_000,
       maxBuffer: 8 * 1024 * 1024,
     }));
   } catch {
-    throw new Error('--verify requires a Git working tree so ignored and untracked files can be excluded safely.');
+    throw new Error(`${operation} requires a Git working tree so ignored and untracked files can be excluded safely.`);
   }
   let totalBytes = 0;
   for (const relative of listing.split('\0').filter(Boolean)) {
@@ -264,7 +265,8 @@ async function findRelevantPackageDirs(root: string, packageName: string): Promi
   const manifests = await findPackageFiles(root);
   const packageDirs: string[] = [];
   for (const manifestPath of manifests) {
-    const pkg = await readPackageJson(path.dirname(manifestPath));
+    const pkg = await readPackageJson(path.dirname(manifestPath)).catch(() => undefined);
+    if (!pkg) continue;
     if (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
       .some((section) => typeof (pkg as Record<string, unknown>)[section] === 'object'
         && (pkg as Record<string, Record<string, string>>)[section]?.[packageName])) {
@@ -417,26 +419,30 @@ export async function executeWithProcessGroup(
     const unregisterGroup = child.pid ? trackProcessGroup(child.pid) : () => undefined;
     let stdout = '';
     let stderr = '';
+    const stdoutDecoder = new StringDecoder('utf8');
+    const stderrDecoder = new StringDecoder('utf8');
     let settled = false;
     const timeout = setTimeout(() => {
       void finish(new Error(`Command exceeded its ${timeoutMs} ms timeout.`), true);
     }, timeoutMs);
-    const append = (current: string, chunk: Buffer): string => {
+    const append = (current: string, chunk: string): string => {
       const marker = '\n… [middle of command output omitted] …\n';
       const limit = 2 * 1024 * 1024;
-      const next = current + chunk.toString('utf8');
+      const next = current + chunk;
       if (next.length <= limit) return next;
       const middle = current.indexOf(marker);
       const head = middle >= 0 ? current.slice(0, middle) : next.slice(0, limit / 2);
       return head + marker + next.slice(-limit / 2);
     };
-    child.stdout?.on('data', (chunk: Buffer) => { stdout = append(stdout, chunk); });
-    child.stderr?.on('data', (chunk: Buffer) => { stderr = append(stderr, chunk); });
+    child.stdout?.on('data', (chunk: Buffer) => { stdout = append(stdout, stdoutDecoder.write(chunk)); });
+    child.stderr?.on('data', (chunk: Buffer) => { stderr = append(stderr, stderrDecoder.write(chunk)); });
     const finish = async (error?: Error, timedOut = false): Promise<void> => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
       if (!timedOut) await new Promise((done) => setTimeout(done, 50));
+      stdout = append(stdout, stdoutDecoder.end());
+      stderr = append(stderr, stderrDecoder.end());
       if (child.pid) await terminateProcessGroup(child.pid, timedOut ? 100 : 0);
       child.stdout?.destroy();
       child.stderr?.destroy();
@@ -467,6 +473,9 @@ export function sanitizedEnvironment(home: string): NodeJS.ProcessEnv {
   env.YARN_ENABLE_SCRIPTS = 'false';
   env.CI = '1';
   env.COREPACK_ENABLE_UNSAFE_CUSTOM_URLS = '0';
+  env.COREPACK_ENABLE_PROJECT_SPEC = '0';
+  env.COREPACK_ENABLE_AUTO_PIN = '0';
+  env.COREPACK_HOME = path.join(home, 'corepack');
   return env;
 }
 

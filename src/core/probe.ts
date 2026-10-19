@@ -67,7 +67,7 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
     await mkdir(home);
     await writeFile(path.join(home, 'npmrc.user'), '');
     await writeFile(path.join(home, 'npmrc.global'), '');
-    await copyProject(path.resolve(cwd), project);
+    await copyProject(path.resolve(cwd), project, 'probe');
     const manifestPath = path.join(project, 'package.json');
     const manifest = parseManifest<Record<string, Record<string, string>>>(await readFile(manifestPath, 'utf8'));
     const sections = ['dependencies', 'devDependencies', 'optionalDependencies'];

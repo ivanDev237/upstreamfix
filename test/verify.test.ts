@@ -5,7 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { applyProposedDiffs, applyProposedFiles, executeWithProcessGroup, verifyProposedMigration, type VerificationOptions } from '../src/core/verify.js';
+import { applyProposedDiffs, applyProposedFiles, copyProject, executeWithProcessGroup, verifyProposedMigration, type VerificationOptions } from '../src/core/verify.js';
 
 const temporaryDirectories: string[] = [];
 const execFile = promisify(execFileCallback);
@@ -57,6 +57,25 @@ afterEach(async () => {
 });
 
 describe('migration verification', () => {
+  it('respects a global Git excludesFile when copying a project', async () => {
+    const cwd = await makeProject();
+    const home = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-git-global-'));
+    const copied = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-global-copy-'));
+    temporaryDirectories.push(home, copied);
+    await writeFile(path.join(cwd, 'ignored-global.txt'), 'secret');
+    const excludes = path.join(home, 'excludes');
+    await writeFile(excludes, 'ignored-global.txt\n');
+    await writeFile(path.join(home, '.gitconfig'), `[core]\n\texcludesFile = ${excludes}\n`);
+    const previousHome = process.env.HOME;
+    try {
+      process.env.HOME = home;
+      await copyProject(cwd, copied);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    }
+    await expect(readFile(path.join(copied, 'ignored-global.txt'), 'utf8')).rejects.toThrow();
+  });
   it('installs a nested package without a lockfile in that package directory', async () => {
     const cwd = await makeProject();
     await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ name: 'root', scripts: {} }));
@@ -71,6 +90,13 @@ describe('migration verification', () => {
     });
     expect(result.status).toBe('passed');
     expect(path.basename(installDirectory)).toBe('functions');
+  });
+  it('ignores an unrelated invalid nested manifest during verification', async () => {
+    const cwd = await makeProject({ test: 'node -e 1' });
+    await mkdir(path.join(cwd, 'broken'));
+    await writeFile(path.join(cwd, 'broken', 'package.json'), '{invalid');
+    const result = await verifyProposedMigration(cwd, [diff], { execute: async () => ({ stdout: 'ok' }) });
+    expect(result.status).toBe('passed');
   });
   it('parses a package manifest with a UTF-8 BOM', async () => {
     const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"' });
@@ -89,6 +115,17 @@ describe('migration verification', () => {
       throw error;
     }
     expect(Date.now() - started).toBeLessThan(500);
+  });
+  it('preserves UTF-8 characters split across process output chunks', async () => {
+    const script = 'process.stdout.write(Buffer.from([0xe2])); setTimeout(() => process.stdout.write(Buffer.from([0x82,0xac])), 20);';
+    try {
+      const result = await executeWithProcessGroup(process.execPath, ['-e', script], os.tmpdir(), { PATH: process.env.PATH }, 1000);
+      if (result.stdout === '' && process.env.CI !== 'true') return;
+      expect(result.stdout).toBe('€');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EPERM') return;
+      throw error;
+    }
   });
   it('checks a patched temporary copy, strips secrets, and leaves the source untouched', async () => {
     const cwd = await makeProject();
@@ -424,6 +461,8 @@ describe('migration verification', () => {
     expect(install?.args).not.toContain('--non-interactive');
     expect(install?.env.YARN_NODE_LINKER).toBe('node-modules');
     expect(install?.env.YARN_ENABLE_SCRIPTS).toBe('false');
+    expect(install?.env.COREPACK_ENABLE_PROJECT_SPEC).toBe('0');
+    expect(install?.env.COREPACK_HOME).toContain('upstreamfix-verify-');
   });
 
   it('refuses Yarn Classic when the project declares Yarn Berry', async () => {

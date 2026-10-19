@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { unifiedDiff } from '../src/core/runner.js';
+import { summarizeLockfile, unifiedDiff } from '../src/core/runner.js';
+
+it('counts pnpm and Yarn package version changes in lockfile summaries', () => {
+  expect(summarizeLockfile('pnpm-lock.yaml', 'packages:\n  foo@1.0.0:\n', 'packages:\n  foo@2.0.0:\n'))
+    .toContain('changed: 1');
+  expect(summarizeLockfile('yarn.lock', 'foo@^1.0.0:\n  version "1.0.0"\n', 'foo@^1.0.0:\n  version "2.0.0"\n'))
+    .toContain('changed: 1');
+});
 import { renderMarkdownReport, renderTerminalReport } from '../src/core/report.js';
 
 describe('migration report formatting', () => {

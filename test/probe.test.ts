@@ -61,6 +61,15 @@ it('refuses non-exact targets and requires confirmation before downloads', async
   expect(preview.estimatedDownload).toContain('MB');
 });
 
+it('names probe correctly when the source is not a Git repository', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-probe-no-git-'));
+  try {
+    const result = await probeProject(cwd, 'stripe@23.0.0', { confirmed: true });
+    expect(result.note).toContain('probe requires a Git working tree');
+    expect(result.note).not.toContain('--verify requires');
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
 it('marks failed installation or unreadable typecheck as unavailable', async () => {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-probe-test-'));
   try {

@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -38,7 +38,7 @@ export async function writeMigrationOnBranch(
   migration: Migration,
   options: WriteBranchOptions,
 ): Promise<WriteBranchResult> {
-  const cwd = path.resolve(options.cwd);
+  const cwd = await realpath(path.resolve(options.cwd));
   const repositoryRoot = await git(cwd, ['rev-parse', '--show-toplevel']).then((value) => value.trim()).catch(() => {
     throw new Error('--write requires the project directory to be inside a Git repository.');
   });
@@ -69,7 +69,7 @@ export async function writeMigrationOnBranch(
   const unregisterCleanup = registerTemporaryCleanup(async () => {
     if (worktreeAdded) await git(repositoryRoot, ['worktree', 'remove', '--force', worktree]).catch(() => undefined);
     await rm(worktreeParent, { recursive: true, force: true });
-    if (branchCreated && !committed) await git(repositoryRoot, ['branch', '-D', branch]).catch(() => undefined);
+    if (branchCreated && !committed) await removeUncommittedBranch(repositoryRoot, branch, head);
   });
 
   try {
@@ -124,8 +124,8 @@ export async function writeMigrationOnBranch(
       }
     }
     await git(worktree, ['commit', '-m', `Apply ${migration.id} migration with UpstreamFix`]);
-    const commit = (await git(worktree, ['rev-parse', 'HEAD'])).trim();
     committed = true;
+    const commit = (await git(worktree, ['rev-parse', 'HEAD'])).trim();
     return {
       branch,
       commit,
@@ -139,8 +139,13 @@ export async function writeMigrationOnBranch(
       await git(repositoryRoot, ['worktree', 'remove', '--force', worktree]).catch(() => undefined);
     }
     await rm(worktreeParent, { recursive: true, force: true });
-    if (branchCreated && !committed) await git(repositoryRoot, ['branch', '-D', branch]).catch(() => undefined);
+    if (branchCreated && !committed) await removeUncommittedBranch(repositoryRoot, branch, head);
   }
+}
+
+async function removeUncommittedBranch(repositoryRoot: string, branch: string, originalHead: string): Promise<void> {
+  const current = await git(repositoryRoot, ['rev-parse', '--verify', branch]).then((value) => value.trim()).catch(() => undefined);
+  if (current === originalHead) await git(repositoryRoot, ['branch', '-D', branch]).catch(() => undefined);
 }
 
 /** Do not commit vNext source code while its containing manifest still installs vOld. */

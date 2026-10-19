@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -229,5 +229,14 @@ describe('verified Git branch writes', () => {
     await git(cwd, 'config', 'gpg.ssh.program', '/tmp/untrusted-signer');
     await expect(writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions }))
       .rejects.toThrow('configured Git filters, diff commands, or fsmonitor hooks');
+  });
+  it('accepts a symlinked cwd that points inside the repository', async () => {
+    const cwd = await makeRepository();
+    const linkDir = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-linked-cwd-'));
+    roots.push(linkDir);
+    const link = path.join(linkDir, 'project');
+    await symlink(cwd, link);
+    const result = await writeMigrationOnBranch(firebaseAdminV14, { cwd: link, verificationOptions });
+    expect(result.branch).toBe('upstreamfix/firebase-admin-14');
   });
 });

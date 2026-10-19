@@ -140,7 +140,7 @@ export function createProgram(): Command {
 
       if (verification?.status === 'failed') process.exitCode = 1;
 
-      if (!options.write) console.log('Preview only. No project files were written.');
+      if (!options.write) console.log(options.report ? 'Preview only. Only the requested report file was written.' : 'Preview only. No project files were written.');
     });
 
   program
@@ -201,7 +201,7 @@ export function createProgram(): Command {
       }
       for (const commit of commits) console.log(`Committed on branch ${commit.branch}: ${commit.commit}`);
       if (verificationFailed) process.exitCode = 1;
-      if (!options.write) console.log('Preview only. No project files were written.');
+      if (!options.write) console.log(options.report ? 'Preview only. Only the requested report file was written.' : 'Preview only. No project files were written.');
     });
 
   return program;

@@ -150,6 +150,9 @@ export function lockfileCommandEnvironment(home: string): NodeJS.ProcessEnv {
     NPM_CONFIG_FUND: 'false',
     NPM_CONFIG_IGNORE_SCRIPTS: 'true',
     COREPACK_ENABLE_PROJECT_SPEC: '0',
+    COREPACK_ENABLE_AUTO_PIN: '0',
+    COREPACK_ENABLE_UNSAFE_CUSTOM_URLS: '0',
+    COREPACK_HOME: path.join(home, 'corepack'),
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_TERMINAL_PROMPT: '0',
   };
@@ -910,7 +913,7 @@ export function unifiedDiff(file: string, before: string, after: string): string
     : `${file}: diff withheld because it exceeds ${MAX_DIFF_OUTPUT_CHARS} characters.`;
 }
 
-function summarizeLockfile(file: string, before: string, after: string): string {
+export function summarizeLockfile(file: string, before: string, after: string): string {
   const previous = lockfilePackages(file, before);
   const next = lockfilePackages(file, after);
   if (!previous || !next) return `${file}: lockfile changed; package counts unavailable (file too large or unrecognized format). Full diff withheld.`;
@@ -946,11 +949,20 @@ function lockfilePackages(file: string, contents: string): Map<string, string> |
       if (/^(packages|snapshots):\s*$/.test(line)) { section = line.slice(0, -1); name = ''; continue; }
       if (/^[^\s#]/.test(line)) { section = ''; name = ''; }
       const entry = section === 'packages' ? /^  (['"]?)(.+?)\1:\s*$/.exec(line) : null;
-      if (entry) { name = entry[2]!; packages.set(name, name); }
+      if (entry) {
+        const rawName = entry[2]!.replace(/^\//, '');
+        const separator = rawName.lastIndexOf('@');
+        name = separator > 0 ? rawName.slice(0, separator) : rawName;
+        packages.set(name, separator > 0 ? rawName.slice(separator + 1).split('(')[0]! : rawName);
+      }
       const version = /^    version:\s*['"]?([^\s'"]+)/.exec(line);
       if (name && version) packages.set(name, version[1]!);
     } else {
-      if (/^[^\s#].*:\s*$/.test(line)) name = line.slice(0, -1);
+      if (/^[^\s#].*:\s*$/.test(line)) {
+        const selector = line.slice(0, -1).split(',')[0]!.trim().replace(/^['"]|['"]$/g, '');
+        const separator = selector.lastIndexOf('@');
+        name = separator > 0 ? selector.slice(0, separator) : selector;
+      }
       const version = /^  version\s+['"]([^'"]+)['"]/.exec(line);
       if (name && version) packages.set(name, version[1]!);
     }
