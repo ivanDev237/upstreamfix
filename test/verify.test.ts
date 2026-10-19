@@ -113,6 +113,34 @@ describe('migration verification', () => {
     await Promise.all(seen.map(async (cache) => await expect(stat(cache)).rejects.toMatchObject({ code: 'ENOENT' })));
   });
 
+  it('reuses a private pnpm store across runs without exposing it to project scripts', async () => {
+    const cwd = await makeProject({ test: 'node -e "process.exit(0)"' }, 'pnpm@10.0.0');
+    const cache = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-pnpm-cache-test-'));
+    temporaryDirectories.push(cache);
+    const store = path.join(cache, 'store');
+    let reused = false;
+    for (let run = 0; run < 2; run++) {
+      const result = await verifyProposedMigration(cwd, [diff], {
+        pnpmCacheRoot: store,
+        execute: async (command, args, _directory, env) => {
+          if (command === 'pnpm' && args[0] === 'install') {
+            const temporaryStore = args[args.indexOf('--store-dir') + 1]!;
+            expect(temporaryStore).not.toBe(store);
+            if (run === 1) reused = (await readFile(path.join(temporaryStore, 'marker'), 'utf8')) === 'cached';
+            await mkdir(temporaryStore, { recursive: true });
+            await writeFile(path.join(temporaryStore, 'marker'), 'cached');
+          } else {
+            expect(env.HOME).not.toContain(cache);
+            expect(JSON.stringify(env)).not.toContain(store);
+          }
+          return { stdout: 'ok' };
+        },
+      });
+      expect(result.status).toBe('passed');
+    }
+    expect(reused).toBe(true);
+  });
+
   it('refuses to verify a folder that is not a Git working tree', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-verify-not-git-'));
     temporaryDirectories.push(cwd);
