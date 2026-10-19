@@ -3,6 +3,10 @@ import { Project } from 'ts-morph';
 import { openaiV5 } from '../src/migrations/openai-v5/index.js';
 import { migrations } from '../src/migrations/index.js';
 import { readFileSync } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { runMigration } from '../src/core/runner.js';
 import { validateRepoEntry, type BenchRepo } from '../scripts/benchmark.js';
 
 function migrate(source: string) {
@@ -28,6 +32,20 @@ describe('openai v4 to v5', () => {
     const manifest = { dependencies: { openai: '^4.20.0' }, engines: { node: '>=18' } };
     expect(openaiV5.updateManifest?.(manifest).join(' ')).toContain('Node.js 20');
     expect(manifest.dependencies.openai).toBe('^4.20.0');
+  });
+
+  it.each([undefined, '>=18'])('does not rewrite v4 code when engines.node is %s and the SDK cannot upgrade', async (nodeRange) => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-engine-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.0.0' }, ...(nodeRange ? { engines: { node: nodeRange } } : {}) }));
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai';\nconst client = new OpenAI();\nclient.files.del('file_1');\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true });
+      expect(outcome.proposedFiles).toEqual([]);
+      expect(outcome.changes).toEqual([]);
+      expect(outcome.manual.some((item) => item.reason.includes('Node.js 20'))).toBe(true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 
   it('rewrites only bound client methods and beta chat paths', () => {

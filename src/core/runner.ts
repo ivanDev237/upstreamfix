@@ -10,6 +10,7 @@ import { Project } from 'ts-morph';
 import type { ManualItem, Migration, MigrationResult, PackageManifest, ProposedFileChange } from './types.js';
 import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from './project-discovery.js';
 import { parseManifest } from './manifest.js';
+import { guaranteesNodeMajor } from './node-range.js';
 
 const execFile = promisify(execFileCallback);
 
@@ -60,7 +61,7 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
       })
       .sort((left, right) => right.file.length - left.file.length);
 
-    let declaration: { file: string; range: string } | undefined;
+    let declaration: { file: string; range: string; manifest: PackageManifest } | undefined;
     let invalidManifest: { file: string; reason: string } | undefined;
     for (const candidate of containingManifests) {
       if (candidate.invalid) {
@@ -73,7 +74,7 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
         .map((section) => manifest[section]?.[migration.packageName])
         .filter((value): value is string => typeof value === 'string');
       if (ranges.length > 0) {
-        if (new Set(ranges).size === 1) declaration = { file: candidate.file, range: ranges[0]! };
+        if (new Set(ranges).size === 1) declaration = { file: candidate.file, range: ranges[0]!, manifest };
         else invalidManifest = { file: candidate.file, reason: 'declares conflicting dependency ranges' };
         break;
       }
@@ -103,6 +104,15 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
         line: 1,
         reason: `${migration.packageName} is declared as \`${declaration.range}\` in ${path.relative(root, declaration.file)}; this migration only analyzes major v${migration.fromMajor} ranges.`,
         snippet: readFileSync(sourcePath, 'utf8').split(/\r?\n/, 1)[0] ?? '',
+      });
+      continue;
+    }
+    if (migration.id === 'openai@5' && !guaranteesNodeMajor(declaration.manifest.engines?.node ?? '', 20)) {
+      manual.push({
+        file: sourcePath,
+        line: 1,
+        reason: `OpenAI SDK v5 requires Node.js 20 or later. Declare a compatible engines.node range in ${path.relative(root, declaration.file)} and confirm the deployed runtime before migrating; this source file was left unchanged.`,
+        snippet: `engines.node: ${declaration.manifest.engines?.node ?? 'not declared'}`,
       });
       continue;
     }
