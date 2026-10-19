@@ -1,14 +1,12 @@
-import { execFile as execFileCallback } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Project } from 'ts-morph';
 import { stripeV22 } from '../src/migrations/stripe-v22/index.js';
 import { stripeV23 } from '../src/migrations/stripe-v23/index.js';
+import { runRealSdkNpm, runRealSdkNode } from './helpers/real-sdk-command.js';
 
-const execFile = promisify(execFileCallback);
 const roots: string[] = [];
 const enabled = process.env.UPSTREAMFIX_RUN_REAL_SDK_TESTS === '1';
 
@@ -83,17 +81,13 @@ async function applyUpdates(updates: Array<{ file: string; contents: string }>):
 }
 
 async function installSdk(cwd: string, version: string): Promise<void> {
-  const npmCli = process.env.npm_execpath ?? 'npm';
-  await execFile(process.execPath, [npmCli, 'install', '--ignore-scripts', '--no-save', '--package-lock=false', '--no-audit', '--no-fund', `stripe@${version}`, '@types/node@22'], {
-    cwd,
-    timeout: 240_000,
-  });
+  await runRealSdkNpm(cwd, ['install', '--ignore-scripts', '--no-save', '--package-lock=false', '--no-audit', '--no-fund', `stripe@${version}`, '@types/node@22']);
 }
 
 async function typecheck(cwd: string): Promise<void> {
   const tsc = path.join(process.cwd(), 'node_modules/typescript/bin/tsc');
   try {
-    await execFile(process.execPath, [tsc, '--project', path.join(cwd, 'tsconfig.json')], { cwd, timeout: 90_000 });
+    await runRealSdkNode(cwd, [tsc, '--project', path.join(cwd, 'tsconfig.json')], 90_000);
   } catch (error) {
     const failure = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string };
     throw new Error([failure.stderr, failure.stdout].filter(Boolean).join('\n') || failure.message);

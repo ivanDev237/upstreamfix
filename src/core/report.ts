@@ -183,7 +183,8 @@ function markdownCell(value: string): string {
 
 function escapeMarkdownText(value: string): string {
   return maskSecrets(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/([\\`*_{}\[\]()#+.!])/g, '\\$1');
+    .replace(/([\\`*_{}\[\]()#+.!])/g, '\\$1')
+    .replaceAll('\\[API key redacted\\]', '[API key redacted]');
 }
 
 function inlineCode(value: string): string {

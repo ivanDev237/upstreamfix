@@ -422,6 +422,7 @@ describe('migration verification', () => {
     const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"', test: 'node -e "process.exit(0)"' }, 'pnpm@10.0.0');
     const commands: string[] = [];
     const result = await verifyProposedMigration(cwd, [diff], {
+      pnpmCacheRoot: path.join(cwd, '.test-pnpm-store'),
       execute: async (command, args) => {
         commands.push(`${command} ${args.join(' ')}`);
         return { stdout: 'ok' };
