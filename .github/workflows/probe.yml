@@ -1,0 +1,83 @@
+name: Real SDK probe
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact reviewed UpstreamFix source commit
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact reviewed UpstreamFix source commit
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  signet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Validate immutable source reference
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ivanDev237/upstreamfix
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+          path: tool
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install reviewed tool
+        working-directory: tool
+        run: npm ci --ignore-scripts && npm run build
+      - name: Clone reviewed signet snapshot
+        run: |
+          git init -q signet
+          git -C signet remote add origin https://github.com/KenTaniguchi-R/signet.git
+          git -C signet fetch --depth=1 origin 6aae309def8500dae9f60efc6e682a6fef9b169b
+          git -C signet checkout --detach FETCH_HEAD
+          test "$(git -C signet rev-parse HEAD)" = 6aae309def8500dae9f60efc6e682a6fef9b169b
+      - name: Compare compiler diagnostics inside network-disabled Docker
+        shell: bash
+        env:
+          PROBE_JSON: ${{ runner.temp }}/signet-probe.json
+          PROBE_REPORT: ${{ runner.temp }}/signet-probe.md
+        run: |
+          set -o pipefail
+          node tool/dist/cli.js probe stripe@23.0.0 -C signet --yes > "$RUNNER_TEMP/probe-output.txt"
+          tail -n +2 "$RUNNER_TEMP/probe-output.txt" > "$PROBE_JSON"
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const result = JSON.parse(readFileSync(process.env.PROBE_JSON, 'utf8'));
+          const finding = result.manualFindings?.find((item) => item.file.endsWith('src/lib/spend.ts')
+            && item.message.includes('payment_method_types'));
+          const report = ['# Real Stripe v23 probe on signet', '',
+            'Reviewed commit: `6aae309def8500dae9f60efc6e682a6fef9b169b`.',
+            'Baseline and target diagnostics were measured in a temporary copy. TypeScript ran in Docker without network access.', '',
+            `Status: ${result.status}`, `Current SDK: ${result.currentVersion ?? 'unknown'}`,
+            `Target SDK: ${result.targetVersion}`, '',
+            finding ? `Candidate: ${finding.file}:${finding.line} — ${finding.message}` : 'No payment_method_types candidate found.', '',
+            'A new diagnostic locates a possible incompatibility; it does not prove causality or justify an automatic rewrite.', ''];
+          writeFileSync(process.env.PROBE_REPORT, report.join('\n'));
+          if (result.status !== 'available' || !finding) process.exitCode = 1;
+          NODE
+      - name: Upload full and readable reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: probe-signet-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/signet-probe.json
+            ${{ runner.temp }}/signet-probe.md
+          if-no-files-found: warn
+          retention-days: 30
