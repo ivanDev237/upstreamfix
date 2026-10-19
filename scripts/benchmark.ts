@@ -9,7 +9,7 @@ import { Project } from 'ts-morph';
 import type { Migration, PackageManifest } from '../src/core/types.js';
 import { escapeUntrustedMarkdownCell as cell, maskSecrets } from '../src/core/report.js';
 import { newTypeScriptDiagnostics, parseTypeScriptDiagnostics } from '../src/core/diagnostic-diff.js';
-import { runMigration } from '../src/core/runner.js';
+import { runMigration, type RunOutcome } from '../src/core/runner.js';
 import { applyProposedFiles } from '../src/core/verify.js';
 import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from '../src/core/project-discovery.js';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
@@ -476,6 +476,10 @@ async function runPhaseChecks(
   return { typecheck, tests };
 }
 
+export async function analyzeBenchmarkMigration(migration: Migration, checkout: string): Promise<RunOutcome> {
+  return runMigration(migration, { cwd: checkout, dryRun: true, analysisOnly: true });
+}
+
 export async function benchmarkOne(
   repo: BenchRepo,
   root: string,
@@ -525,7 +529,7 @@ export async function benchmarkOne(
     await run('git', ['clean', '-fdx'], checkout, home);
     await clearPackageManagerCredentialFiles(checkout);
 
-    const outcome = await runMigration(migration, { cwd: checkout, dryRun: true });
+    const outcome = await analyzeBenchmarkMigration(migration, checkout);
     result.migrated = outcome.changes.length;
     result.manual = outcome.manual.length;
     result.usages = result.migrated + result.manual;

@@ -1,14 +1,26 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkRepos, renderBenchmarkReport, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
+import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkRepos, renderBenchmarkReport, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
+import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 
 const execFile = promisify(execFileCallback);
 
 describe('public repository benchmark helpers', () => {
+  it('analyzes source changes without invoking host lockfile regeneration', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-benchmark-analysis-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { 'firebase-admin': '^13.0.0' }, engines: { node: '>=22' } }));
+      await writeFile(path.join(cwd, 'index.ts'), "import * as admin from 'firebase-admin';\nadmin.initializeApp();\n");
+      await writeFile(path.join(cwd, 'package-lock.json'), '{ invalid lock');
+      const result = await analyzeBenchmarkMigration(firebaseAdminV14, cwd);
+      expect(result.proposedFiles.some((file) => file.relativePath === 'package-lock.json')).toBe(false);
+      expect(result.changes.length).toBeGreaterThan(0);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
   it('reports the automatic rate using migration changes and manual items', () => {
     const report = renderBenchmarkReport([
       { name: 'sample', commit: 'a'.repeat(40), status: 'completed', usages: 3, migrated: 2, manual: 1, typecheck: { before: 'pass', after: 'fail: TS error' }, tests: { before: 'fail: existing test', after: 'pass' }, details: '' },
