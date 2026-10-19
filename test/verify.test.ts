@@ -261,6 +261,23 @@ describe('migration verification', () => {
     expect(result.checks.find((check) => check.name.startsWith('Tests'))?.output).toContain('1 failed');
   });
 
+  it('keeps the first and last lines of long command output', async () => {
+    const cwd = await makeProject();
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args) => {
+        if (args.includes('typecheck')) throw Object.assign(new Error('failed'), {
+          stderr: `initial context\n${'progress\n'.repeat(1000)}TS2339: actual error at the end`,
+        });
+        return { stdout: 'ok' };
+      },
+    });
+    const output = result.checks.find((check) => check.name.startsWith('Typecheck'))?.output ?? '';
+    expect(output).toContain('initial context');
+    expect(output).toContain('TS2339: actual error at the end');
+    expect(output).toContain('[truncated');
+    expect(output.length).toBeLessThanOrEqual(4_000);
+  });
+
   it('reports timeouts and continues to capture the test command result', async () => {
     const cwd = await makeProject();
     const result = await verifyProposedMigration(cwd, [diff], {

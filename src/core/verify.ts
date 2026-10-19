@@ -427,8 +427,13 @@ async function executeWithProcessGroup(
       killTimer = setTimeout(() => signalProcessGroup(child, 'SIGKILL'), 750);
     }, timeoutMs);
     const append = (current: string, chunk: Buffer): string => {
-      const remaining = 2 * 1024 * 1024 - Buffer.byteLength(current);
-      return remaining <= 0 ? current : current + chunk.toString('utf8').slice(0, remaining);
+      const marker = '\n… [middle of command output omitted] …\n';
+      const limit = 2 * 1024 * 1024;
+      const next = current + chunk.toString('utf8');
+      if (next.length <= limit) return next;
+      const middle = current.indexOf(marker);
+      const head = middle >= 0 ? current.slice(0, middle) : next.slice(0, limit / 2);
+      return head + marker + next.slice(-limit / 2);
     };
     child.stdout?.on('data', (chunk: Buffer) => { stdout = append(stdout, chunk); });
     child.stderr?.on('data', (chunk: Buffer) => { stderr = append(stderr, chunk); });
@@ -487,7 +492,10 @@ function sanitizedEnvironment(home: string): NodeJS.ProcessEnv {
 
 function truncate(output: string): string {
   const trimmed = output.trim();
-  return trimmed.length <= maxOutputLength ? trimmed : `${trimmed.slice(0, maxOutputLength)} … [truncated]`;
+  if (trimmed.length <= maxOutputLength) return trimmed;
+  const marker = '\n… [truncated middle; beginning and end retained] …\n';
+  const headLength = Math.floor((maxOutputLength - marker.length) / 2);
+  return trimmed.slice(0, headLength) + marker + trimmed.slice(-(maxOutputLength - marker.length - headLength));
 }
 
 async function fileExists(file: string): Promise<boolean> {
