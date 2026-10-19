@@ -44,6 +44,12 @@ describe('Stripe Node SDK v21 → v22 migration', () => {
     expect(result.manual.some((item) => item.reason.includes('syntax'))).toBe(true);
     expect(result.fileUpdates).toEqual([]);
   });
+  it('does not report unrelated syntax errors just because text mentions stripe', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('styles.ts', 'const style = "stripe";\nconst broken = (\n');
+    const result = stripeV22.transform(project);
+    expect(result.manual).toEqual([]);
+  });
 
   it('reports overlapping Stripe edits instead of dropping one silently', () => {
     const project = new Project({ useInMemoryFileSystem: true });

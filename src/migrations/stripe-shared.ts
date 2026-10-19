@@ -413,6 +413,8 @@ export function applyStripeEdits(sourceFile: SourceFile, edits: TextEdit[], resu
 function withholdInvalidSource(sourceFile: SourceFile, result: MigrationResult): boolean {
   const diagnostics = (sourceFile.compilerNode as unknown as { parseDiagnostics?: unknown[] }).parseDiagnostics ?? [];
   if (diagnostics.length === 0) return false;
+  const source = sourceFile.getFullText();
+  if (!/(?:\bfrom\s*['"]stripe(?:\/[^'"]*)?['"]|\brequire\s*\(\s*['"]stripe(?:\/[^'"]*)?['"]|\bimport\s*\(\s*['"]stripe(?:\/[^'"]*)?['"]|\b(?:Stripe|stripe)\s*\.)/.test(source)) return true;
   result.manual.push({
     file: sourceFile.getFilePath(), line: 1,
     reason: `This Stripe source file has ${diagnostics.length} syntax error(s); automatic edits were withheld until the file parses cleanly.`,
