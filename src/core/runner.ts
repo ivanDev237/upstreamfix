@@ -34,12 +34,12 @@ interface ScopedProject {
   manifestBySource: Map<string, string>;
 }
 
-function loadScopedProject(root: string, migration: Migration): ScopedProject {
+function loadScopedProject(root: string, migration: Migration, excludedDirectories: readonly string[] = []): ScopedProject {
   const project = new Project({
     skipAddingFilesFromTsConfig: true,
     compilerOptions: { allowJs: true },
   });
-  const manifests = findPackageManifests(root).map((file) => {
+  const manifests = findPackageManifests(root, excludedDirectories).map((file) => {
     let parsed: PackageManifest | undefined;
     let invalid = false;
     try {
@@ -52,7 +52,7 @@ function loadScopedProject(root: string, migration: Migration): ScopedProject {
   const manual: ManualItem[] = [];
   const manifestBySource = new Map<string, string>();
 
-  for (const sourcePath of findSourceFiles(root, migration.packageName)) {
+  for (const sourcePath of findSourceFiles(root, migration.packageName, excludedDirectories)) {
     const containingManifests = manifests
       .filter(({ file }) => {
         const directory = path.dirname(file);
@@ -158,13 +158,13 @@ export function lockfileCommandEnvironment(home: string): NodeJS.ProcessEnv {
   };
 }
 
-function findSourceFiles(root: string, packageName: string): string[] {
+function findSourceFiles(root: string, packageName: string, excludedDirectories: readonly string[] = []): string[] {
   const found: string[] = [];
   const visit = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const absolutePath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) visit(absolutePath);
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name) && !isExcludedDirectory(root, absolutePath, excludedDirectories)) visit(absolutePath);
         continue;
       }
       if (!entry.isFile() || entry.name.endsWith('.d.ts')) continue;
@@ -179,6 +179,7 @@ function findSourceFiles(root: string, packageName: string): string[] {
 export interface RunOptions {
   cwd: string;
   dryRun: boolean;
+  excludedDirectories?: readonly string[];
   /** Explicit confirmation that Firebase Admin v14 will run on Node.js 22+. */
   nodeRuntime?: 22;
   /** Yarn Classic needs a full dependency installation to regenerate yarn.lock. */
@@ -213,7 +214,7 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   if (options.nodeRuntime && migration.id !== 'firebase-admin@14') {
     throw new Error('--node-runtime 22 is supported only for firebase-admin@14.');
   }
-  const scoped = loadScopedProject(options.cwd, migration);
+  const scoped = loadScopedProject(options.cwd, migration, options.excludedDirectories);
   const project = scoped.project;
   const originalSources = new Map<string, string>(await Promise.all(
     project.getSourceFiles().map(async (file): Promise<[string, string]> => [file.getFilePath(), await readFile(file.getFilePath(), 'utf8')]),
@@ -221,7 +222,7 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   const result = migration.transform(project);
   result.manual.unshift(...scoped.manual);
   const compatibilityNotes = migration.inspectManifest
-    ? await inspectManifests(migration, options.cwd)
+    ? await inspectManifests(migration, options.cwd, options.excludedDirectories)
     : [];
   if (!options.dryRun && result.manual.length > 0) {
     throw new Error('This migration has manual review items; no files were written. Resolve them and preview again.');
@@ -287,9 +288,9 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   };
 }
 
-async function inspectManifests(migration: Migration, cwd: string): Promise<string[]> {
+async function inspectManifests(migration: Migration, cwd: string, excludedDirectories: readonly string[] = []): Promise<string[]> {
   const notes: string[] = [];
-  for (const manifestPath of findPackageManifests(cwd)) {
+  for (const manifestPath of findPackageManifests(cwd, excludedDirectories)) {
     const raw = await readFile(manifestPath, 'utf8');
     if (!raw.includes(JSON.stringify(migration.packageName))) continue;
     try {
@@ -312,7 +313,7 @@ async function migrateManifests(
   const changes: ManifestFileChange[] = [];
   const manual: ManualItem[] = [];
 
-  for (const manifestPath of findPackageManifests(options.cwd)) {
+  for (const manifestPath of findPackageManifests(options.cwd, options.excludedDirectories)) {
     const raw = await readFile(manifestPath, 'utf8');
     if (!raw.includes(JSON.stringify(migration.packageName))) continue;
     const relativePath = path.relative(options.cwd, manifestPath);
@@ -733,13 +734,18 @@ async function findLockfiles(root: string, packageDirectory: string): Promise<st
   return found;
 }
 
-function findPackageManifests(root: string): string[] {
+function isExcludedDirectory(root: string, directory: string, excludedDirectories: readonly string[]): boolean {
+  const relative = path.relative(root, directory).split(path.sep).join('/');
+  return excludedDirectories.some((excluded) => relative === excluded || relative.startsWith(`${excluded}/`));
+}
+
+function findPackageManifests(root: string, excludedDirectories: readonly string[] = []): string[] {
   const found: string[] = [];
   const visit = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const absolutePath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) visit(absolutePath);
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name) && !isExcludedDirectory(root, absolutePath, excludedDirectories)) visit(absolutePath);
       } else if (entry.isFile() && entry.name === 'package.json') {
         found.push(absolutePath);
       }

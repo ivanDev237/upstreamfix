@@ -59,6 +59,22 @@ afterEach(async () => {
 });
 
 describe('migration verification', () => {
+  it('runs configured custom checks only in the isolated verification copy', async () => {
+    const cwd = await makeProject();
+    const observed: Array<{ command: string; args: string[]; directory: string; token?: string }> = [];
+    process.env.UPSTREAMFIX_TEST_TOKEN = 'trap-value';
+    const result = await verifyProposedMigration(cwd, [diff], {
+      customCommands: ['node -e "process.exit(0)"'],
+      execute: async (command, args, directory, env) => {
+        observed.push({ command, args, directory, token: env.UPSTREAMFIX_TEST_TOKEN });
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('passed');
+    expect(result.checks.some((check) => check.name === 'Custom check 1')).toBe(true);
+    expect(observed.some((check) => check.command === '/bin/sh' && check.args[0] === '-c')).toBe(true);
+    expect(observed.every((check) => check.directory !== cwd && !check.token)).toBe(true);
+  });
   it('respects a global Git excludesFile when copying a project', async () => {
     const cwd = await makeProject();
     const home = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-git-global-'));

@@ -31,6 +31,15 @@ afterEach(async () => {
 });
 
 describe('firebase-admin v14 migration', () => {
+  it('omits configured excluded folders from source analysis and manifest changes', async () => {
+    const cwd = await makeProject();
+    await mkdir(path.join(cwd, 'examples'));
+    await writeFile(path.join(cwd, 'examples', 'example.ts'), "import * as admin from 'firebase-admin';\nadmin.firestore();\n");
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true, excludedDirectories: ['examples'] });
+    expect(outcome.changes.some((change) => change.file.includes('examples'))).toBe(false);
+    expect(outcome.filesChanged).not.toContain('examples/example.ts');
+    expect(outcome.filesChanged).toContain('server.ts');
+  });
   it('detects nested text edits even when the outer edit starts first', () => {
     expect(hasOverlappingEdits([{ start: 10, end: 30 }, { start: 15, end: 20 }])).toBe(true);
     expect(hasOverlappingEdits([{ start: 10, end: 15 }, { start: 15, end: 20 }])).toBe(false);

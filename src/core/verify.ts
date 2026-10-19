@@ -34,6 +34,8 @@ export interface VerificationResult {
 
 export interface VerificationOptions {
   timeoutMs?: number;
+  /** Client-selected commands run only inside the disposable verification copy. */
+  customCommands?: readonly string[];
   /** Package whose installed version makes this migration applicable. Defaults to firebase-admin for compatibility. */
   packageName?: string;
   /** Exact migration results. When present these are applied directly; unified diffs are for display only. */
@@ -152,7 +154,12 @@ export async function verifyProposedMigration(
       }
     }
 
-    const ranChecks = checks.filter((check) => /^(?:Typecheck|Tests) /.test(check.name) && check.status !== 'skipped');
+    for (const [index, command] of (options.customCommands ?? []).entries()) {
+      if (!command.trim() || command.length > 200) throw new Error('A custom verification command is empty or too long.');
+      checks.push(await runCheck(`Custom check ${index + 1}`, '/bin/sh', ['-c', command], projectCopy, env, timeoutMs, options.execute));
+    }
+
+    const ranChecks = checks.filter((check) => /^(?:Typecheck|Tests|Custom check) /.test(check.name) && check.status !== 'skipped');
     const status: VerificationStatus = ranChecks.length === 0
       ? 'skipped'
       : ranChecks.some((check) => check.status === 'failed') ? 'failed' : 'passed';
