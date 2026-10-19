@@ -27,6 +27,21 @@ export interface ProposalPublisher {
   closeIssue(proposal: Proposal): Promise<void>;
 }
 
+interface ManagedIssueCandidate {
+  number: number;
+  title: string;
+  body?: string | null;
+  user?: { login?: string };
+  pull_request?: unknown;
+  state?: string;
+}
+
+export function findManagedIssue(issues: ManagedIssueCandidate[], migration: string): ManagedIssueCandidate | undefined {
+  const marker = `<!-- upstreamfix:manual:${migration} -->`;
+  return issues.find((item) => !item.pull_request && item.title === `UpstreamFix: manual ${migration}`
+    && item.user?.login === 'github-actions[bot]' && item.body?.includes(marker));
+}
+
 const sha = /^[0-9a-f]{40}$/;
 const safePath = /^(?:[A-Za-z0-9_.@()+ -]+\/)*[A-Za-z0-9_.@()+ -]+$/;
 
@@ -102,6 +117,7 @@ export async function reconcileProposal(proposal: Proposal, publisher: ProposalP
   const migration = migrations.find((candidate) => candidate.id === proposal.migration);
   if (!migration) throw new Error('Unknown migration.');
   const fullBody = maskSecrets([
+    ...(proposal.status === 'manual' ? [`<!-- upstreamfix:manual:${proposal.migration} -->`] : []),
     `UpstreamFix migration: \`${proposal.migration}\``,
     `Verification: **${proposal.verification}**`,
     `Official guide: ${migration.guideUrl}`,

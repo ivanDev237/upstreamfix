@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { validateProposal, reconcileProposal, parseSafeRawDiff, parseCommitParents, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
+import { validateProposal, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
 
 const base = 'a'.repeat(40);
 const commit = 'b'.repeat(40);
@@ -10,6 +10,12 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('finds only bot-authored manual issues with the exact hidden marker', () => {
+    const human = { number: 1, title: 'UpstreamFix: manual firebase-admin@14', body: '<!-- upstreamfix:manual:firebase-admin@14 -->', user: { login: 'person' } };
+    const bot = { number: 102, title: human.title, body: human.body, user: { login: 'github-actions[bot]' } };
+    expect(findManagedIssue([human, bot], 'firebase-admin@14')?.number).toBe(102);
+    expect(findManagedIssue([human], 'firebase-admin@14')).toBeUndefined();
+  });
   it('does not treat a commit message containing parent metadata as a real parent', () => {
     expect(() => parseCommitParents(`${commit}\nparent ${base}\n`, commit)).toThrow('malformed');
     expect(parseCommitParents(commit, commit)).toEqual([]);

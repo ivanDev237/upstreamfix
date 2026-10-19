@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { reconcileProposal, validateProposal, parseSafeRawDiff, parseCommitParents, type Proposal, type ProposalPublisher } from './publish.js';
+import { reconcileProposal, validateProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, type Proposal, type ProposalPublisher } from './publish.js';
 import { parseActionConfig } from './config.js';
 
 const execFile = promisify(execFileCallback);
@@ -71,10 +71,14 @@ async function hasClosedPullRequest(proposal: Proposal): Promise<boolean> {
   return pulls.length > 0;
 }
 
-async function findIssue(proposal: Proposal): Promise<number | undefined> {
-  const title = `UpstreamFix: manual ${proposal.migration}`;
-  const issues = await request<Array<{ number: number; title: string; pull_request?: unknown }>>('/issues?state=open&per_page=100');
-  return issues.find((item) => !item.pull_request && item.title === title)?.number;
+async function findIssue(proposal: Proposal, state = 'open'): Promise<number | undefined> {
+  for (let page = 1; page <= 100; page++) {
+    const issues = await request<Array<{ number: number; title: string; body?: string | null; state?: string; user?: { login?: string }; pull_request?: unknown }>>(`/issues?state=${state}&per_page=100&page=${page}`);
+    const managed = findManagedIssue(issues, proposal.migration);
+    if (managed) return managed.number;
+    if (issues.length < 100) break;
+  }
+  return undefined;
 }
 
 for (const proposal of proposals) {
@@ -95,7 +99,7 @@ for (const proposal of proposals) {
     }
     validateProposal(proposal, expectedBase, parents, changedFiles, reviewedConfig);
     const publisher: ProposalPublisher = {
-      isDismissed: hasClosedPullRequest,
+      isDismissed: async (item) => await hasClosedPullRequest(item) || Boolean(await findIssue(item, 'closed')),
       findPullRequest,
       pushBranch: async (item) => {
         if (!bareRoot || !item.commit) throw new Error('Verified bundle is required before pushing.');
