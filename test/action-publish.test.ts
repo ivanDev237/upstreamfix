@@ -30,6 +30,11 @@ describe('Action publication boundary', () => {
     expect(() => validateProposal({ ...proposal, branch: 'main' }, base, [base], proposal.files)).toThrow('branch');
   });
 
+  it('refuses artifact reviewers and labels not present in the reviewed base config', () => {
+    expect(() => validateProposal({ ...proposal, labels: ['automerge'] }, base, [base], proposal.files, { reviewers: ['ivanDev237'], labels: ['dependencies'] })).toThrow('labels');
+    expect(() => validateProposal({ ...proposal, reviewers: ['attacker'] }, base, [base], proposal.files, { reviewers: ['ivanDev237'], labels: ['dependencies'] })).toThrow('reviewers');
+  });
+
   it('opens, updates and closes a PR as the migration changes', async () => {
     const publisher: ProposalPublisher = {
       pushBranch: vi.fn(async () => undefined), openPullRequest: vi.fn(async () => undefined),

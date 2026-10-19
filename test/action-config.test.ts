@@ -15,6 +15,11 @@ describe('.upstreamfix.yml', () => {
     expect(() => parseActionConfig('exclude:\n  - .git/hooks\n')).toThrow('exclude');
   });
 
+  it('refuses labels that could invoke automatic merge policies', () => {
+    expect(() => parseActionConfig('labels:\n  - automerge\n')).toThrow('merge');
+    expect(() => parseActionConfig('labels:\n  - auto-merge\n')).toThrow('merge');
+  });
+
   it('does not allow configuration to turn off verification or authorize PR events', () => {
     expect(() => parseActionConfig('verify: false\n')).toThrow('verify');
     expect(() => parseActionConfig('triggers:\n  - pull_request_target\n')).toThrow('Unknown');

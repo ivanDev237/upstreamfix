@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { reconcileProposal, validateProposal, type Proposal, type ProposalPublisher } from './publish.js';
+import { parseActionConfig } from './config.js';
 
 const execFile = promisify(execFileCallback);
 const token = process.env.GITHUB_TOKEN;
@@ -50,6 +51,13 @@ if (!/^[A-Za-z0-9._/-]+$/.test(repoInfo.default_branch) || repoInfo.default_bran
 const defaultBranch = repoInfo.default_branch;
 const headRef = await request<{ object: { sha: string } }>(`/git/ref/heads/${encodeURIComponent(defaultBranch)}`);
 if (headRef.object.sha !== expectedBase) throw new Error('The default branch changed during migration; retry on its new head.');
+const configResponse = await fetch(`${apiRoot}/contents/.upstreamfix.yml?ref=${expectedBase}`, {
+  headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28' },
+});
+if (!configResponse.ok && configResponse.status !== 404) throw new Error(`Could not read reviewed .upstreamfix.yml: HTTP ${configResponse.status}.`);
+const configObject = configResponse.ok ? await configResponse.json() as { type?: string; encoding?: string; content?: string } : undefined;
+if (configObject && (configObject.type !== 'file' || configObject.encoding !== 'base64' || !configObject.content)) throw new Error('Reviewed .upstreamfix.yml is not a regular base64 file.');
+const reviewedConfig = parseActionConfig(configObject ? Buffer.from(configObject.content!, 'base64').toString('utf8') : '');
 const proposals = JSON.parse(await readFile(path.join(artifactRoot, 'proposals.json'), 'utf8')) as Proposal[];
 if (!Array.isArray(proposals) || proposals.length > 50) throw new Error('Invalid proposal artifact.');
 
@@ -80,7 +88,7 @@ for (const proposal of proposals) {
       parents = [...commitInfo.matchAll(/^parent ([0-9a-f]{40})$/gm)].map((match) => match[1]!);
       changedFiles = (await git(bareRoot, ['diff', '--name-only', '-z', expectedBase, proposal.commit!])).split('\0').filter(Boolean);
     }
-    validateProposal(proposal, expectedBase, parents, changedFiles);
+    validateProposal(proposal, expectedBase, parents, changedFiles, reviewedConfig);
     const publisher: ProposalPublisher = {
       findPullRequest,
       pushBranch: async (item) => {

@@ -52,6 +52,9 @@ export function parseActionConfig(source: string): ActionConfig {
     }
     if (active === 'reviewers' && !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(value)) throw new Error(`Invalid reviewer: ${value}.`);
     if (active === 'labels' && !/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,49}$/.test(value)) throw new Error(`Invalid label: ${value}.`);
+    if (active === 'labels' && /(?:auto[ _.-]*merge|merge[ _.-]*queue|merge[ _.-]*when[ _.-]*ready)/i.test(value)) {
+      throw new Error(`The label ${value} could trigger an automatic merge policy.`);
+    }
     if (active === 'verify' && value.length > 200) throw new Error('verify command is too long.');
     values.push(value);
   }
