@@ -45,6 +45,8 @@ describe('type-diff fixtures', () => {
     const generated = generateTypeFixtures(report('firebase-admin', 'firestore'));
     expect(generated.fixtures[0]?.source).toContain('typeof admin.firestore');
     expect(generated.fixtures[0]?.expectedNewDiagnostic).toBe(2339);
+    expect(generated.fixtures[0]?.migratedSource).toContain("from 'firebase-admin/firestore'");
+    expect(generated.fixtures[0]?.migratedSource).toContain('typeof getFirestore');
   });
   it('selects a removed member despite the declaration entrypoint prefix', () => {
     const set = generateTypeFixtures(report('firebase-admin', 'lib/index.d.ts:firestore'));
@@ -55,5 +57,10 @@ describe('type-diff fixtures', () => {
     const generated = generateTypeFixtures(report('stripe', 'Unknown.nested.complex'));
     expect(generated.fixtures).toEqual([]);
     expect(generated.manual).toHaveLength(1);
+  });
+
+  it('does not invent a payment-parameter replacement for Stripe', () => {
+    const generated = generateTypeFixtures(report('stripe', 'Stripe.PaymentIntentCreateParams.payment_method_types'));
+    expect(generated.fixtures[0]?.migratedSource).toBeUndefined();
   });
 });

@@ -14,6 +14,8 @@ export interface TypeFixture {
   oldVersion: string;
   newVersion: string;
   source: string;
+  /** Present only when a reviewed migration rule provides an unambiguous replacement. */
+  migratedSource?: string;
   expectedNewDiagnostic: number;
   expectedLine: number;
   derivedFrom: { symbol: string; source: string };
@@ -47,6 +49,9 @@ export function generateTypeFixtures(report: ApiReport): TypeFixtureSet {
       id: `${report.package}:${finding.symbol}`, packageName: report.package,
       oldVersion: report.oldVersion, newVersion: report.newVersion,
       source, expectedNewDiagnostic: 2339, expectedLine: 2,
+      ...(report.package === 'firebase-admin' && symbol === 'firestore'
+        ? { migratedSource: "import { getFirestore } from 'firebase-admin/firestore';\ntype Migrated = typeof getFirestore;\n" }
+        : {}),
       derivedFrom: { symbol: finding.symbol, source: finding.source },
     });
   }
