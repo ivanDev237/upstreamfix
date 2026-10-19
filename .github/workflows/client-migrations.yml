@@ -47,7 +47,14 @@ jobs:
           repository: ivanDev237/upstreamfix
           ref: ${{ inputs.upstreamfix_sha }}
           persist-credentials: false
+          fetch-depth: 0
           path: tool
+      - name: Refuse tool commits outside main or a release tag
+        shell: bash
+        run: |
+          if ! git -C tool merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            [[ -n "$(git -C tool tag --points-at HEAD --list 'v[0-9]*')" ]] || { echo 'Tool SHA is not on main or a release tag'; exit 1; }
+          fi
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
@@ -96,7 +103,14 @@ jobs:
           repository: ivanDev237/upstreamfix
           ref: ${{ inputs.upstreamfix_sha }}
           persist-credentials: false
+          fetch-depth: 0
           path: tool
+      - name: Refuse tool commits outside main or a release tag
+        shell: bash
+        run: |
+          if ! git -C tool merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            [[ -n "$(git -C tool tag --points-at HEAD --list 'v[0-9]*')" ]] || { echo 'Tool SHA is not on main or a release tag'; exit 1; }
+          fi
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24

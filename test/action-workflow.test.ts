@@ -15,6 +15,13 @@ describe('client migration workflow security boundary', () => {
     expect(source).toContain('timeout-minutes:');
   });
 
+  it('accepts only reviewed tool commits on main or an official release tag in both jobs', () => {
+    const source = workflow();
+    expect(source.match(/merge-base --is-ancestor/g)).toHaveLength(2);
+    expect(source.match(/tag --points-at/g)).toHaveLength(2);
+    expect((source.match(/fetch-depth: 0/g) ?? []).length).toBeGreaterThanOrEqual(2);
+  });
+
   it('keeps the privileged workflow off PR events and checks it in a read-only companion', () => {
     const source = workflow();
     expect(source).toContain('workflow_call:');
