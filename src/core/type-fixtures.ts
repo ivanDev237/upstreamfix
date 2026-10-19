@@ -1,5 +1,11 @@
 import type { ApiFinding, ApiReport } from './diff-api.js';
 import { validateExactVersion } from './diff-api.js';
+import { chmod } from 'node:fs/promises';
+
+/** mkdtemp creates mode 0700; the Docker compiler runs as an unprivileged user. */
+export async function makeFixtureReadable(root: string): Promise<void> {
+  await chmod(root, 0o755);
+}
 
 /** A compile-only test case. It must never be executed as JavaScript. */
 export interface TypeFixture {

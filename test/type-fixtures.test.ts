@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import type { ApiReport } from '../src/core/diff-api.js';
-import { generateTypeFixtures } from '../src/core/type-fixtures.js';
+import { generateTypeFixtures, makeFixtureReadable } from '../src/core/type-fixtures.js';
 
 const report = (packageName: string, symbol: string): ApiReport => ({
   package: packageName, oldVersion: packageName === 'stripe' ? '22.5.0' : '13.10.0',
@@ -16,6 +19,13 @@ describe('type-diff fixtures', () => {
     expect(workflow).toContain('workflow_call:');
     expect(workflow).toContain('repository: ivanDev237/upstreamfix');
     expect(workflow).toContain('ref: ${{ inputs.source_sha }}');
+  });
+  it('makes the temporary root traversable by the unprivileged Docker user', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-fixture-mode-'));
+    try {
+      await makeFixtureReadable(root);
+      expect((await stat(root)).mode & 0o111).toBe(0o111);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
   it('derives a Stripe removed parameter fixture with exact versions', () => {
     const generated = generateTypeFixtures(report('stripe', 'Stripe.PaymentIntentCreateParams.payment_method_types'));

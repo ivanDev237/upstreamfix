@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { diffPublishedApi } from '../src/core/diff-api.js';
-import { generateTypeFixtures, validateFixtureDiagnostics, type TypeFixture } from '../src/core/type-fixtures.js';
+import { generateTypeFixtures, makeFixtureReadable, validateFixtureDiagnostics, type TypeFixture } from '../src/core/type-fixtures.js';
 
 const cases = [
   { packageName: 'stripe', oldVersion: '22.4.0', newVersion: '23.0.0', member: 'payment_method_types' },
@@ -38,6 +38,7 @@ async function compile(fixture: TypeFixture, version: string): Promise<Array<{ c
     await writeFile(env.npm_config_globalconfig!, '');
     const install = await command('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--package-lock=false'], root, env);
     if (install.code !== 0) throw new Error(`Fixture install failed for ${fixture.id}@${version}: ${install.output.slice(-2000)}`);
+    await makeFixtureReadable(root);
     const result = await command('docker', [
       'run', '--rm', '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
       '--memory=1536m', '--memory-swap=1536m', '--pids-limit=128', '--user=65534:65534',
