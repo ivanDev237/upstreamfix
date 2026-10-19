@@ -21,12 +21,13 @@ export function generateTypeFixtures(report: ApiReport): TypeFixtureSet {
   const fixtures: TypeFixture[] = [];
   const manual: ApiFinding[] = [];
   for (const finding of report.removed) {
+    const symbol = finding.symbol.slice(finding.symbol.lastIndexOf(':') + 1);
     let source: string | undefined;
-    if (report.package === 'stripe' && /^Stripe\.[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*$/.test(finding.symbol)) {
-      const [, typeName, member] = finding.symbol.split('.');
+    if (report.package === 'stripe' && /^Stripe\.[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*$/.test(symbol)) {
+      const [, typeName, member] = symbol.split('.');
       source = `import type Stripe from 'stripe';\ntype Removed = Stripe.${typeName}['${member}'];\n`;
-    } else if (report.package === 'firebase-admin' && /^[A-Za-z_$][\w$]*$/.test(finding.symbol)) {
-      source = `import * as admin from 'firebase-admin';\ntype Removed = typeof admin.${finding.symbol};\n`;
+    } else if (report.package === 'firebase-admin' && /^[A-Za-z_$][\w$]*$/.test(symbol)) {
+      source = `import * as admin from 'firebase-admin';\ntype Removed = typeof admin.${symbol};\n`;
     }
     if (!source) { manual.push(finding); continue; }
     fixtures.push({

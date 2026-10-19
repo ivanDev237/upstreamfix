@@ -26,6 +26,11 @@ describe('type-diff fixtures', () => {
     expect(generated.fixtures[0]?.newVersion).toBe('23.0.0');
   });
 
+  it('accepts entrypoint-prefixed symbols from the real Stripe declaration report', () => {
+    const generated = generateTypeFixtures(report('stripe', 'esm/stripe.esm.node.d.ts:Stripe.PaymentIntentCreateParams.payment_method_types'));
+    expect(generated.fixtures[0]?.source).toContain("Stripe.PaymentIntentCreateParams['payment_method_types']");
+  });
+
   it('derives a Firebase namespace removal fixture', () => {
     const generated = generateTypeFixtures(report('firebase-admin', 'firestore'));
     expect(generated.fixtures[0]?.source).toContain('typeof admin.firestore');
