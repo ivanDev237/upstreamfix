@@ -31,3 +31,17 @@ it('refuses pull-request events before examining a client repository', async () 
   await expect(prepareProposals('/does-not-exist', '/tmp/upstreamfix-unused', 'a'.repeat(40), 'pull_request_target'))
     .rejects.toThrow('Only schedule and workflow_dispatch');
 });
+
+it('refuses to run client code when checkout stored a credential in Git config', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-action-token-'));
+  roots.push(root);
+  const client = path.join(root, 'client');
+  await execFile('git', ['init', '-q', client]);
+  await writeFile(path.join(client, 'package.json'), '{"name":"safe","version":"1.0.0"}\n');
+  await execFile('git', ['add', 'package.json'], { cwd: client });
+  await execFile('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base'], { cwd: client });
+  const base = (await execFile('git', ['rev-parse', 'HEAD'], { cwd: client })).stdout.trim();
+  await execFile('git', ['config', '--local', 'http.https://github.com/.extraheader', 'AUTHORIZATION: basic trap'], { cwd: client });
+  await expect(prepareProposals(client, path.join(root, 'output'), base, 'workflow_dispatch'))
+    .rejects.toThrow('Git credentials');
+});

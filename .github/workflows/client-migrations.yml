@@ -17,6 +17,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: upstreamfix-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   migrate:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
@@ -106,4 +110,4 @@ jobs:
           UPSTREAMFIX_INPUT_ROOT: ${{ runner.temp }}/upstreamfix-input
           UPSTREAMFIX_REPOSITORY: ${{ github.repository }}
           UPSTREAMFIX_BASE_SHA: ${{ github.sha }}
-        run: node tool/dist/action/publish.js
+        run: node tool/dist/action/publish-cli.js

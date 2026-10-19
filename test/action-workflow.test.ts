@@ -30,4 +30,13 @@ describe('client migration workflow security boundary', () => {
     expect(source).not.toContain('npm test');
     expect(source).not.toContain('repository: ${{ github.repository }}');
   });
+
+  it('has one bounded run per branch and never supplies secrets to the migration job', () => {
+    const source = workflow();
+    expect(source).toContain('concurrency:');
+    const migrate = source.split('\n  migrate:')[1]!.split('\n  publish:')[0]!;
+    expect(migrate).toContain('timeout-minutes:');
+    expect(migrate).not.toContain('GITHUB_TOKEN:');
+    expect(migrate).not.toContain('secrets.');
+  });
 });

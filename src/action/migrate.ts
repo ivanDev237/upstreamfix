@@ -1,5 +1,6 @@
 import { execFile as execFileCallback } from 'node:child_process';
 import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { parseActionConfig, shouldRunOnSchedule } from './config.js';
@@ -28,6 +29,7 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
   }
   const actualHead = (await execFile('git', ['rev-parse', 'HEAD'], { cwd: project, timeout: 10_000 })).stdout.trim();
   if (actualHead !== base) throw new Error('The checked-out client commit differs from the workflow base SHA.');
+  await assertNoCheckoutCredentials(project);
   const applicable = new Set((await findApplicableMigrations(project)).map((item) => item.id));
   const proposals: Proposal[] = [];
   for (const migration of migrations) {
@@ -72,4 +74,26 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
   }
   await writeFile(path.join(output, 'proposals.json'), `${JSON.stringify(proposals, null, 2)}\n`, { mode: 0o600 });
   return proposals;
+}
+
+async function assertNoCheckoutCredentials(project: string): Promise<void> {
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: process.env.HOME ?? os.homedir(),
+    GIT_CONFIG_GLOBAL: os.devNull, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0',
+  };
+  for (const scope of ['--local', '--worktree']) {
+    const { stdout } = await execFile('git', ['config', scope, '--includes', '--null', '--list'], {
+      cwd: project, env, timeout: 10_000, maxBuffer: 1024 * 1024,
+    });
+    for (const record of stdout.split('\0').filter(Boolean)) {
+      const index = record.indexOf('\n');
+      if (index < 0) continue;
+      const key = record.slice(0, index).toLowerCase();
+      const value = record.slice(index + 1);
+      if (/^credential(?:\.|$)/.test(key) || /^http(?:\.|$).*\.extraheader$/.test(key)
+        || (/^remote\..*\.url$/.test(key) && /^https?:\/\/[^/]*@/.test(value))) {
+        throw new Error('Git credentials are stored in the client checkout; use checkout with persist-credentials: false.');
+      }
+    }
+  }
 }
