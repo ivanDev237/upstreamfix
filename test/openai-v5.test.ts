@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Project } from 'ts-morph';
+import { Project, ModuleKind, ScriptTarget } from 'ts-morph';
 import { openaiV5 } from '../src/migrations/openai-v5/index.js';
 import { migrations } from '../src/migrations/index.js';
 import { readFileSync } from 'node:fs';
@@ -115,5 +115,17 @@ client.containers.files.del('container_1', 'file_1');
     const outcome = migrate("import OpenAI from 'openai';\nconst client = new OpenAI(\nclient.files.del('x');\n");
     expect(outcome.fileUpdates).toEqual([]);
     expect(outcome.manual.some((item) => item.reason.includes('syntax'))).toBe(true);
+  });
+
+  it('does not confuse semantic top-level-await errors with syntax corruption', () => {
+    const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2019 } });
+    project.createSourceFile('/client.ts', `import OpenAI from 'openai';
+const client = new OpenAI();
+await Promise.resolve();
+client.files.del('file_1');
+`);
+    const outcome = openaiV5.transform(project);
+    expect(outcome.manual.some((item) => item.reason.includes('syntax'))).toBe(false);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("client.files.delete('file_1')");
   });
 });

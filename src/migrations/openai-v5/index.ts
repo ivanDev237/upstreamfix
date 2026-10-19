@@ -69,7 +69,7 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       && initializer.getArguments()[0]?.getText().replace(/['"]/g, '') === 'openai') imported.add(declaration.getName());
   }
   if (imported.size === 0 && !file.getImportDeclarations().some((item) => item.getModuleSpecifierValue().startsWith('openai/'))) return;
-  if (file.getPreEmitDiagnostics().some((item) => item.getCategory() === 1 && item.getCode() >= 1000 && item.getCode() < 2000)) {
+  if (file.getProject().getProgram().getSyntacticDiagnostics(file).some((item) => item.getCategory() === 1)) {
     result.manual.push({ file: file.getFilePath(), line: 1, reason: 'The source contains syntax errors; no OpenAI edits were applied.', snippet: '' });
     return;
   }
