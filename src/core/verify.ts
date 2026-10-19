@@ -92,6 +92,7 @@ export async function verifyProposedMigration(
     const env = sanitizedEnvironment(isolatedHome);
     const installChecks: VerificationCheck[] = [];
     const installDirs = new Set(packageDirs);
+    const installedRoots = new Set<string>();
     const rootPackage = await readPackageJson(projectCopy).catch(() => undefined);
     if (rootPackage && (rootPackage.scripts?.typecheck || rootPackage.scripts?.test || rootPackage.workspaces) && hasDependencies(rootPackage)) {
       installDirs.add(projectCopy);
@@ -100,6 +101,8 @@ export async function verifyProposedMigration(
       const pkg = await readPackageJson(directory);
       if (!hasDependencies(pkg)) continue;
       const plan = await installCommand(projectCopy, directory, pkg);
+      if (installedRoots.has(plan.cwd)) continue;
+      installedRoots.add(plan.cwd);
       if (plan.command === 'yarn' && plan.yarnMajor && plan.yarnMajor >= 2) {
         const versionCheck = await runCheck('Check Yarn version', 'yarn', ['--version'], plan.cwd, env, timeoutMs, options.execute);
         checks.push(versionCheck);
@@ -334,7 +337,7 @@ async function findLockfileRoot(root: string, directory: string): Promise<string
     if (current === root) break;
     current = path.dirname(current);
   }
-  return root;
+  return directory;
 }
 
 async function findLockfileName(directory: string): Promise<string | undefined> {

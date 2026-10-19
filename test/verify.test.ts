@@ -57,6 +57,21 @@ afterEach(async () => {
 });
 
 describe('migration verification', () => {
+  it('installs a nested package without a lockfile in that package directory', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ name: 'root', scripts: {} }));
+    await mkdir(path.join(cwd, 'functions'));
+    await writeFile(path.join(cwd, 'functions', 'package.json'), JSON.stringify({ dependencies: { 'firebase-admin': '^14.0.0' }, scripts: { test: 'node -e 1' } }));
+    let installDirectory = '';
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args, directory) => {
+        if (args[0] === 'install') installDirectory = directory;
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('passed');
+    expect(path.basename(installDirectory)).toBe('functions');
+  });
   it('parses a package manifest with a UTF-8 BOM', async () => {
     const cwd = await makeProject({ typecheck: 'node -e "process.exit(0)"' });
     const manifest = await readFile(path.join(cwd, 'package.json'), 'utf8');
