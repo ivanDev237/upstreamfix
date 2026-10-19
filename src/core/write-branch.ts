@@ -192,15 +192,17 @@ async function assertChangedSourcesUseTargetSdk(projectRoot: string, migration: 
 
 async function git(cwd: string, args: string[]): Promise<string> {
   try {
+    const settings = await readPreservedGitSettings(cwd);
     const { stdout } = await execFile('git', [
       '-c', `core.hooksPath=${os.devNull}`,
       '-c', 'core.fsmonitor=false',
       '-c', 'core.untrackedCache=false',
       '-c', 'protocol.file.allow=never',
+      '-c', `commit.gpgsign=${settings.get('commit.gpgsign') === 'true' ? 'true' : 'false'}`,
       ...args,
     ], {
       cwd,
-      env: await gitEnvironment(cwd),
+      env: await gitEnvironment(cwd, settings),
       timeout: 30_000,
       maxBuffer: 2 * 1024 * 1024,
       windowsHide: true,
@@ -221,8 +223,7 @@ const preservedGitConfigKeys = [
   'user.signingkey',
 ];
 
-async function gitEnvironment(cwd: string): Promise<NodeJS.ProcessEnv> {
-  const settings = await readPreservedGitSettings(cwd);
+async function gitEnvironment(cwd: string, settings: Map<string, string>): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH ?? '/usr/bin:/bin',
     HOME: process.env.HOME ?? os.homedir(),
@@ -295,10 +296,7 @@ async function readGitConfig(
 }
 
 async function assertSafeLocalGitConfig(repositoryRoot: string): Promise<void> {
-  const { stdout } = await execFile('git', [
-    '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'protocol.file.allow=never',
-    'config', '--local', '--includes', '--show-origin', '--null', '--list',
-  ], {
+  const options = {
     cwd: repositoryRoot,
     env: {
       PATH: process.env.PATH ?? '/usr/bin:/bin',
@@ -310,19 +308,28 @@ async function assertSafeLocalGitConfig(repositoryRoot: string): Promise<void> {
     timeout: 10_000,
     maxBuffer: 1024 * 1024,
     windowsHide: true,
-  });
-  const fields = stdout.split('\0');
+  };
+  const output = await Promise.all(['--local', '--worktree'].map(async (scope) => {
+    const { stdout } = await execFile('git', [
+      '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-c', 'protocol.file.allow=never',
+      'config', scope, '--includes', '--show-origin', '--null', '--list',
+    ], options);
+    return stdout;
+  }));
   const dangerous: string[] = [];
-  for (let index = 0; index + 1 < fields.length; index += 2) {
-    const origin = fields[index] ?? '';
-    const record = fields[index + 1] ?? '';
-    const separator = record.indexOf('\n');
-    if (separator < 0) continue;
-    const key = record.slice(0, separator).toLowerCase();
-    const value = record.slice(separator + 1).trim();
-    if (/^include(?:if\..*)?\.path$/.test(key)) dangerous.push(`${origin}: ${key}`);
-    else if (key === 'core.fsmonitor' && value && !/^false$/i.test(value)) dangerous.push(`${origin}: ${key}`);
-    else if (/^(?:filter\..*\.(?:clean|smudge|process|required)|diff\.external|diff\..*\.command|gpg\.program|gpg\.(?:ssh|x509)\.program)$/.test(key) && value) dangerous.push(`${origin}: ${key}`);
+  for (const listing of output) {
+    const fields = listing.split('\0');
+    for (let index = 0; index + 1 < fields.length; index += 2) {
+      const origin = fields[index] ?? '';
+      const record = fields[index + 1] ?? '';
+      const separator = record.indexOf('\n');
+      if (separator < 0) continue;
+      const key = record.slice(0, separator).toLowerCase();
+      const value = record.slice(separator + 1).trim();
+      if (/^include(?:if\..*)?\.path$/.test(key)) dangerous.push(`${origin}: ${key}`);
+      else if (key === 'core.fsmonitor' && value && !/^false$/i.test(value)) dangerous.push(`${origin}: ${key}`);
+      else if (/^(?:filter\..*\.(?:clean|smudge|process|required)|diff\.external|diff\..*\.command|gpg\..*)$/.test(key) && value) dangerous.push(`${origin}: ${key}`);
+    }
   }
   if (dangerous.length > 0) {
     throw new Error('The repository has configured Git filters, diff commands, or fsmonitor hooks. Remove them before using --write.');

@@ -230,6 +230,32 @@ describe('verified Git branch writes', () => {
     await expect(writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions }))
       .rejects.toThrow('configured Git filters, diff commands, or fsmonitor hooks');
   });
+  it.each(['gpg.openpgp.program', 'gpg.ssh.defaultKeyCommand'])('refuses local signing command %s before it executes', async (key) => {
+    const cwd = await makeRepository();
+    const marker = path.join(cwd, 'signer-ran');
+    const script = path.join(cwd, 'signer.sh');
+    await writeFile(script, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`);
+    await chmod(script, 0o755);
+    await git(cwd, 'config', key, script);
+    await git(cwd, 'config', 'commit.gpgsign', 'true');
+    await expect(writeMigrationOnBranch(firebaseAdminV14, { cwd, allowDirty: true, verificationOptions }))
+      .rejects.toThrow(/configured Git|signing/i);
+    await expect(readFile(marker, 'utf8')).rejects.toThrow();
+  });
+
+  it('refuses a dangerous setting from Git worktree config', async () => {
+    const cwd = await makeRepository();
+    const marker = path.join(cwd, 'worktree-signer-ran');
+    const script = path.join(cwd, 'worktree-signer.sh');
+    await writeFile(script, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`);
+    await chmod(script, 0o755);
+    await git(cwd, 'config', 'extensions.worktreeConfig', 'true');
+    await git(cwd, 'config', '--worktree', 'gpg.openpgp.program', script);
+    await git(cwd, 'config', '--worktree', 'commit.gpgsign', 'true');
+    await expect(writeMigrationOnBranch(firebaseAdminV14, { cwd, allowDirty: true, verificationOptions }))
+      .rejects.toThrow(/configured Git|signing/i);
+    await expect(readFile(marker, 'utf8')).rejects.toThrow();
+  });
   it('accepts a symlinked cwd that points inside the repository', async () => {
     const cwd = await makeRepository();
     const linkDir = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-linked-cwd-'));
