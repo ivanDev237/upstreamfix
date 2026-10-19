@@ -20,6 +20,16 @@ function outcome(overrides: Partial<RunOutcome> = {}): RunOutcome {
 }
 
 describe('security of Markdown reports', () => {
+  it('redacts underscored secrets in escaped table cells', () => {
+    const secret = 'AIzaSyAbCdEfGhIjKlMnOpQrStUvWxYz012345678';
+    const report = renderMarkdownReport(migration, outcome({
+      changes: [{ file: 'src/x.ts', line: 1, rule: 'key', before: `private_key: "literal_secret_value"; api: "${secret}"`, after: 'redacted' }],
+      proposedDiff: [], manual: [],
+    }), true);
+    expect(report).not.toContain(secret);
+    expect(report).not.toContain('literal\\_secret\\_value');
+    expect(report).toContain('REDACTED');
+  });
   it('redacts realistic Stripe, webhook, Google API, PEM, and Firebase private-key values everywhere', () => {
     const report = renderMarkdownReport(migration, outcome({
       manifestNotes: ['Stripe key sk_test_51AbCdEfGhIjKlMnOpQr and rk_live_51AbCdEfGhIjKlMnOpQr'],

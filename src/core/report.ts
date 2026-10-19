@@ -145,12 +145,12 @@ function markdownCell(value: string): string {
 }
 
 function escapeMarkdownText(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return maskSecrets(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/([\\`*_{}\[\]()#+.!])/g, '\\$1');
 }
 
 function inlineCode(value: string): string {
-  const normalized = value.replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
+  const normalized = maskSecrets(value).replace(/\r?\n/g, ' ').replace(/\|/g, '\\|');
   const runs = [...normalized.matchAll(/`+/g)].map(([run]) => run.length);
   const delimiter = '`'.repeat(Math.max(1, ...runs) + 1);
   const needsPadding = normalized.startsWith('`') || normalized.endsWith('`') || /^\s|\s$/.test(normalized);
