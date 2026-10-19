@@ -198,6 +198,6 @@ describe('UpstreamFix CLI', () => {
     expect(output.mock.calls.map(([message]) => String(message)).join('\n')).toContain('"engines": { "node": ">=22" }');
     expect(JSON.parse(await readFile(path.join(cwd, 'package.json'), 'utf8')).engines).toBeUndefined();
     await expect(createProgram().parseAsync(['node', 'upstreamfix', 'migrate', 'firebase-admin@14', '--cwd', cwd, '--node-runtime', '20']))
-      .rejects.toThrow('Only --node-runtime 22 is supported');
+      .rejects.toThrow('--node-runtime 22 applies to firebase-admin@14');
   });
 });

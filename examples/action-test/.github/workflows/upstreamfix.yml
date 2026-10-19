@@ -1,0 +1,20 @@
+name: UpstreamFix API migrations
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 5 * * 1'
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+jobs:
+  upstreamfix:
+    # Replace both placeholders with the same reviewed 40-character SHA from main after merge.
+    uses: ivanDev237/upstreamfix/.github/workflows/client-migrations.yml@REPLACE_WITH_REVIEWED_MAIN_SHA
+    with:
+      upstreamfix_sha: REPLACE_WITH_REVIEWED_MAIN_SHA
+      ci_workflow: ci.yml

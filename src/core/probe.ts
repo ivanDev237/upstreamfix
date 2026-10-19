@@ -112,7 +112,8 @@ export async function probeProject(cwd: string, target: string, options: ProbeOp
       'run', '--rm', '--init', '--name', containerName, '--network=none', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
       '--memory=1536m', '--memory-swap=1536m', '--pids-limit=128', '--user=65534:65534',
       '--tmpfs=/tmp:rw,nosuid,nodev,size=64m', ...dockerBindArgs(project, '/workspace', true), '-w', '/workspace',
-      nodeImage, 'node', '/workspace/node_modules/typescript/bin/tsc', '--noEmit', '--pretty', 'false',
+      nodeImage, 'node', '/workspace/node_modules/typescript/bin/tsc', '--noEmit', '--pretty', 'false', '--incremental',
+      '--tsBuildInfoFile', '/tmp/upstreamfix-probe.tsbuildinfo',
     ];
     const before = await run('baseline-typecheck', 'docker', typeArgs);
     const baselineDiagnostics = parseTypeScriptDiagnostics(before.output);

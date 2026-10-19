@@ -22,6 +22,14 @@ npx --yes upstreamfix@latest migrate firebase-admin@14 --cwd /path/to/your/proje
 
 The report path is explicit; preview commands do not create report files unless `--report` is supplied. The Firebase Admin migration currently targets projects using the namespaced API and proposes modular API changes. Review the diff and manual findings against the [official migration guide](https://firebase.google.com/docs/admin/migrate-node-v10).
 
+## GitHub Action
+
+Copy the [client workflow example](examples/action-test/.github/workflows/upstreamfix.yml) into your repository and pin both references to the same reviewed UpstreamFix commit SHA. The reusable workflow runs on a schedule or by manual dispatch. Its first job checks out your code without stored credentials, uses only `contents: read`, prepares a verified migration in a temporary copy, and uploads a Git bundle and redacted report. Its second job downloads and validates that bundle, then opens or updates a pull request. It opens an issue when manual review is needed and never merges a PR.
+
+An optional `.upstreamfix.yml` supports `frequency` (`daily`, `weekly`, `manual`), `ignore`, `exclude`, `verify`, `reviewers`, and `labels`. Each list uses one `  - value` line per item. Custom `verify` commands run only in the first job's isolated verification copy. The config cannot increase permissions or turn off verification. A repository with no configured checks will not receive an automatic migration PR.
+
+Pull requests created with the default `GITHUB_TOKEN` do not trigger the repository's normal `pull_request` workflows. Run your CI manually on the proposed branch, or adapt the publication job to use a narrowly scoped GitHub App token or fine-grained PAT supplied by your organization. Review the report, the official migration guide, and the PR diff before merging.
+
 ## Supported migrations
 
 | Migration | What it previews | Status |
@@ -29,6 +37,7 @@ The report path is explicit; preview commands do not create report files unless 
 | `firebase-admin@14` | Firebase Admin SDK v13 namespaced API to v14 modular API | Benchmarked on 12 valid public repositories; 316 of 340 detected change groups migrated automatically. Manual findings and runtime prerequisites still require review. |
 | `stripe@22` | Stripe Node SDK v21 to v22 | Benchmarked on 6 installable public repositories; payment-sensitive cases remain manual. See [Stripe's v22 guide](https://github.com/stripe/stripe-node/wiki/Migration-guide-for-v22). |
 | `stripe@23` | Stripe Node SDK v22 to v23 | Benchmarked on 4 public repositories; a removed payment parameter was identified for manual review. See [Stripe's v23 guide](https://github.com/stripe/stripe-node/wiki/Migration-guide-for-v23). |
+| `openai@5` | OpenAI Node SDK v4 to v5 | Conservative changes for renamed methods, beta chat paths, and moved imports. Review runtime requirements and semantic changes against the [official v5 guide](https://github.com/openai/openai-node/blob/v5.0.0/MIGRATION.md). |
 
 Run `upstreamfix list` for the catalog included in the installed version. Run `upstreamfix scan --cwd <project>` to select migrations from package versions declared in root or nested `package.json` files.
 
@@ -51,7 +60,7 @@ upstreamfix probe stripe@23.0.0 --cwd /path/to/project
 
 ## What is not supported
 
-- The GitHub Action exits without changing a repository; automatic pull requests are not available.
+- Automatic PRs require a clean, verified migration with no manual findings and a repository that permits GitHub Actions to create pull requests. The Action never merges changes.
 - `watch`, `diff-api`, and `probe` can identify new version and type-change candidates. They do not generate or approve safe migration rules automatically.
 - Only migrations shown by `upstreamfix list` are supported. Unsupported, ambiguous, or semantic API changes require manual work.
 - Lockfile previews cover standalone root projects using npm v3, pnpm, or Yarn Classic lockfiles. Regenerating a lockfile may contact the package registry; pnpm or Yarn must already be installed and match any `packageManager` pin. Workspaces, Yarn Berry, shrinkwrap, project package-manager configuration files, and local or non-registry dependencies are left for manual review.
@@ -65,6 +74,8 @@ Optional `--verify` requires a Git working tree and copies tracked or non-ignore
 After reviewing a preview, `--write` verifies the migration in an isolated Git worktree and commits it on a new `upstreamfix/<migration>` branch. It refuses non-Git projects, dirty trees (unless `--allow-dirty` is supplied), manual findings, missing or failed verification checks, and source changes whose containing manifest does not declare the target SDK major. It never switches or edits your current working tree. Verification still runs project scripts on your machine, so use it only with projects you trust. No branch is merged or pushed automatically.
 
 Firebase Admin v14 requires Node.js 22 or newer. If your project omits `engines.node`, the preview explains why the dependency cannot yet be upgraded. Once you have confirmed your deployment runtime, add `"engines": { "node": ">=22" }` yourself or pass `--node-runtime 22` to `migrate firebase-admin@14` (including with `--write`). That option proposes the Node range alongside the SDK update. It never overrides an existing incompatible `engines.node` range.
+
+OpenAI SDK v5 requires Node.js 20 or newer. After confirming your deployment runtime, pass `--node-runtime 20` to `migrate openai@5` to propose `"engines": { "node": ">=20" }` when the range is absent. An existing incompatible range must be reviewed and changed by you; the option does not override it. `scan` accepts the same option and applies it only to `openai@5`.
 
 ## Contributing
 

@@ -1,0 +1,8 @@
+{
+  "name": "upstreamfix-action-test",
+  "private": true,
+  "version": "0.0.0",
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node test.mjs" },
+  "dependencies": { "firebase-admin": "13.10.0" }
+}

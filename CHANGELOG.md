@@ -5,6 +5,9 @@ series are experimental; review proposed migrations before applying them.
 
 ## Unreleased
 
+- Added a two-job GitHub Actions migration workflow: read-only migration and separately permissioned PR or issue publication.
+- Added validated `.upstreamfix.yml` configuration, isolated custom checks, and a pinned test-repository example.
+
 ## 0.1.3
 
 - Fixed the CLI entry point: `0.1.2` exited silently when invoked through `npx` or a global installation.

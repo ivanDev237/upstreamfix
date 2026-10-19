@@ -379,6 +379,12 @@ export async function assertPinnedCommitIsBranchAncestor(
   await run('git', ['merge-base', '--is-ancestor', repo.commit, `refs/remotes/origin/${repo.branch}`], checkout, home);
 }
 
+export function confirmBenchmarkNodeRuntime(manifest: PackageManifest, migration: Migration): string | undefined {
+  if (migration.id !== 'openai@5' || manifest.engines?.node !== undefined) return undefined;
+  manifest.engines = { ...manifest.engines, node: '>=20' };
+  return 'Node.js >=20 was declared in the disposable benchmark copy after explicit benchmark-only confirmation of its Node 24 container; the repository production runtime remains unverified.';
+}
+
 async function ensureTargetMajorInBenchmarkCopy(root: string, packageDirs: string[], migration: Migration): Promise<string[]> {
   const notes: string[] = [];
   for (const directory of packageDirs) {
@@ -386,6 +392,8 @@ async function ensureTargetMajorInBenchmarkCopy(root: string, packageDirs: strin
     const raw = await readFile(file, 'utf8');
     const manifest = JSON.parse(raw) as PackageManifest;
     const beforeUpdate = JSON.stringify(manifest);
+    const runtimeNote = confirmBenchmarkNodeRuntime(manifest, migration);
+    if (runtimeNote) notes.push(runtimeNote);
     notes.push(...(migration.updateManifest?.(manifest) ?? []));
     let changed = JSON.stringify(manifest) !== beforeUpdate;
     const exactTarget = `${migration.toMajor}.0.0`;
@@ -478,7 +486,9 @@ async function runPhaseChecks(
 }
 
 export async function analyzeBenchmarkMigration(migration: Migration, checkout: string): Promise<RunOutcome> {
-  return runMigration(migration, { cwd: checkout, dryRun: true, analysisOnly: true });
+  // The reviewed OpenAI corpus is tested in Node 24 containers. This confirms
+  // the benchmark runtime; it does not assert the repositories' deployment runtimes.
+  return runMigration(migration, { cwd: checkout, dryRun: true, analysisOnly: true, nodeRuntime: migration.id === 'openai@5' ? 20 : undefined });
 }
 
 export async function benchmarkOne(
@@ -569,12 +579,20 @@ export async function benchmarkOne(
         result.details += ` Candidate new TypeScript diagnostics after SDK update (not attributed automatically): ${newlyReported.map((item) => `${item.file}:${item.line}:${item.column} TS${item.code} ${item.message}`).join('; ')}.`;
       }
     }
-    const requiresRuntimeReview = targetNotes.some((note) => note.toLowerCase().includes('node.js'));
+    if (migration.packageName === 'openai' && /TS2304[^;\n]*(?:RequestInit|Headers|Blob|File|Response|FormData|AbortController)/.test(after.typecheck)
+      && !/TS2304[^;\n]*(?:RequestInit|Headers|Blob|File|Response|FormData|AbortController)/.test(before.typecheck)) {
+      result.details += ' OpenAI v5 uses web platform types. Check the project TypeScript lib setting (for example DOM) and compatible Node type declarations before attributing these errors to a migration rule.';
+    }
+    const requiresRuntimeReview = requiresRuntimeReviewFromNotes(targetNotes);
     result.status = result.manual > 0 || requiresRuntimeReview ? 'manual review required' : 'completed';
   } catch (error) {
     result.details = [result.details, error instanceof Error ? error.message : String(error)].filter(Boolean).join(' ');
   }
   return result;
+}
+
+export function requiresRuntimeReviewFromNotes(notes: string[]): boolean {
+  return notes.some((note) => /\brequires Node\.js \d+ or (?:later|newer)\b/.test(note));
 }
 
 export function renderBenchmarkReport(
@@ -589,9 +607,11 @@ export function renderBenchmarkReport(
   const lines = [
     `# ${migration.title} public repository benchmark`, '',
     `Generated: ${new Date().toISOString()}`, '',
+    ...(process.env.GITHUB_RUN_ID && /^\d+$/.test(process.env.GITHUB_RUN_ID) ? [`Run ID: \`${process.env.GITHUB_RUN_ID}\``, ''] : []),
+    ...((process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA) && /^[0-9a-f]{40}$/.test(process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA ?? '') ? [`Tool SHA: \`${process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA}\``, ''] : []),
     `Run status: **${completion}** (${results.length} of ${expectedCount} repositories recorded).`, '',
     `Automatic migration rate: **${rate}** (${migrated} of ${detected} detected migration items).`,
-    'The denominator counts migration change groups plus manual API findings; it does not count individual API callsites. Node.js runtime prerequisites and temporary benchmark-only dependency overrides are reported as notes, not manual migration findings.', '',
+    'The denominator counts migration change groups plus manual API findings, including potential edits withheld in files with manual findings; it does not count individual API callsites. The OpenAI benchmark confirms Node.js 20 for its disposable Node 24 container only; it does not establish any repository’s production runtime.', '',
     '| Repository | Pinned commit | Status | Detected items | Migrated | Manual | Types before | Types after | Tests before | Tests after | Details |',
     '|---|---|---:|---:|---:|---:|---|---|---|---|---|',
     ...results.map((row) => `| ${cell(row.name)} | \`${row.commit.slice(0, 12)}\` | ${cell(row.status)} | ${row.usages} | ${row.migrated} | ${row.manual} | ${cell(row.typecheck.before)} | ${cell(row.typecheck.after)} | ${cell(row.tests.before)} | ${cell(row.tests.after)} | ${cell(row.details)} |`),

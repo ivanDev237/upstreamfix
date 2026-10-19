@@ -5,7 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import { applyProposedDiffs, applyProposedFiles, copyProject, executeWithProcessGroup, verifyProposedMigration, type VerificationOptions } from '../src/core/verify.js';
+import { applyProposedDiffs, applyProposedFiles, copyProject, executeWithProcessGroup, readRegularFile, verifyProposedMigration, type VerificationOptions } from '../src/core/verify.js';
 
 const temporaryDirectories: string[] = [];
 const execFile = promisify(execFileCallback);
@@ -59,6 +59,22 @@ afterEach(async () => {
 });
 
 describe('migration verification', () => {
+  it('runs configured custom checks only in the isolated verification copy', async () => {
+    const cwd = await makeProject();
+    const observed: Array<{ command: string; args: string[]; directory: string; token?: string }> = [];
+    process.env.UPSTREAMFIX_TEST_TOKEN = 'trap-value';
+    const result = await verifyProposedMigration(cwd, [diff], {
+      customCommands: ['node -e "process.exit(0)"'],
+      execute: async (command, args, directory, env) => {
+        observed.push({ command, args, directory, token: env.UPSTREAMFIX_TEST_TOKEN });
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('passed');
+    expect(result.checks.some((check) => check.name === 'Custom check 1')).toBe(true);
+    expect(observed.some((check) => check.command === '/bin/sh' && check.args[0] === '-c')).toBe(true);
+    expect(observed.every((check) => check.directory !== cwd && !check.token)).toBe(true);
+  });
   it('respects a global Git excludesFile when copying a project', async () => {
     const cwd = await makeProject();
     const home = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-git-global-'));
@@ -181,6 +197,45 @@ describe('migration verification', () => {
     });
     expect(result.status).toBe('failed');
     expect(result.checks[0]?.output).toContain('did not provide an installation result');
+  });
+
+  it('refuses a manifest replaced by a symlink during container installation', async () => {
+    const cwd = await makeProject({ test: 'node -e 1' });
+    const secret = path.join(cwd, 'outside-secret.txt');
+    await writeFile(secret, 'private payload that must not enter a report');
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args, directory) => {
+        if (args[0] === 'install') {
+          await rm(path.join(directory, 'package.json'));
+          await symlink(secret, path.join(directory, 'package.json'));
+        }
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('failed');
+    expect(JSON.stringify(result)).not.toContain('private payload');
+  });
+
+  it('T35 refuses a regular file reached through a symlinked parent directory', async () => {
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-parent-outside-'));
+    const project = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-parent-project-'));
+    temporaryDirectories.push(outside, project);
+    await writeFile(path.join(outside, 'package.json'), '{"name":"secret"}');
+    await symlink(outside, path.join(project, 'linked'));
+    await expect(readRegularFile(path.join(project, 'linked', 'package.json'))).rejects.toThrow('symbolic link');
+  });
+
+  it('T35 never echoes invalid package contents in a verification error', async () => {
+    const cwd = await makeProject();
+    const marker = 'PRIVATE_CANARY_DO_NOT_LOG';
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args, directory) => {
+        if (args[0] === 'install') await writeFile(path.join(directory, 'package.json'), `{${marker}`);
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('failed');
+    expect(JSON.stringify(result)).not.toContain(marker);
   });
 
   it('reuses a private pnpm store across runs without exposing it to project scripts', async () => {

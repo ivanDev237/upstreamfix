@@ -1,0 +1,137 @@
+name: Real SDK probe
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/probe.yml'
+      - 'src/core/probe.ts'
+      - 'src/core/diagnostic-diff.ts'
+      - 'src/core/runner.ts'
+      - 'src/core/verify.ts'
+      - 'src/core/docker-mount.ts'
+      - 'src/core/process-cleanup.ts'
+      - 'src/core/manifest.ts'
+      - 'src/core/diff-api.ts'
+      - 'src/cli.ts'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact reviewed UpstreamFix source commit
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact reviewed UpstreamFix source commit
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probe-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compiler-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Exercise probe compiler flags on ordinary and composite projects
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ts4" "$RUNNER_TEMP/ts5" "$RUNNER_TEMP/simple" "$RUNNER_TEMP/composite"
+          npm install --prefix "$RUNNER_TEMP/ts4" --ignore-scripts --no-package-lock --no-audit --no-fund typescript@4.9.5
+          npm install --prefix "$RUNNER_TEMP/ts5" --ignore-scripts --no-package-lock --no-audit --no-fund typescript@5.9.3
+          printf 'const value: string = "ok";\n' > "$RUNNER_TEMP/simple/index.ts"
+          cp "$RUNNER_TEMP/simple/index.ts" "$RUNNER_TEMP/composite/index.ts"
+          printf '{"compilerOptions":{"strict":true}}\n' > "$RUNNER_TEMP/simple/tsconfig.json"
+          printf '{"compilerOptions":{"strict":true,"composite":true}}\n' > "$RUNNER_TEMP/composite/tsconfig.json"
+          for major in 4 5; do
+            for kind in simple composite; do
+              node "$RUNNER_TEMP/ts$major/node_modules/typescript/bin/tsc" \
+                --project "$RUNNER_TEMP/$kind/tsconfig.json" --noEmit --pretty false \
+                --incremental --tsBuildInfoFile "$RUNNER_TEMP/$kind-$major.tsbuildinfo"
+              echo "TypeScript $major $kind: available"
+            done
+          done
+  signet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Validate immutable source reference
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ivanDev237/upstreamfix
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+          path: tool
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install reviewed tool
+        working-directory: tool
+        run: npm ci --ignore-scripts && npm run build
+      - name: Clone reviewed signet snapshot
+        run: |
+          git init -q signet
+          git -C signet remote add origin https://github.com/KenTaniguchi-R/signet.git
+          git -C signet fetch --depth=1 origin 6aae309def8500dae9f60efc6e682a6fef9b169b
+          git -C signet checkout --detach FETCH_HEAD
+          test "$(git -C signet rev-parse HEAD)" = 6aae309def8500dae9f60efc6e682a6fef9b169b
+      - name: Compare compiler diagnostics inside network-disabled Docker
+        shell: bash
+        env:
+          PROBE_JSON: ${{ runner.temp }}/signet-probe.json
+          PROBE_REPORT: ${{ runner.temp }}/signet-probe.md
+        run: |
+          set -o pipefail
+          set +e
+          node tool/dist/cli.js probe stripe@23.0.0 -C signet --yes > "$RUNNER_TEMP/probe-output.txt" 2>&1
+          probe_exit=$?
+          set -e
+          tail -n +2 "$RUNNER_TEMP/probe-output.txt" > "$PROBE_JSON"
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const result = JSON.parse(readFileSync(process.env.PROBE_JSON, 'utf8'));
+          const finding = result.manualFindings?.find((item) => item.file.endsWith('src/lib/spend.ts')
+            && item.message.includes('payment_method_types'));
+          const report = ['# Real Stripe v23 probe on signet', '',
+            'Reviewed commit: `6aae309def8500dae9f60efc6e682a6fef9b169b`.',
+            'Baseline and target diagnostics were measured in a temporary copy. TypeScript ran in Docker without network access.', '',
+            `Status: ${result.status}`, `Current SDK: ${result.currentVersion ?? 'unknown'}`,
+            `Target SDK: ${result.targetVersion}`, '',
+            finding ? `Candidate: ${finding.file}:${finding.line} — ${finding.message}` : 'No payment_method_types candidate found.', '',
+            'A new diagnostic locates a possible incompatibility; it does not prove causality or justify an automatic rewrite.', ''];
+          writeFileSync(process.env.PROBE_REPORT, report.join('\n'));
+          if (result.status !== 'available' || !finding) {
+            console.error(`Probe unavailable or missing candidate: ${result.note ?? 'no further detail'}`);
+            process.exitCode = 1;
+          }
+          NODE
+          test "$probe_exit" -eq 0
+      - name: Upload full and readable reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: probe-signet-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/signet-probe.json
+            ${{ runner.temp }}/signet-probe.md
+            ${{ runner.temp }}/probe-output.txt
+          if-no-files-found: warn
+          retention-days: 30

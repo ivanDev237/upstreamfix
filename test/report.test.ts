@@ -20,6 +20,12 @@ function outcome(overrides: Partial<RunOutcome> = {}): RunOutcome {
 }
 
 describe('security of Markdown reports', () => {
+  it('describes Docker verification accurately in Action reports', () => {
+    const report = renderMarkdownReport(migration, outcome(), false,
+      { status: 'passed', checks: [], note: 'verified' }, 'network-isolated-container');
+    expect(report).toContain('network-isolated Docker container');
+    expect(report).not.toContain('not network-isolated');
+  });
   it('uses the selected SDK in an empty report and escapes verification notes', () => {
     const report = renderMarkdownReport(migration, outcome({ changes: [], manual: [], proposedDiff: [] }), true,
       { status: 'failed', checks: [], note: '<script>alert(1)</script>' });

@@ -35,8 +35,13 @@ do not run it when the scripts could access production services or perform
 external side effects. Dependency installation may contact the package
 registry; a cache miss may use the network.
 
-The current GitHub Action is disabled. No hosted service or automatic PR
-creation is currently provided. Do not re-enable it until it pushes only the
-verified migration branch, keeps reports outside the workspace, prevents
-checkout credentials from reaching migration scripts, and documents that it
-must never run against untrusted pull request code.
+The GitHub Action prepares changes in a read-only job and publishes only
+validated bundles in a separate job. Client verification commands run in
+disposable Docker containers; test containers have no network access, while
+dependency installation containers may contact the registry with scripts
+disabled. Neither container receives GitHub write credentials or the runner's
+Docker socket. The Action runs only on schedule or manual dispatch, never on
+untrusted pull request events. GitHub's default token does not trigger ordinary
+push/PR workflows for bot-created branches; clients can opt into a separate
+`workflow_dispatch` check with the reusable workflow's `ci_workflow` input.
+Its PRs still require human review and must never be merged automatically.

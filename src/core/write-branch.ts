@@ -14,9 +14,11 @@ const execFile = promisify(execFileCallback);
 export interface WriteBranchOptions {
   cwd: string;
   allowDirty?: boolean;
-  nodeRuntime?: 22;
+  nodeRuntime?: 20 | 22;
   allowYarnLockInstall?: boolean;
   timeoutMs?: number;
+  excludedDirectories?: readonly string[];
+  customCommands?: readonly string[];
   /** Test seam for exercising the branch transaction without contacting a package registry. */
   verificationOptions?: VerificationOptions;
 }
@@ -76,7 +78,7 @@ export async function writeMigrationOnBranch(
     await git(repositoryRoot, ['worktree', 'add', '--detach', worktree, head]);
     worktreeAdded = true;
     const projectCopy = projectRelative ? path.join(worktree, projectRelative) : worktree;
-    const outcome = await runMigration(migration, { cwd: projectCopy, dryRun: true, nodeRuntime: options.nodeRuntime, allowYarnLockInstall: options.allowYarnLockInstall });
+    const outcome = await runMigration(migration, { cwd: projectCopy, dryRun: true, nodeRuntime: options.nodeRuntime, allowYarnLockInstall: options.allowYarnLockInstall, excludedDirectories: options.excludedDirectories });
     if (outcome.manual.length > 0) {
       throw new Error(`Migration has ${outcome.manual.length} manual review item(s); no branch or commit was created.`);
     }
@@ -88,6 +90,7 @@ export async function writeMigrationOnBranch(
       fileChanges: outcome.proposedFiles,
       timeoutMs: options.timeoutMs,
       ...options.verificationOptions,
+      customCommands: options.customCommands,
     });
     if (verification.status !== 'passed') {
       throw new Error(`Migration verification did not pass (${verification.status}); no branch or commit was created.${verification.note ? ` ${verification.note}` : ''}`);

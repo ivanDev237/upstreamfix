@@ -7,6 +7,7 @@ export function renderMarkdownReport(
   outcome: RunOutcome,
   dryRun: boolean,
   verification?: VerificationResult,
+  verificationEnvironment: 'restricted-host' | 'network-isolated-container' = 'restricted-host',
 ): string {
   const lines: string[] = [];
   const total = outcome.changes.length + outcome.manual.length;
@@ -48,7 +49,9 @@ export function renderMarkdownReport(
     lines.push('');
     lines.push(`- Result: **${verification.status}**`);
     lines.push('- Scope: temporary project copy; the original project was not changed.');
-    lines.push('- Verification commands run on this machine with a restricted environment, without copied credentials or package install scripts; project test code is still executable code and is not network-isolated.');
+    lines.push(verificationEnvironment === 'network-isolated-container'
+      ? '- Verification commands run in a network-isolated Docker container with restricted privileges and without copied credentials or package install scripts.'
+      : '- Verification commands run on this machine with a restricted environment, without copied credentials or package install scripts; project test code is still executable code and is not network-isolated.');
     if (verification.note) lines.push(`- Note: ${escapeMarkdownText(verification.note)}`);
     if (verification.checks.length > 0) {
       lines.push('');
