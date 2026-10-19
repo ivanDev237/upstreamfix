@@ -13,9 +13,9 @@ describe('0.1.3 release metadata', () => {
       packages: Record<string, { version: string }>;
     };
     const changelog = readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8');
-    expect(manifest.version).toBe('0.1.3');
-    expect(lock.version).toBe('0.1.3');
-    expect(lock.packages['']?.version).toBe('0.1.3');
+    expect(manifest.version).toBe('0.2.0');
+    expect(lock.version).toBe('0.2.0');
+    expect(lock.packages['']?.version).toBe('0.2.0');
     expect(changelog).toMatch(/## 0\.1\.3[\s\S]*0\.1\.2[\s\S]*(?:npx|global)/);
   });
 });
