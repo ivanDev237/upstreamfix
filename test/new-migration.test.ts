@@ -46,6 +46,14 @@ describe('migration scaffold generator', () => {
     await expect(generateMigrationScaffold(root, 'valid-package', '22')).rejects.toThrow('Refusing to overwrite');
   });
 
+  it('never overwrites a scaffold created concurrently', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-scaffold-race-'));
+    roots.push(root);
+    const results = await Promise.allSettled([generateMigrationScaffold(root, 'race-sdk', '22'), generateMigrationScaffold(root, 'race-sdk', '22')]);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+  });
+
   it('runs through the documented command line in a temporary project', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-scaffold-cli-'));
     roots.push(root);

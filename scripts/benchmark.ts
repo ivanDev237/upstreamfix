@@ -427,7 +427,7 @@ async function runIsolatedDockerScript(
     'run', '--rm', '--network=none', ...dockerMemoryArgs(limits, uid, gid), '--cpus=1', '--pids-limit=256', '--read-only',
     '--cap-drop=ALL', '--security-opt=no-new-privileges', '--user', `${uid}:${gid}`,
     '--mount', `type=bind,source=${checkout},target=/workspace`, '--mount', `type=bind,source=${path.join(checkout, '.git')},target=/workspace/.git,readonly`, '--workdir', `/workspace/${relativeDir}`,
-    '--env', 'HOME=/home/benchmark', '--env', 'CI=1', '--env', 'NODE_OPTIONS=--max-old-space-size=3072', ...containerEnvArgs(env), nodeImage,
+    '--env', 'HOME=/home/benchmark', '--env', 'CI=1', '--env', `NODE_OPTIONS=--max-old-space-size=${Math.max(256, limits.memoryMb - 256)}`, ...containerEnvArgs(env), nodeImage,
     ...(inferredTsc ? ['npm', 'exec', '--no', '--', 'tsc', '--noEmit'] : ['npm', 'run', '--ignore-scripts', selectedScript!]),
   ];
   try {

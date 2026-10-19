@@ -28,7 +28,13 @@ export async function generateMigrationScaffold(root: string, packageName: strin
     }
   }
 
-  await mkdir(migrationDirectory, { recursive: true });
+  await mkdir(path.dirname(migrationDirectory), { recursive: true });
+  try {
+    await mkdir(migrationDirectory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`Refusing to overwrite existing scaffold: ${migrationDirectory}`);
+    throw error;
+  }
   await mkdir(testDirectory, { recursive: true });
   const pkg = JSON.stringify(packageName);
   const id = JSON.stringify(`${packageName}@${toMajor}`);
@@ -53,7 +59,7 @@ export const migration: Migration = {
     return [];
   },
 };
-`, 'utf8'),
+`, { encoding: 'utf8', flag: 'wx' }),
     writeFile(mappingFile, `/** Add conservative, tested migration rules here. */
 export interface MigrationRule {
   name: string;
@@ -61,7 +67,7 @@ export interface MigrationRule {
 }
 
 export const rules: MigrationRule[] = [];
-`, 'utf8'),
+`, { encoding: 'utf8', flag: 'wx' }),
     writeFile(unitTest, `import { describe, expect, it } from 'vitest';
 import { migration } from '../../src/migrations/${directoryName}/index.js';
 
@@ -75,8 +81,8 @@ describe('${packageName} v${toMajor - 1} → v${toMajor} migration', () => {
     expect(result.manual).toEqual([]);
   });
 });
-`, 'utf8'),
-    writeFile(realSdkTest, realSdkTestTemplate({ packageName, fromMajor: toMajor - 1, toMajor, directoryName }), 'utf8'),
+`, { encoding: 'utf8', flag: 'wx' }),
+    writeFile(realSdkTest, realSdkTestTemplate({ packageName, fromMajor: toMajor - 1, toMajor, directoryName }), { encoding: 'utf8', flag: 'wx' }),
   ]);
   return migrationDirectory;
 }

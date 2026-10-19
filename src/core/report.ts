@@ -22,7 +22,7 @@ export function renderMarkdownReport(
   lines.push('');
 
   if (total === 0) {
-    lines.push('No supported Firebase Admin namespace usages were found in the scanned files.');
+    lines.push(`No supported ${escapeMarkdownText(migration.title)} usages were found in the scanned files.`);
     lines.push('');
   }
 
@@ -49,7 +49,7 @@ export function renderMarkdownReport(
     lines.push(`- Result: **${verification.status}**`);
     lines.push('- Scope: temporary project copy; the original project was not changed.');
     lines.push('- Verification commands run on this machine with a restricted environment, without copied credentials or package install scripts; project test code is still executable code and is not network-isolated.');
-    if (verification.note) lines.push(`- Note: ${verification.note}`);
+    if (verification.note) lines.push(`- Note: ${escapeMarkdownText(verification.note)}`);
     if (verification.checks.length > 0) {
       lines.push('');
       lines.push('| Check | Command | Result | Duration | Output |');

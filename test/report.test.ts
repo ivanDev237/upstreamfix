@@ -20,6 +20,13 @@ function outcome(overrides: Partial<RunOutcome> = {}): RunOutcome {
 }
 
 describe('security of Markdown reports', () => {
+  it('uses the selected SDK in an empty report and escapes verification notes', () => {
+    const report = renderMarkdownReport(migration, outcome({ changes: [], manual: [], proposedDiff: [] }), true,
+      { status: 'failed', checks: [], note: '<script>alert(1)</script>' });
+    expect(report).not.toContain('Firebase Admin');
+    expect(report).toContain('No supported Stripe SDK v22 migration usages');
+    expect(report).toContain('&lt;script&gt;');
+  });
   it('redacts organization, GitHub, AWS and truncated private keys', () => {
     const raw = [
       'sk_org_1234567890abcdef',

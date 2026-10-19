@@ -31,25 +31,38 @@ function tarString(buffer: Buffer, start: number, length: number): string {
 export function unpackDeclarationFiles(archive: Buffer, integrity?: string): Map<string, string> {
   if (archive.length > maxArchiveBytes) throw new Error('Package archive exceeds the size limit.');
   if (integrity) {
-    const expected = /^sha512-([A-Za-z0-9+/=]+)$/.exec(integrity)?.[1];
-    if (!expected || createHash('sha512').update(archive).digest('base64') !== expected) throw new Error('Package archive integrity mismatch.');
+    const match = /^(sha512|sha1)-([A-Za-z0-9+/=]+)$/.exec(integrity);
+    if (!match || createHash(match[1]!).update(archive).digest('base64') !== match[2]) throw new Error('Package archive integrity mismatch.');
   }
   const unpacked = gunzipSync(archive, { maxOutputLength: maxUnpackedBytes });
   const files = new Map<string, string>();
+  let nextPath: string | undefined;
   for (let offset = 0; offset + 512 <= unpacked.length;) {
     const header = unpacked.subarray(offset, offset + 512);
     if (header.every((byte) => byte === 0)) break;
-    const name = [tarString(header, 345, 155), tarString(header, 0, 100)].filter(Boolean).join('/');
+    const headerName = [tarString(header, 345, 155), tarString(header, 0, 100)].filter(Boolean).join('/');
     const size = Number.parseInt(tarString(header, 124, 12), 8);
     const kind = tarString(header, 156, 1) || '0';
     if (!Number.isSafeInteger(size) || size < 0 || offset + 512 + size > unpacked.length) throw new Error('Invalid package archive entry size.');
-    const parts = name.split('/');
-    if (parts[0] !== 'package' || parts.some((part) => part === '..' || part === '.') || name.startsWith('/') || name.includes('\\')) {
-      throw new Error(`Package archive has an unsafe path: ${name}`);
-    }
-    if (!['0', '5'].includes(kind)) throw new Error(`Package archive contains an unsupported link or entry: ${name}`);
-    if (kind === '0' && (/\.d\.(?:ts|mts|cts)$/.test(name) || name === 'package/package.json')) {
-      files.set(name.slice('package/'.length), unpacked.subarray(offset + 512, offset + 512 + size).toString('utf8'));
+    const body = unpacked.subarray(offset + 512, offset + 512 + size);
+    if (kind === 'L') {
+      nextPath = body.toString('utf8').split('\0')[0];
+    } else if (kind === 'x') {
+      const records = body.toString('utf8');
+      const pathRecord = /(?:^|\n)\d+ path=([^\n]+)/.exec(records);
+      if (pathRecord) nextPath = pathRecord[1];
+    } else {
+      const name = nextPath ?? headerName;
+      nextPath = undefined;
+      const parts = name.split('/');
+      if (parts.some((part) => part === '..' || part === '.') || name.startsWith('/') || name.includes('\\') || /^[A-Za-z]:/.test(name)) {
+        throw new Error(`Package archive has an unsafe path: ${name}`);
+      }
+      if (!['0', '5'].includes(kind)) throw new Error(`Package archive contains an unsupported link or entry: ${name}`);
+      const relative = name.startsWith('package/') ? name.slice('package/'.length) : name;
+      if (kind === '0' && (/\.d\.(?:ts|mts|cts)$/.test(relative) || relative === 'package.json')) {
+        files.set(relative, body.toString('utf8'));
+      }
     }
     offset += 512 + Math.ceil(size / 512) * 512;
   }
@@ -135,15 +148,27 @@ export function compareApiFromTarballs(packageName: string, oldVersion: string, 
     else if (previous.after !== current.after) changed.push({ symbol, before: previous.after, after: current.after, source: current.source });
   }
   for (const [symbol, current] of after) if (!before.has(symbol)) added.push(current);
-  const renameHypotheses = removed.flatMap((old) => added
-    .filter((candidate) => old.before?.replace(old.symbol.split('.').at(-1)!, '') === candidate.after?.replace(candidate.symbol.split('.').at(-1)!, ''))
-    .map((candidate) => ({ from: old.symbol, to: candidate.symbol, reason: 'Similar declaration text; hypothesis only, verify against vendor guidance.' })));
+  const normalize = (finding: ApiFinding, declaration: string | undefined): string =>
+    declaration?.replace(finding.symbol.split('.').at(-1)!, '') ?? '';
+  const addedByText = new Map<string, ApiFinding[]>();
+  for (const candidate of added) {
+    const key = normalize(candidate, candidate.after);
+    addedByText.set(key, [...(addedByText.get(key) ?? []), candidate]);
+  }
+  const renameHypotheses: ApiReport['renameHypotheses'] = [];
+  for (const old of removed) {
+    for (const candidate of addedByText.get(normalize(old, old.before)) ?? []) {
+      renameHypotheses.push({ from: old.symbol, to: candidate.symbol, reason: 'Similar declaration text; hypothesis only, verify against vendor guidance.' });
+      if (renameHypotheses.length >= 1000) break;
+    }
+    if (renameHypotheses.length >= 1000) break;
+  }
   return { package: packageName, oldVersion, newVersion, removed, changed, added, renameHypotheses };
 }
 
 async function boundedArchive(url: string, fetcher: typeof fetch): Promise<Buffer> {
   const parsed = new URL(url);
-  if (parsed.protocol !== 'https:' || parsed.hostname !== 'registry.npmjs.org' || parsed.username || parsed.password) {
+  if (parsed.protocol !== 'https:' || parsed.hostname !== 'registry.npmjs.org' || parsed.port || parsed.username || parsed.password) {
     throw new Error('The package tarball must be served directly by the npm registry over HTTPS.');
   }
   const response = await fetcher(url, { signal: AbortSignal.timeout(20_000), redirect: 'error' });

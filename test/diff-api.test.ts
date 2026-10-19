@@ -56,6 +56,25 @@ it('rejects traversal, symbolic links and invalid integrity', () => {
   expect(() => unpackDeclarationFiles(gzipSync(linked))).toThrow('unsupported link');
 });
 
+it('accepts a rootless archive and SHA1 integrity while rejecting registry alternate ports', async () => {
+  const archive = tar({ 'package.json': '{"types":"index.d.ts"}', 'index.d.ts': 'export const safe: string;' });
+  expect(unpackDeclarationFiles(archive, `sha1-${createHash('sha1').update(archive).digest('base64')}`).get('index.d.ts')).toContain('safe');
+  const fetcher = (async () => Response.json({ dist: { tarball: 'https://registry.npmjs.org:444/sample.tgz', integrity: `sha512-${createHash('sha512').update(archive).digest('base64')}` } })) as typeof fetch;
+  await expect(diffPublishedApi('sample', '1.0.0', '2.0.0', fetcher)).rejects.toThrow(/registry|port/i);
+});
+
+it('accepts GNU longname and PAX path metadata for declaration entries', () => {
+  const manifest = 'package/package.json';
+  for (const kind of ['L', 'x']) {
+    const pathRecord = kind === 'L' ? 'package/index.d.ts\0' : '28 path=package/index.d.ts\n';
+    const archive = tar({ [manifest]: '{"types":"index.d.ts"}', '././@LongLink': pathRecord, 'package/placeholder': 'export const extended: string;' });
+    const unpacked = gunzipSync(archive);
+    const metadataOffset = 512 + 512; // package.json body occupies one block
+    unpacked[metadataOffset + 156] = kind.charCodeAt(0);
+    expect(unpackDeclarationFiles(gzipSync(unpacked)).get('index.d.ts')).toContain('extended');
+  }
+});
+
 it('requires exact versions', () => {
   expect(() => validateExactVersion('^22')).toThrow('exact');
   expect(() => validateExactVersion('22.0.0')).not.toThrow();

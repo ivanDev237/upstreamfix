@@ -73,6 +73,8 @@ export const firebaseAdminV14: Migration = {
       .map((dependencies) => dependencies?.['firebase-functions-test'])
       .find((value): value is string => typeof value === 'string');
     if (functionsTest) notes.push(`firebase-functions-test "${functionsTest}" is installed. In a benchmarked project, the v14 typecheck failed because this package's declarations import firebase-admin exports removed in v14 (including app and firestore). Check whether a compatible release is available; otherwise update the test setup, then rerun the tests before upgrading.`);
+    const functionsVersion = dependencyVersion(manifest, 'firebase-functions');
+    if (functionsVersion) notes.push(`firebase-functions \`${functionsVersion}\` is installed: check that its firebase-admin peer range accepts v14.`);
     return notes;
   },
 
@@ -127,7 +129,7 @@ export const firebaseAdminV14: Migration = {
     } else if (!runtimeReady) {
       notes.push(`firebase-admin v14 requires Node.js 22 or later; review \`engines.node\` (${engine}).`);
     }
-    const functionsVersion = manifest.dependencies?.['firebase-functions'];
+    const functionsVersion = dependencyVersion(manifest, 'firebase-functions');
     if (functionsVersion) {
       notes.push(
         `firebase-functions \`${functionsVersion}\` is installed: check that its firebase-admin peer range accepts v14 (firebase-functions#1902).`,
@@ -136,6 +138,12 @@ export const firebaseAdminV14: Migration = {
     return notes;
   },
 };
+
+function dependencyVersion(manifest: PackageManifest, name: string): string | undefined {
+  return [manifest.dependencies, manifest.devDependencies, manifest.peerDependencies, manifest.optionalDependencies]
+    .map((section) => section?.[name])
+    .find((value): value is string => typeof value === 'string');
+}
 
 function supportsNode22(range: string): boolean {
   return guaranteesNodeMajor(range, 22);
@@ -178,6 +186,14 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
       continue;
     }
 
+    if (alias.kind === 'cjs') {
+      for (const type of sourceFile.getDescendantsOfKind(SyntaxKind.TypeReference)) {
+        if (!new RegExp(`\\b${alias.name}\\s*\\.`).test(type.getText())) continue;
+        aliasesWithManualUses.add(alias.name);
+        result.manual.push({ file, line: type.getStartLineNumber(), reason: 'A type-only Firebase reference from require needs a manual import type; no runtime require was synthesized.', snippet: snippetOf(type) });
+      }
+    }
+
     const references = alias.nameNode
       .findReferencesAsNodes()
       .filter(Node.isIdentifier)
@@ -185,12 +201,25 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
       .filter((reference) => reference !== alias.nameNode);
 
     for (const ref of references) {
-      const classification = classify(ref);
       const line = ref.getStartLineNumber();
+
+      if (alias.kind === 'cjs' && ref.getFirstAncestorByKind(SyntaxKind.TypeReference)) {
+        aliasesWithManualUses.add(alias.name);
+        result.manual.push({ file, line, reason: 'A type-only Firebase reference from require needs a manual import type; no runtime require was synthesized.', snippet: snippetOf(ref) });
+        continue;
+      }
+
+      const classification = classify(ref);
 
       if ('reason' in classification) {
         aliasesWithManualUses.add(alias.name);
         result.manual.push({ file, line, reason: classification.reason, snippet: snippetOf(ref) });
+        continue;
+      }
+
+      if (alias.kind === 'cjs' && classification.imports.some((imp) => imp.typeOnly)) {
+        aliasesWithManualUses.add(alias.name);
+        result.manual.push({ file, line, reason: 'A type-only Firebase reference from require needs a manual import type; no runtime require was synthesized.', snippet: snippetOf(ref) });
         continue;
       }
 
@@ -672,7 +701,7 @@ function aliasDeclarationRemovals(
         importDecl.getNamedImports().length === 0
       ) {
         const key = `${importDecl.getStart()}:${importDecl.getEnd()}`;
-        if (!seen.has(key)) removals.push({ start: importDecl.getStart(), end: importDecl.getEnd(), text: '' });
+        if (!seen.has(key)) removals.push({ start: importDecl.getStart(), end: endIncludingLineBreak(sourceFile, importDecl.getEnd()), text: '' });
         seen.add(key);
       }
       continue;
@@ -683,11 +712,18 @@ function aliasDeclarationRemovals(
     const removable = importEquals ?? (statement?.getDeclarations().length === 1 ? statement : undefined);
     if (removable) {
       const key = `${removable.getStart()}:${removable.getEnd()}`;
-      if (!seen.has(key)) removals.push({ start: removable.getStart(), end: removable.getEnd(), text: '' });
+      if (!seen.has(key)) removals.push({ start: removable.getStart(), end: endIncludingLineBreak(sourceFile, removable.getEnd()), text: '' });
       seen.add(key);
     }
   }
   return removals;
+}
+
+function endIncludingLineBreak(sourceFile: SourceFile, end: number): number {
+  const text = sourceFile.getFullText();
+  if (text.slice(end, end + 2) === '\r\n') return end + 2;
+  if (text[end] === '\n') return end + 1;
+  return end;
 }
 
 function snippetOf(node: Node): string {
