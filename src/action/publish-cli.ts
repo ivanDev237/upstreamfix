@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { reconcileProposal, validateProposal, validateProposalEnvelope, validatePublishableBundle, parseExactRemoteHead, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from './publish.js';
 import { parseActionConfig } from './config.js';
 import { sanitizeTerminalText } from '../core/report.js';
+import { regenerateNpmLockfile } from './regenerate-lock.js';
 
 const execFile = promisify(execFileCallback);
 const token = process.env.GITHUB_TOKEN;
@@ -146,10 +147,25 @@ for (const proposal of proposals) {
           after: await git(bareRoot!, ['show', `${proposal.commit!}:${file}`]),
         };
       }
+      const regeneratedLocks: Record<string, string> = Object.create(null);
+      for (const file of proposal.files) {
+        if (!/(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json)$/.test(file)) continue;
+        const manifestPath = path.posix.join(path.posix.dirname(file), 'package.json');
+        const manifest = blobs[manifestPath];
+        if (!manifest || typeof manifest.before !== 'string') {
+          throw new Error(`Bundle ${file} has no reviewed package.json update; lockfile regeneration requires one.`);
+        }
+        validatePublishableBundle({ ...proposal, files: [manifestPath] }, { [manifestPath]: manifest }, {
+          author: identityFields[0]!, authorEmail: identityFields[1]!, committer: identityFields[2]!,
+          committerEmail: identityFields[3]!, subject: identityFields[4]!,
+        });
+        regeneratedLocks[file] = await regenerateNpmLockfile(blobs[file]!.before!, manifest.after,
+          path.posix.basename(file) as 'package-lock.json' | 'npm-shrinkwrap.json');
+      }
       validatePublishableBundle(proposal, blobs, {
         author: identityFields[0]!, authorEmail: identityFields[1]!, committer: identityFields[2]!,
         committerEmail: identityFields[3]!, subject: identityFields[4]!,
-      });
+      }, regeneratedLocks);
     }
     const publisher: ProposalPublisher = {
       isDismissed: async (item) => await hasDismissedPullRequest(item) || await hasDismissedIssue(item),

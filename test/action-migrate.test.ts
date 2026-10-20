@@ -90,6 +90,24 @@ it('emits a none proposal for an ignored migration so stale bot PRs can close', 
   expect(proposals.find((item) => item.migration === 'firebase-admin@14')).toMatchObject({ status: 'none', verification: 'skipped' });
 });
 
+it.each(['pnpm-lock.yaml', 'yarn.lock'])('Y3 reports %s for manual review before creating a migration branch', async (lockName) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-manual-lock-'));
+  roots.push(root);
+  const client = path.join(root, 'client');
+  await execFile('git', ['init', '-q', client]);
+  await writeFile(path.join(client, 'package.json'), '{"name":"fixture","dependencies":{"firebase-admin":"^13.0.0"},"engines":{"node":">=22"}}\n');
+  await writeFile(path.join(client, 'server.ts'), "import * as admin from 'firebase-admin';\nadmin.initializeApp();\n");
+  await writeFile(path.join(client, lockName), '# existing lockfile\n');
+  await execFile('git', ['add', '.'], { cwd: client });
+  await execFile('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base'], { cwd: client });
+  const base = (await execFile('git', ['rev-parse', 'HEAD'], { cwd: client })).stdout.trim();
+  const proposals = await prepareProposals(client, path.join(root, 'output'), base, 'workflow_dispatch');
+  const firebase = proposals.find((item) => item.migration === 'firebase-admin@14');
+  expect(firebase).toMatchObject({ status: 'manual', verification: 'skipped' });
+  expect(firebase?.report).toMatch(/lockfile/i);
+  expect(firebase?.commit).toBeUndefined();
+});
+
 it('refuses pull-request events before examining a client repository', async () => {
   await expect(prepareProposals('/does-not-exist', '/tmp/upstreamfix-unused', 'a'.repeat(40), 'pull_request_target'))
     .rejects.toThrow('Only schedule and workflow_dispatch');

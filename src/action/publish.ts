@@ -1,4 +1,4 @@
-import { sanitizeTerminalText } from '../core/report.js';
+import { maskSecrets, sanitizeTerminalText } from '../core/report.js';
 import { migrations } from '../migrations/index.js';
 import type { ActionConfig } from './config.js';
 import { isDeepStrictEqual } from 'node:util';
@@ -165,7 +165,7 @@ interface BundleBlob { before?: string; after: string }
 interface CommitIdentity { author: string; authorEmail: string; committer: string; committerEmail: string; subject: string }
 
 /** Recheck client-controlled commit contents in the permissioned publication job. */
-export function validatePublishableBundle(proposal: Proposal, blobs: Record<string, BundleBlob>, identity: CommitIdentity): void {
+export function validatePublishableBundle(proposal: Proposal, blobs: Record<string, BundleBlob>, identity: CommitIdentity, regeneratedLocks: Record<string, string> = {}): void {
   const bot = 'upstreamfix[bot]';
   const email = '41898282+github-actions[bot]@users.noreply.github.com';
   if (identity.author !== bot || identity.committer !== bot || identity.authorEmail !== email || identity.committerEmail !== email
@@ -189,9 +189,17 @@ export function validatePublishableBundle(proposal: Proposal, blobs: Record<stri
       continue;
     }
     if (/(?:^|\/)package\.json$/.test(file)) validateManifestDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
-    else if (/(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json)$/.test(file)) validateNpmLockDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
-    else if (/(?:^|\/)pnpm-lock\.yaml$/.test(file)) validatePnpmLockDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
-    else if (/(?:^|\/)yarn\.lock$/.test(file)) validateYarnLockDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
+    else if (/(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json)$/.test(file)) {
+      const lock = parseJsonObject(blob.after, file);
+      if (![2, 3].includes(lock.lockfileVersion as number) || !record(lock.packages)) throw new Error('Bundle npm lockfile format is unsupported.');
+      if (regeneratedLocks[file] === undefined || regeneratedLocks[file] !== blob.after) {
+        throw new Error('Bundle npm lockfile differs from the independently regenerated lockfile.');
+      }
+      rejectExecutableShadowing(parseJsonObject(blob.before, file), lock);
+    }
+    else if (/(?:^|\/)(?:pnpm-lock\.yaml|yarn\.lock)$/.test(file)) {
+      throw new Error('Bundle pnpm and Yarn lockfile changes require manual review until deterministic regeneration is available.');
+    }
     else throw new Error('Bundle changes a file outside the deterministic migration output.');
   }
   if (sources.size) {
@@ -199,11 +207,43 @@ export function validatePublishableBundle(proposal: Proposal, blobs: Record<stri
     if (result.manual.length) throw new Error('Bundle migration still has manual source work.');
     const generated = new Map(result.fileUpdates?.map((update) => [update.file, update.contents]));
     for (const [file, blob] of sources) {
-      if (generated.get(`/proposal/${file}`) !== blob.after) {
+      const produced = generated.get(`/proposal/${file}`);
+      const expected = blob.before?.startsWith('\uFEFF') && produced && !produced.startsWith('\uFEFF') ? `\uFEFF${produced}` : produced;
+      if (expected !== blob.after) {
         throw new Error(`Bundle source ${file} differs from the deterministic migration output.`);
       }
     }
     if (generated.size !== sources.size) throw new Error('Bundle omits a deterministic migration source change.');
+  }
+}
+
+function rejectExecutableShadowing(before: Record<string, unknown>, after: Record<string, unknown>): void {
+  const oldPackages = record(before.packages);
+  const newPackages = record(after.packages);
+  if (!oldPackages || !newPackages) throw new Error('Bundle npm lockfile has no package entries.');
+  const dangerous = new Set(['node', 'npm', 'npx', 'corepack', 'pnpm', 'yarn', 'sh', 'bash', 'dash', 'zsh', 'cmd', 'powershell', 'pwsh']);
+  const binaries = (entry: unknown, packagePath: string): string[] => {
+    const value = record(entry)?.bin;
+    if (typeof value === 'string') return [packagePath.split('/').at(-1)!];
+    return Object.keys(record(value) ?? {});
+  };
+  const existing = new Set<string>();
+  for (const [packagePath, entry] of Object.entries(oldPackages)) {
+    for (const name of binaries(entry, packagePath)) existing.add(name);
+  }
+  const added = new Set<string>();
+  for (const [packagePath, entry] of Object.entries(newPackages)) {
+    const oldEntry = oldPackages[packagePath];
+    if (oldEntry && !isDeepStrictEqual(record(oldEntry)?.bin, record(entry)?.bin)) {
+      throw new Error('Bundle npm lockfile changes an existing executable package binary.');
+    }
+    if (oldEntry) continue;
+    for (const name of binaries(entry, packagePath)) {
+      if (dangerous.has(name.toLowerCase()) || existing.has(name) || added.has(name)) {
+        throw new Error('Bundle npm lockfile adds an executable that shadows an existing command.');
+      }
+      added.add(name);
+    }
   }
 }
 
@@ -243,270 +283,17 @@ function validateManifestDelta(beforeText: string, afterText: string, packageNam
   if (!isDeepStrictEqual(normalized, before)) throw new Error('Bundle package.json changes fields beyond the SDK version or approved Node.js requirement.');
 }
 
-function validateNpmLockDelta(beforeText: string, afterText: string, packageName: string, targetMajor: number): void {
-  const before = parseJsonObject(beforeText, 'package-lock.json');
-  const after = parseJsonObject(afterText, 'package-lock.json');
-  const oldPackages = record(before.packages);
-  const newPackages = record(after.packages);
-  if (before.lockfileVersion !== 3 || after.lockfileVersion !== 3 || !oldPackages || !newPackages) throw new Error('Bundle lockfile format is unsupported.');
-  const targetPath = `node_modules/${packageName}`;
-  const target = record(newPackages[targetPath]);
-  const version = typeof target?.version === 'string' ? target.version : '';
-  const resolved = typeof target?.resolved === 'string' ? target.resolved : '';
-  const exactUrl = registryTarballUrl(packageName, version);
-  if (!new RegExp(`^${targetMajor}\\.\\d+\\.\\d+$`).test(version)
-    || resolved !== exactUrl
-    || target?.hasInstallScript === true || typeof target?.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/=]+$/.test(target.integrity)) {
-    throw new Error('Bundle lockfile target package is not a verified npm registry artifact.');
-  }
-  const oldTarget = record(oldPackages[targetPath]);
-  const allowedTargetKeys = new Set(['version', 'resolved', 'integrity', 'license', 'engines', 'funding', 'deprecated', 'dev', 'devOptional', 'optional', 'peer', 'peerDependencies', 'peerDependenciesMeta', 'optionalDependencies', 'dependencies', 'bin']);
-  for (const key of Object.keys(target!)) {
-    if (!allowedTargetKeys.has(key) || (['bin', 'dependencies', 'optionalDependencies'].includes(key) && !Object.hasOwn(oldTarget ?? {}, key))) {
-      throw new Error('Bundle lockfile target package adds an unexpected capability.');
-    }
-  }
-  const oldRoot = record(oldPackages['']);
-  const newRoot = record(newPackages['']);
-  if (!oldRoot || !newRoot) throw new Error('Bundle lockfile root package is missing.');
-  const normalizedRoot = structuredClone(newRoot);
-  for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
-    const oldValue = record(oldRoot[section])?.[packageName];
-    const newValue = record(newRoot[section])?.[packageName];
-    if (oldValue !== newValue) {
-      if (typeof oldValue !== 'string' || newValue !== `^${targetMajor}.0.0`) throw new Error('Bundle lockfile changes an unexpected SDK dependency.');
-      record(normalizedRoot[section])![packageName] = oldValue;
-    }
-  }
-  if (!isDeepStrictEqual(normalizedRoot, oldRoot)) throw new Error('Bundle lockfile changes unexpected root fields.');
-  const beforeTop = structuredClone(before);
-  const afterTop = structuredClone(after);
-  delete beforeTop.packages;
-  delete afterTop.packages;
-  if (!isDeepStrictEqual(beforeTop, afterTop)) throw new Error('Bundle lockfile changes unexpected metadata.');
-  const aliasTargets = npmAliasTargets(newPackages);
-  for (const [packagePath, value] of Object.entries(newPackages)) {
-    if (packagePath === '' || isDeepStrictEqual(value, oldPackages[packagePath])) continue;
-    const packageEntry = record(value);
-    const match = /(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)$/.exec(packagePath);
-    const actualName = match?.[1];
-    if (!packageEntry || !actualName || !/^(?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+$/.test(actualName)) {
-      throw new Error('Bundle lockfile contains an unsupported package path.');
-    }
-    const itemVersion = packageEntry.version;
-    const resolvedName = npmAliasTarget(actualName, packageEntry.resolved, aliasTargets, itemVersion);
-    if (typeof itemVersion !== 'string' || !/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(itemVersion)
-      || !resolvedName || packageEntry.resolved !== registryTarballUrl(resolvedName, itemVersion)
-      || typeof packageEntry.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/=]+$/.test(packageEntry.integrity)
-      || packageEntry.hasInstallScript === true || Object.hasOwn(packageEntry, 'scripts')) {
-      throw new Error('Bundle lockfile contains an unverified npm registry package.');
-    }
-    if (Object.hasOwn(packageEntry, 'name') && (resolvedName === actualName || packageEntry.name !== resolvedName)) {
-      throw new Error('Bundle lockfile contains an invalid npm alias name.');
-    }
-    const oldEntry = record(oldPackages[packagePath]);
-    for (const [key] of Object.entries(packageEntry)) {
-      if (!allowedTargetKeys.has(key) && !['cpu', 'os', 'libc', 'funding', 'deprecated', 'name'].includes(key)) {
-        throw new Error('Bundle lockfile contains an unexpected package capability.');
-      }
-      if (key === 'bin' && !Object.hasOwn(oldEntry ?? {}, key)) {
-        // npm may add a genuine new transitive package with a binary. Never
-        // allow an existing package's binary map to change through the bundle.
-        if (oldEntry || packagePath === targetPath || !safeNpmBin(packageEntry.bin)) {
-          throw new Error('Bundle lockfile adds an unexpected executable package binary.');
-        }
-      }
-    }
-  }
-}
-
-function registryTarballUrl(name: string, version: string): string {
-  return `https://registry.npmjs.org/${name}/-/${name.split('/').at(-1)}-${version}.tgz`;
-}
-
-function npmAliasTargets(packages: Record<string, unknown>): Map<string, Set<string>> {
-  const aliases = new Map<string, Set<string>>();
-  for (const value of Object.values(packages)) {
-    const entry = record(value);
-    if (!entry) continue;
-    for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
-      for (const [alias, spec] of Object.entries(record(entry[section]) ?? {})) {
-        const match = typeof spec === 'string' ? /^npm:((?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+)@[^\s]+$/.exec(spec) : null;
-        if (!match) continue;
-        const targets = aliases.get(alias) ?? new Set<string>();
-        targets.add(match[1]!);
-        aliases.set(alias, targets);
-      }
-    }
-  }
-  return aliases;
-}
-
-function npmAliasTarget(alias: string, resolved: unknown, aliases: Map<string, Set<string>>, version: unknown): string | undefined {
-  if (typeof version !== 'string' || typeof resolved !== 'string') return undefined;
-  if (resolved === registryTarballUrl(alias, version)) return alias;
-  const names = aliases.get(alias);
-  if (!names) return undefined;
-  if (names.size !== 1) return undefined;
-  const name = [...names][0]!;
-  return resolved === registryTarballUrl(name, version) ? name : undefined;
-}
-
-function safeNpmBin(value: unknown): boolean {
-  const bins = record(value);
-  if (!bins || !Object.keys(bins).length || Object.keys(bins).length > 20) return false;
-  return Object.entries(bins).every(([name, location]) =>
-    /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)
-    && typeof location === 'string' && location.length <= 200
-    && /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/.test(location)
-    && !location.split('/').some((part) => part === '.' || part === '..'));
-}
-
-function boundedLockfile(text: string): void {
-  if (text.length > 8 * 1024 * 1024 || /[\0\r]/.test(text)) throw new Error('Bundle lockfile is malformed or too large.');
-}
-
-function lockSections(text: string): Map<string, string> {
-  const sections = new Map<string, string>();
-  let current = '';
-  for (const line of text.split('\n')) {
-    const top = /^([A-Za-z][A-Za-z0-9_-]*):(?:\s|$)/.exec(line);
-    if (top) {
-      current = top[1]!;
-      if (sections.has(current)) throw new Error('Bundle lockfile contains a duplicate YAML section.');
-    }
-    if (current) sections.set(current, `${sections.get(current) ?? ''}${line}\n`);
-    else if (line.trim() && !line.trim().startsWith('#')) throw new Error('Bundle lockfile has an unsupported YAML structure.');
-  }
-  return sections;
-}
-
-function indentedEntries(section: string): Map<string, string> {
-  const entries = new Map<string, string>();
-  let key = '';
-  for (const line of section.split('\n').slice(1)) {
-    const head = /^  (['"]?)([^\s'"]+)\1:(?:\s.*)?$/.exec(line);
-    if (head) {
-      key = head[2]!;
-      if (entries.has(key)) throw new Error('Bundle lockfile contains a duplicate package entry.');
-    }
-    if (key) entries.set(key, `${entries.get(key) ?? ''}${line}\n`);
-    else if (line.trim()) throw new Error('Bundle lockfile has an unsupported package entry.');
-  }
-  return entries;
-}
-
-function packageFromPnpmKey(key: string): { name: string; version: string } {
-  const match = /^((?:@[^/]+\/)?[^@]+)@(\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?)(?:\([^)]*\))?$/.exec(key);
-  if (!match) throw new Error('Bundle lockfile has an unsupported pnpm package key.');
-  return { name: match[1]!, version: match[2]! };
-}
-
-function validatePnpmLockDelta(beforeText: string, afterText: string, packageName: string, targetMajor: number): void {
-  boundedLockfile(beforeText);
-  boundedLockfile(afterText);
-  const before = lockSections(beforeText);
-  const after = lockSections(afterText);
-  if (!before.has('packages') || !after.has('packages') || !before.has('importers') || !after.has('importers')) {
-    throw new Error('Bundle pnpm lockfile has no packages or importers.');
-  }
-  if (before.get('lockfileVersion') !== after.get('lockfileVersion')) throw new Error('Bundle pnpm lockfile changes its format.');
-  for (const [section, value] of after) {
-    if (!['packages', 'snapshots', 'importers'].includes(section) && value !== before.get(section)) throw new Error('Bundle pnpm lockfile changes unsupported metadata.');
-  }
-  const oldImporters = before.get('importers')!;
-  const newImporters = after.get('importers')!;
-  const escapedName = packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const targetBlock = new RegExp(`(^[ ]{6}${escapedName}:\\n[ ]{8}specifier: )\\^${targetMajor}\\.0\\.0(\\n[ ]{8}version: )${targetMajor}[^\\n]*`, 'gm');
-  const oldTargetBlock = new RegExp(`^[ ]{6}${escapedName}:\\n[ ]{8}specifier: [^\\n]+\\n[ ]{8}version: [^\\n]+`, 'gm');
-  const oldMatches = [...oldImporters.matchAll(oldTargetBlock)].map((match) => match[0]);
-  let index = 0;
-  const normalizedImporters = newImporters.replace(targetBlock, () => oldMatches[index++] ?? '');
-  if (!index || index !== oldMatches.length || normalizedImporters !== oldImporters) throw new Error('Bundle pnpm lockfile changes unapproved importers.');
-  const oldPackages = indentedEntries(before.get('packages')!);
-  const newPackages = indentedEntries(after.get('packages')!);
-  let targetSeen = false;
-  for (const [key, block] of newPackages) {
-    const { name, version } = packageFromPnpmKey(key);
-    if (name === packageName && version.startsWith(`${targetMajor}.`)) targetSeen = true;
-    if (block === oldPackages.get(key)) continue;
-    if (!/\bintegrity: sha512-[A-Za-z0-9+/=]+/.test(block) || /\b(?:scripts|hasInstallScript|requiresBuild|hasBin):/.test(block)) {
-      throw new Error('Bundle pnpm lockfile contains an unverified package.');
-    }
-    const tarball = /\btarball:\s*['"]?([^\s,'"}]+)/.exec(block)?.[1];
-    if (tarball && tarball !== registryTarballUrl(name, version)) throw new Error('Bundle pnpm lockfile contains a foreign registry tarball.');
-    if (/^    (?!resolution:|id:|engines:|peerDependencies:|peerDependenciesMeta:|dependencies:|optionalDependencies:|deprecated:|cpu:|os:|libc:|dev:|optional:)[A-Za-z][^\n]*:/m.test(block)) {
-      throw new Error('Bundle pnpm lockfile contains an unexpected package field.');
-    }
-  }
-  if (!targetSeen) throw new Error('Bundle pnpm lockfile does not contain the target SDK.');
-  const newSnapshots = indentedEntries(after.get('snapshots') ?? 'snapshots:\n');
-  for (const [key, block] of newSnapshots) {
-    const { name, version } = packageFromPnpmKey(key);
-    if (!newPackages.has(`${name}@${version}`) && !newPackages.has(key)) throw new Error('Bundle pnpm lockfile snapshot has no verified package.');
-    if (/\b(?:tarball|scripts|hasInstallScript|requiresBuild|hasBin):/.test(block)
-      || /^    (?!dependencies:|optionalDependencies:|transitivePeerDependencies:|peerDependencies:)[A-Za-z][^\n]*:/m.test(block)) {
-      throw new Error('Bundle pnpm lockfile snapshot contains an unexpected field.');
-    }
-  }
-}
-
-function validateYarnLockDelta(beforeText: string, afterText: string, packageName: string, targetMajor: number): void {
-  boundedLockfile(beforeText);
-  boundedLockfile(afterText);
-  const parse = (text: string): Map<string, string> => {
-    const blocks = new Map<string, string>();
-    let key = '';
-    for (const line of text.split('\n')) {
-      if (!line || line.startsWith('#')) continue;
-      if (!/^\s/.test(line)) {
-        if (!line.endsWith(':') || line.startsWith('__metadata')) throw new Error('Bundle Yarn lockfile format is unsupported.');
-        key = line.slice(0, -1);
-        if (blocks.has(key)) throw new Error('Bundle Yarn lockfile contains a duplicate package entry.');
-      } else if (!key) throw new Error('Bundle Yarn lockfile has an unexpected entry.');
-      blocks.set(key, `${blocks.get(key) ?? ''}${line}\n`);
-    }
-    return blocks;
-  };
-  const oldBlocks = parse(beforeText);
-  const newBlocks = parse(afterText);
-  let targetSeen = false;
-  for (const [key, block] of newBlocks) {
-    const selectors = key.split(/,\s*/).map((selector) => selector.replace(/^"|"$/g, ''));
-    const names = selectors.map((selector) => /^(@[^/]+\/[^@]+|[^@]+)@/.exec(selector)?.[1]);
-    const name = names[0];
-    if (!name || names.some((candidate) => candidate !== name)) throw new Error('Bundle Yarn lockfile mixes package names in an entry.');
-    if (!/^(?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+$/.test(name)) throw new Error('Bundle Yarn lockfile has an invalid package name.');
-    const version = /^  version "(\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?)"$/m.exec(block)?.[1];
-    if (!version) throw new Error('Bundle Yarn lockfile package lacks a valid version.');
-    if (name === packageName && version.startsWith(`${targetMajor}.`)) targetSeen = true;
-    if (block === oldBlocks.get(key)) continue;
-    const resolved = /^  resolved "([^"]+)"$/m.exec(block)?.[1];
-    const canonical = registryTarballUrl(name, version);
-    if (!resolved || (resolved !== canonical && !new RegExp(`^${canonical.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}#[a-fA-F0-9]{40}$`).test(resolved))
-      || !/^  integrity sha512-[A-Za-z0-9+/=]+$/m.test(block)
-      || /^  (?:scripts|hasInstallScript|bin)\b/m.test(block)) {
-      throw new Error('Bundle Yarn lockfile contains an unverified npm registry package.');
-    }
-  }
-  if (!targetSeen) throw new Error('Bundle Yarn lockfile does not contain the target SDK.');
-}
-
 function sameList(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-/** The report is Markdown already. Escape HTML once, then keep it inside a quote. */
+/** A fenced block prevents GitHub from parsing mentions, autolinks, HTML or client Markdown. */
 function quotedUntrustedReport(report: string): string {
-  return sanitizeTerminalText(report)
-    .replace(/&(?:amp|lt|gt|quot|#(?:\d+|x[0-9a-f]+));|https?:\/\/|www\.|GH-\d+|[&<>@!\[\]]|#(?=\d)/gi, (token) => {
-      if (token.startsWith('&') && token.endsWith(';')) return token;
-      if (/^https?:\/\//i.test(token)) return token.replace(':', '&#58;');
-      if (/^www\./i.test(token)) return token.slice(0, -1) + '&#46;';
-      if (/^GH-\d+$/i.test(token)) return token.replace('-', '&#45;');
-      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '@': '&#64;', '!': '&#33;', '[': '&#91;', ']': '&#93;', '#': '&#35;' } as Record<string, string>)[token] ?? token;
-    })
-    .split('\n').map((line) => `> ${line}`).join('\n');
+  const safe = maskSecrets(sanitizeTerminalText(report));
+  let longest = 0;
+  for (const [run] of safe.matchAll(/~+/g)) longest = Math.max(longest, run.length);
+  const fence = '~'.repeat(Math.max(4, longest + 1));
+  return `${fence}report\n${safe}\n${fence}`;
 }
 
 function completeExcerpt(report: string): string {

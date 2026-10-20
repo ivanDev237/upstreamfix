@@ -7,6 +7,7 @@ import { runRealSdkNpm } from './helpers/real-sdk-command.js';
 import { Project } from 'ts-morph';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 import { validateProposal, validateProposalEnvelope, validatePublishableBundle, parseExactRemoteHead, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
+import { regenerateNpmLockfile } from '../src/action/regenerate-lock.js';
 
 const base = 'a'.repeat(40);
 const commit = 'b'.repeat(40);
@@ -29,10 +30,7 @@ describe('Action publication boundary', () => {
       closePullRequest: async () => undefined, upsertIssue: async () => undefined, closeIssue: async () => undefined,
     };
     await reconcileProposal({ ...proposal, report: '[click](https://evil.invalid) ![pixel](https://evil.invalid/pixel) #123' }, publisher);
-    expect(body).not.toContain('[click](');
-    expect(body).not.toContain('![pixel](');
-    expect(body).not.toContain(' #123');
-    expect(body).not.toContain('https://evil.invalid');
+    expect(body).toMatch(/~~~~report\n[\s\S]*\[click\]\(https:\/\/evil\.invalid\)[\s\S]*\n~~~~/);
   });
   it('X2 quotes report characters in one pass without creating new links or references', async () => {
     let body = '';
@@ -42,8 +40,20 @@ describe('Action publication boundary', () => {
       closePullRequest: async () => undefined, upsertIssue: async () => undefined, closeIssue: async () => undefined,
     };
     await reconcileProposal({ ...proposal, report: 'a@b [x] #12 ! www.example.test GH-123 &gt; <x>' }, publisher);
-    expect(body).toContain('> a&#64;b &#91;x&#93; &#35;12 &#33; www&#46;example.test GH&#45;123 &gt; &lt;x&gt;');
+    expect(body).toContain('~~~~report\na@b [x] #12 ! www.example.test GH-123 &gt; <x>\n~~~~');
     expect(body).not.toContain('&&#35;');
+  });
+  it('Y6 keeps untrusted addresses and mention-like text inside a Markdown code block', async () => {
+    let body = '';
+    const publisher: ProposalPublisher = {
+      findPullRequest: async () => undefined, pushBranch: async () => undefined,
+      openPullRequest: async (value) => { body = value; }, updatePullRequest: async () => undefined,
+      closePullRequest: async () => undefined, upsertIssue: async () => undefined, closeIssue: async () => undefined,
+    };
+    await reconcileProposal({ ...proposal, report: 'a@b @octocat www.example.test mailto:a@b\n```diff\n+ [x] !\n```' }, publisher);
+    expect(body).toMatch(/~~~~report\n[\s\S]*a@b @octocat/);
+    expect(body).toContain('\n~~~~');
+    expect(body).not.toContain('&#64;');
   });
   it('W5 rejects a forged package script, lockfile URL, and commit identity', () => {
     const before = JSON.stringify({ dependencies: { 'firebase-admin': '^13.0.0' }, scripts: { test: 'node test.js' } });
@@ -62,18 +72,18 @@ describe('Action publication boundary', () => {
     const valid = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^14.0.0' } }, 'node_modules/firebase-admin': entry } });
     const candidate = { ...proposal, files: ['package-lock.json'] };
     const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
-    expect(() => validatePublishableBundle(candidate, { 'package-lock.json': { before, after: valid } }, identity)).not.toThrow();
+    expect(() => validatePublishableBundle(candidate, { 'package-lock.json': { before, after: valid } }, identity, { 'package-lock.json': valid })).not.toThrow();
     for (const resolved of [
       'https://registry.npmjs.org/@evil/firebase-admin/-/firebase-admin-14.0.0.tgz',
       'https://registry.npmjs.org/evil-pkg/-/firebase-admin-14.0.0.tgz',
       'https://registry.npmjs.org/evil/../firebase-admin/-/firebase-admin-14.0.0.tgz',
     ]) {
       const after = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^14.0.0' } }, 'node_modules/firebase-admin': { ...entry, resolved } } });
-      expect(() => validatePublishableBundle(candidate, { 'package-lock.json': { before, after } }, identity)).toThrow(/registry|lockfile/i);
+      expect(() => validatePublishableBundle(candidate, { 'package-lock.json': { before, after } }, identity, { 'package-lock.json': valid })).toThrow(/registry|lockfile/i);
     }
     for (const extras of [{ bin: { cli: 'x' } }, { dependencies: { 'evil-pkg': '1.0.0' } }, { scripts: { postinstall: 'node evil.js' } }]) {
       const after = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^14.0.0' } }, 'node_modules/firebase-admin': { ...entry, ...extras } } });
-      expect(() => validatePublishableBundle(candidate, { 'package-lock.json': { before, after } }, identity)).toThrow(/lockfile|unexpected/i);
+      expect(() => validatePublishableBundle(candidate, { 'package-lock.json': { before, after } }, identity, { 'package-lock.json': valid })).toThrow(/lockfile|unexpected/i);
     }
   });
   it('X3 accepts independently validated npm transitive changes and npm-shrinkwrap', () => {
@@ -83,27 +93,59 @@ describe('Action publication boundary', () => {
     const before = JSON.stringify({ lockfileVersion: 3, packages: { '': root('^13.0.0'), 'node_modules/firebase-admin': item('firebase-admin', '13.10.0'), 'node_modules/old': item('old', '1.0.0') } });
     const after = JSON.stringify({ lockfileVersion: 3, packages: { '': root('^14.0.0'), 'node_modules/firebase-admin': item('firebase-admin', '14.0.0'), 'node_modules/new': item('new', '2.0.0') } });
     for (const filename of ['package-lock.json', 'npm-shrinkwrap.json']) {
-      expect(() => validatePublishableBundle({ ...proposal, files: [filename] }, { [filename]: { before, after } }, identity)).not.toThrow();
+      expect(() => validatePublishableBundle({ ...proposal, files: [filename] }, { [filename]: { before, after } }, identity, { [filename]: after })).not.toThrow();
     }
   });
   it('X3 accepts the committed npm-generated Firebase 13 to 14 lockfile pair', () => {
     const before = readFileSync(new URL('./fixtures/firebase-lockfiles/13-to-14-before.json', import.meta.url), 'utf8');
     const after = readFileSync(new URL('./fixtures/firebase-lockfiles/13-to-14-after.json', import.meta.url), 'utf8');
     const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
-    expect(() => validatePublishableBundle({ ...proposal, files: ['package-lock.json'] }, { 'package-lock.json': { before, after } }, identity)).not.toThrow();
+    expect(() => validatePublishableBundle({ ...proposal, files: ['package-lock.json'] }, { 'package-lock.json': { before, after } }, identity, { 'package-lock.json': after })).not.toThrow();
   });
-  it('X3 accepts safe pnpm and Yarn lockfile upgrades but rejects foreign tarballs', () => {
+  it('Y4 accepts npm v2 only when it equals the independently regenerated bytes', () => {
+    const before = JSON.stringify({ lockfileVersion: 2, packages: { '': { dependencies: { 'firebase-admin': '^13.0.0' } } } });
+    const after = JSON.stringify({ lockfileVersion: 2, packages: { '': { dependencies: { 'firebase-admin': '^14.0.0' } } } });
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    const item = { ...proposal, files: ['npm-shrinkwrap.json'] };
+    expect(() => validatePublishableBundle(item, { 'npm-shrinkwrap.json': { before, after } }, identity)).toThrow(/regenerat/i);
+    expect(() => validatePublishableBundle(item, { 'npm-shrinkwrap.json': { before, after } }, identity, { 'npm-shrinkwrap.json': after })).not.toThrow();
+  });
+  it('Y1 refuses a changed npm alias that substitutes a different published package', () => {
+    const before = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^13.0.0' } }, 'node_modules/firebase-admin': { version: '13.0.0' }, 'node_modules/semver': { version: '7.0.0', resolved: 'https://registry.npmjs.org/semver/-/semver-7.0.0.tgz', integrity: 'sha512-QUJDRA==' } } });
+    const after = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^14.0.0' } }, 'node_modules/firebase-admin': { version: '14.0.0', resolved: 'https://registry.npmjs.org/firebase-admin/-/firebase-admin-14.0.0.tgz', integrity: 'sha512-QUJDRA==' }, 'node_modules/semver': { name: 'evil-semver', version: '9.9.9', resolved: 'https://registry.npmjs.org/evil-semver/-/evil-semver-9.9.9.tgz', integrity: 'sha512-QUJDRA==' }, 'node_modules/other': { version: '1.0.0', resolved: 'https://registry.npmjs.org/other/-/other-1.0.0.tgz', integrity: 'sha512-QUJDRA==', dependencies: { semver: 'npm:evil-semver@9.9.9' } } } });
+    const safe = JSON.parse(after) as { packages: Record<string, unknown> };
+    safe.packages['node_modules/semver'] = { version: '7.0.0', resolved: 'https://registry.npmjs.org/semver/-/semver-7.0.0.tgz', integrity: 'sha512-QUJDRA==' };
+    delete safe.packages['node_modules/other'];
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    expect(() => validatePublishableBundle({ ...proposal, files: ['package-lock.json'] }, { 'package-lock.json': { before, after } }, identity, { 'package-lock.json': JSON.stringify(safe) })).toThrow(/lockfile|regenerat/i);
+  });
+  it('Y2 refuses a new transitive executable named node', () => {
+    const before = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^13.0.0' } }, 'node_modules/firebase-admin': { version: '13.0.0' } } });
+    const after = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^14.0.0' } }, 'node_modules/firebase-admin': { version: '14.0.0', resolved: 'https://registry.npmjs.org/firebase-admin/-/firebase-admin-14.0.0.tgz', integrity: 'sha512-QUJDRA==' }, 'node_modules/evil': { version: '1.0.0', resolved: 'https://registry.npmjs.org/evil/-/evil-1.0.0.tgz', integrity: 'sha512-QUJDRA==', bin: { node: 'bin/evil.js' } } } });
+    const safe = JSON.parse(after) as { packages: Record<string, unknown> };
+    delete safe.packages['node_modules/evil'];
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    expect(() => validatePublishableBundle({ ...proposal, files: ['package-lock.json'] }, { 'package-lock.json': { before, after } }, identity, { 'package-lock.json': JSON.stringify(safe) })).toThrow(/lockfile|regenerat/i);
+    expect(() => validatePublishableBundle({ ...proposal, files: ['package-lock.json'] }, { 'package-lock.json': { before, after } }, identity, { 'package-lock.json': after })).toThrow(/executable|command/i);
+  });
+  it('Y3 refuses every pnpm and Yarn lockfile update until independent regeneration exists', () => {
     const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
     const pnpm = (version: number, url = '') => `lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      firebase-admin:\n        specifier: ^${version}.0.0\n        version: ${version}.0.0\npackages:\n  firebase-admin@${version}.0.0:\n    resolution: {integrity: sha512-QUJDRA==${url}}\nsnapshots:\n  firebase-admin@${version}.0.0: {}\n`;
-    expect(() => validatePublishableBundle({ ...proposal, files: ['pnpm-lock.yaml'] }, { 'pnpm-lock.yaml': { before: pnpm(13), after: pnpm(14) } }, identity)).not.toThrow();
+    expect(() => validatePublishableBundle({ ...proposal, files: ['pnpm-lock.yaml'] }, { 'pnpm-lock.yaml': { before: pnpm(13), after: pnpm(14) } }, identity)).toThrow(/manual review/i);
     const yarn = (version: number, registry = 'registry.npmjs.org') => `firebase-admin@^${version}.0.0:\n  version "${version}.0.0"\n  resolved "https://${registry}/firebase-admin/-/firebase-admin-${version}.0.0.tgz"\n  integrity sha512-QUJDRA==\n`;
-    expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: yarn(13), after: yarn(14) } }, identity)).not.toThrow();
+    expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: yarn(13), after: yarn(14) } }, identity)).toThrow(/manual review/i);
     expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: yarn(13), after: yarn(14, 'evil.invalid') } }, identity)).toThrow(/registry|lockfile/i);
+    for (const attack of [
+      pnpm(14).replace('resolution: {integrity:', 'resolution: {"tarball": "https://evil.invalid/pkg.tgz", integrity:'),
+      pnpm(14).replace('resolution: {integrity:', 'resolution: &payload {tarball: "https://evil.invalid/pkg.tgz", integrity:'),
+      pnpm(14).replace('resolution: {integrity:', 'resolution: {tarball: "git+https://evil.invalid/repo", integrity:'),
+    ]) expect(() => validatePublishableBundle({ ...proposal, files: ['pnpm-lock.yaml'] }, { 'pnpm-lock.yaml': { before: pnpm(13), after: attack } }, identity)).toThrow(/manual review/i);
+    expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: yarn(13), after: yarn(14) + '  resolved "https://evil.invalid/second.tgz"\n' } }, identity)).toThrow(/manual review/i);
   });
   it('X3 validates scoped Yarn Classic entries and canonical tarball fragments', () => {
     const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
     const lock = (major: number) => `firebase-admin@^${major}.0.0:\n  version "${major}.0.0"\n  resolved "https://registry.npmjs.org/firebase-admin/-/firebase-admin-${major}.0.0.tgz#${'a'.repeat(40)}"\n  integrity sha512-QUJDRA==\n\n"@scope/helper@^${major}.0.0":\n  version "${major}.0.0"\n  resolved "https://registry.npmjs.org/@scope/helper/-/helper-${major}.0.0.tgz#${'b'.repeat(40)}"\n  integrity sha512-QUJDRA==\n`;
-    expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: lock(13), after: lock(14) } }, identity)).not.toThrow();
+    expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: lock(13), after: lock(14) } }, identity)).toThrow(/manual review/i);
   });
   it('X3 rejects ambiguous duplicate package records in text lockfiles', () => {
     const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
@@ -128,6 +170,16 @@ describe('Action publication boundary', () => {
     const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
     expect(() => validatePublishableBundle({ ...proposal, files: ['server.ts'] }, { 'server.ts': { before, after: after! } }, identity)).not.toThrow();
   });
+  it('Y6 accepts the deterministic Firebase source migration with its original BOM', () => {
+    const before = "\uFEFFimport * as admin from 'firebase-admin';\nadmin.initializeApp();\n";
+    const project = new Project({ useInMemoryFileSystem: true, skipAddingFilesFromTsConfig: true, compilerOptions: { allowJs: true } });
+    project.createSourceFile('/proposal/server.ts', before);
+    const produced = firebaseAdminV14.transform(project).fileUpdates?.[0]?.contents;
+    expect(produced).toBeDefined();
+    const after = produced!.startsWith('\uFEFF') ? produced! : `\uFEFF${produced}`;
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    expect(() => validatePublishableBundle({ ...proposal, files: ['server.ts'] }, { 'server.ts': { before, after } }, identity)).not.toThrow();
+  });
   it.skipIf(process.env.UPSTREAMFIX_RUN_LOCKFILE_NETWORK_TESTS !== '1')('X3 validates a real firebase-admin 13 to 14 npm lockfile upgrade', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-real-publish-lock-'));
     try {
@@ -145,7 +197,9 @@ describe('Action publication boundary', () => {
         await writeFile(path.join(fixtureRoot, 'before.json'), before);
         await writeFile(path.join(fixtureRoot, 'after.json'), after);
       }
-      expect(() => validatePublishableBundle({ ...proposal, files: ['package-lock.json'] }, { 'package-lock.json': { before, after } }, identity)).not.toThrow();
+      const regenerated = await regenerateNpmLockfile(before, manifest('^14.0.0'), 'package-lock.json');
+      expect(regenerated).toBe(after);
+      expect(() => validatePublishableBundle({ ...proposal, files: ['package-lock.json'] }, { 'package-lock.json': { before, after } }, identity, { 'package-lock.json': regenerated })).not.toThrow();
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -159,7 +213,7 @@ describe('Action publication boundary', () => {
       closeIssue: async () => undefined,
     };
     await reconcileProposal({ ...proposal, report: '## Verification\n\n- Result: **passed**\n- Note: &gt; check \\(\\.\\)\n\n```diff\n+ getFirestore()\n```' }, publisher);
-    expect(body).toContain('> - Result: **passed**');
+    expect(body).toContain('- Result: **passed**');
     expect(body).toContain('&gt; check');
     expect(body).not.toContain('&amp;gt;');
     expect(body).not.toContain('&#42;');
@@ -293,10 +347,7 @@ describe('Action publication boundary', () => {
     await reconcileProposal({ ...proposal, status: 'manual', commit: undefined, files: [], verification: 'failed', report: 'Verification: **passed**\n@maintainer <h1>safe</h1>' }, publisher);
     const body = vi.mocked(publisher.upsertIssue).mock.calls[0]?.[0] ?? '';
     expect(body).toContain('Verification: **failed**');
-    expect(body).not.toMatch(/^Verification: \*\*passed\*\*$/m);
-    expect(body).toContain('> Verification: **passed**');
-    expect(body).not.toContain('@maintainer');
-    expect(body).not.toContain('<h1>');
+    expect(body).toContain('~~~~report\nVerification: **passed**\n@maintainer <h1>safe</h1>\n~~~~');
   });
   it('refuses an unexpected base, branch, parent or changed path', () => {
     expect(() => validateProposal(proposal, base, [base], ['package.json', 'server.ts'])).not.toThrow();
