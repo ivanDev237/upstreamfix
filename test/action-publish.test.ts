@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { runRealSdkNpm } from './helpers/real-sdk-command.js';
 import { validateProposal, validateProposalEnvelope, validatePublishableBundle, parseExactRemoteHead, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
 
 const base = 'a'.repeat(40);
@@ -96,6 +100,28 @@ describe('Action publication boundary', () => {
     const before = "import * as admin from 'firebase-admin';\nadmin.initializeApp();\n";
     expect(() => validatePublishableBundle({ ...proposal, files: ['server.ts'] }, { 'server.ts': { before, after: 'require(\"evil\")\n' } }, identity)).toThrow(/migration|source/i);
   });
+  it.skipIf(process.env.UPSTREAMFIX_RUN_LOCKFILE_NETWORK_TESTS !== '1')('X3 validates a real firebase-admin 13 to 14 npm lockfile upgrade', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-real-publish-lock-'));
+    try {
+      const manifest = (range: string) => JSON.stringify({ name: 'real-lock-fixture', version: '1.0.0', private: true, engines: { node: '>=22' }, dependencies: { 'firebase-admin': range } }, null, 2) + '\n';
+      await writeFile(path.join(cwd, 'package.json'), manifest('^13.10.0'));
+      await runRealSdkNpm(cwd, ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], 180_000);
+      const before = await readFile(path.join(cwd, 'package-lock.json'), 'utf8');
+      await writeFile(path.join(cwd, 'package.json'), manifest('^14.0.0'));
+      await runRealSdkNpm(cwd, ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], 180_000);
+      const after = await readFile(path.join(cwd, 'package-lock.json'), 'utf8');
+      const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+      expect(() => validatePublishableBundle({ ...proposal, files: ['package-lock.json'] }, { 'package-lock.json': { before, after } }, identity)).not.toThrow();
+      const fixtureRoot = process.env.UPSTREAMFIX_LOCK_FIXTURE_OUTPUT;
+      if (fixtureRoot) {
+        await mkdir(fixtureRoot, { recursive: true });
+        await writeFile(path.join(fixtureRoot, 'before.json'), before);
+        await writeFile(path.join(fixtureRoot, 'after.json'), after);
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }, 420_000);
   it('T36 renders an already escaped migration report as Markdown exactly once', async () => {
     let body = '';
     const publisher: ProposalPublisher = {
