@@ -389,6 +389,15 @@ describe('firebase-admin v14 migration', () => {
     expect(outcome.manual.map((item) => item.reason).join('\n')).toMatch(/already declared|no longer exported/);
     expect(outcome.filesChanged).not.toContain('package.json');
   });
+  it('Y6 leaves mutations of the removed admin.apps property for manual review', async () => {
+    const cwd = await makeProject();
+    const source = "import * as admin from 'firebase-admin';\ndelete admin.apps;\nadmin.apps = [];\n";
+    await writeFile(path.join(cwd, 'server.ts'), source);
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(outcome.manual.some((item) => /mutat|apps/i.test(item.reason))).toBe(true);
+    expect(outcome.filesChanged).not.toContain('server.ts');
+    expect(outcome.filesChanged).not.toContain('package.json');
+  });
 
   it('scans JavaScript in lib directories and reports it in the preview', async () => {
     const cwd = await makeProject();

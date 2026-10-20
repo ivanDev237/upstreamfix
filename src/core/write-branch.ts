@@ -166,7 +166,7 @@ export async function assertChangedSourcesUseTargetSdk(projectRoot: string, migr
     let foundRange: string | undefined;
     while (directory === projectRoot || directory.startsWith(`${projectRoot}${path.sep}`)) {
       const manifestFile = path.join(directory, 'package.json');
-      const raw = proposed.get(manifestFile) ?? await readRegularFile(manifestFile).catch((error: NodeJS.ErrnoException) => {
+      const raw = proposed.get(manifestFile) ?? await readRegularFile(manifestFile, projectRoot).catch((error: NodeJS.ErrnoException) => {
         if (error.code === 'ENOENT') return undefined;
         throw new Error('Unsafe package.json: manifest is not a regular file or cannot be read safely.');
       });

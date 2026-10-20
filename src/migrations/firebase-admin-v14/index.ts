@@ -159,6 +159,22 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
   const aliases = findAliases(sourceFile);
   if (aliases.length === 0) return false;
 
+  // A whole-project language-service reference query for each alias scales poorly
+  // on large source files. Index local identifiers once and retain symbol identity.
+  const localIdentifiers = new Map<string, Identifier[]>();
+  for (const identifier of sourceFile.getDescendantsOfKind(SyntaxKind.Identifier)) {
+    const group = localIdentifiers.get(identifier.getText()) ?? [];
+    group.push(identifier);
+    localIdentifiers.set(identifier.getText(), group);
+  }
+  const localReferences = (declaration: Identifier): Identifier[] => {
+    const symbol = declaration.getSymbol();
+    if (!symbol) return declaration.findReferencesAsNodes().filter(Node.isIdentifier)
+      .filter((reference) => reference.getSourceFile() === sourceFile);
+    return (localIdentifiers.get(declaration.getText()) ?? [])
+      .filter((candidate) => candidate.getSymbol() === symbol);
+  };
+
   const aliasNames = new Set(aliases.map((alias) => alias.name));
   for (const declaration of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const initializer = declaration.getInitializer();
@@ -168,7 +184,7 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
     if (!Node.isPropertyAccessExpression(factory) || factory.getName() !== 'app') continue;
     const root = factory.getExpression();
     if (!Node.isIdentifier(root) || !aliasNames.has(root.getText())) continue;
-    for (const reference of nameNode.findReferencesAsNodes()) {
+    for (const reference of localReferences(nameNode)) {
       if (reference === nameNode || reference.getSourceFile() !== sourceFile) continue;
       const access = reference.getParent();
       if (!Node.isPropertyAccessExpression(access) || access.getExpression() !== reference) continue;
@@ -217,11 +233,7 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
       }
     }
 
-    const references = alias.nameNode
-      .findReferencesAsNodes()
-      .filter(Node.isIdentifier)
-      .filter((reference) => reference.getSourceFile() === sourceFile)
-      .filter((reference) => reference !== alias.nameNode);
+    const references = localReferences(alias.nameNode).filter((reference) => reference !== alias.nameNode);
 
     for (const ref of references) {
       const line = ref.getStartLineNumber();
@@ -425,6 +437,13 @@ function classifyAccess(access: PropertyAccessExpression): Classification {
     return { node: access, text: 'getApp', rule: 'app-lifecycle', imports: [appImport('getApp')] };
   }
   if (name === 'apps') {
+    const parent = access.getParent();
+    if ((Node.isBinaryExpression(parent) && parent.getLeft() === access)
+      || Node.isDeleteExpression(parent)
+      || Node.isPrefixUnaryExpression(parent)
+      || Node.isPostfixUnaryExpression(parent)) {
+      return { reason: 'Mutating admin.apps has no safe modular equivalent; review this operation manually.' };
+    }
     return { node: access, text: 'getApps()', rule: 'app-lifecycle', imports: [appImport('getApps')] };
   }
   return { reason: `\`${access.getText()}\` has no automatic mapping yet.` };

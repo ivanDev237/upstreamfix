@@ -99,12 +99,12 @@ export async function verifyProposedMigration(
     const installChecks: VerificationCheck[] = [];
     const installDirs = new Set(packageDirs);
     const installedRoots = new Set<string>();
-    const rootPackage = await readPackageJson(projectCopy).catch(() => undefined);
+    const rootPackage = await readPackageJson(projectCopy, projectCopy).catch(() => undefined);
     if (rootPackage && (rootPackage.scripts?.typecheck || rootPackage.scripts?.test || rootPackage.workspaces) && hasDependencies(rootPackage)) {
       installDirs.add(projectCopy);
     }
     for (const directory of installDirs) {
-      const pkg = await readPackageJson(directory);
+      const pkg = await readPackageJson(directory, projectCopy);
       if (!hasDependencies(pkg)) continue;
       const plan = await installCommand(projectCopy, directory, pkg);
       if (installedRoots.has(plan.cwd)) continue;
@@ -130,15 +130,15 @@ export async function verifyProposedMigration(
         checks.push(...installChecks);
         return { status: 'failed', checks, note: 'Type checks and tests were not run because dependency installation failed.' };
       }
-      await readRegularFile(path.join(plan.cwd, 'package.json'));
+      await readRegularFile(path.join(plan.cwd, 'package.json'), projectCopy);
     }
     checks.push(...installChecks);
 
-    for (const directory of packageDirs) await readRegularFile(path.join(directory, 'package.json'));
+    for (const directory of packageDirs) await readRegularFile(path.join(directory, 'package.json'), projectCopy);
 
     const checkDirs = await findCheckDirs(projectCopy, packageDirs);
     for (const directory of checkDirs) {
-      const pkg = await readPackageJson(directory);
+      const pkg = await readPackageJson(directory, projectCopy);
       const relative = path.relative(projectCopy, directory) || '.';
       if (pkg.scripts?.typecheck) {
         const script = await scriptCommand(projectCopy, directory, pkg, 'typecheck');
@@ -278,7 +278,7 @@ async function findRelevantPackageDirs(root: string, packageName: string): Promi
   const manifests = await findPackageFiles(root);
   const packageDirs: string[] = [];
   for (const manifestPath of manifests) {
-    const pkg = await readPackageJson(path.dirname(manifestPath)).catch(() => undefined);
+    const pkg = await readPackageJson(path.dirname(manifestPath), root).catch(() => undefined);
     if (!pkg) continue;
     if (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
       .some((section) => typeof (pkg as Record<string, unknown>)[section] === 'object'
@@ -286,7 +286,7 @@ async function findRelevantPackageDirs(root: string, packageName: string): Promi
       packageDirs.push(path.dirname(manifestPath));
     }
   }
-  const rootPackage = await readPackageJson(root).catch(() => undefined);
+  const rootPackage = await readPackageJson(root, root).catch(() => undefined);
   if (rootPackage?.workspaces && packageDirs.length > 0) return [root];
   return [...new Set(packageDirs)];
 }
@@ -295,8 +295,8 @@ async function findCheckDirs(root: string, packageDirs: string[]): Promise<strin
   const candidates = new Set([root, ...packageDirs]);
   const output: string[] = [];
   for (const directory of candidates) {
-    const pkg = packageDirs.includes(directory) ? await readPackageJson(directory)
-      : await readPackageJson(directory).catch((error: unknown) => {
+    const pkg = packageDirs.includes(directory) ? await readPackageJson(directory, root)
+      : await readPackageJson(directory, root).catch((error: unknown) => {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
         throw error;
       });
@@ -320,9 +320,9 @@ async function findPackageFiles(root: string): Promise<string[]> {
   return found;
 }
 
-async function readPackageJson(directory: string): Promise<PackageJson> {
+async function readPackageJson(directory: string, trustedRoot: string): Promise<PackageJson> {
   try {
-    return parseManifest<PackageJson>(await readRegularFile(path.join(directory, 'package.json')));
+    return parseManifest<PackageJson>(await readRegularFile(path.join(directory, 'package.json'), trustedRoot));
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error('Invalid package.json used for verification.');
     throw error;
@@ -368,7 +368,7 @@ async function installCommand(
   if (manager === 'pnpm') return { command: 'pnpm', args: ['install', '--ignore-scripts', '--no-frozen-lockfile', '--config.pnpmfile=/dev/null', '--config.global-pnpmfile=/dev/null'], cwd: lockRoot };
   if (manager === 'yarn') {
     const version = Number(/^yarn@(\d+)/.exec(declared ?? '')?.[1] ?? 1);
-    const yarnBerry = version >= 2 || (await readRegularFile(path.join(lockRoot, 'yarn.lock')).catch(() => '')).includes('__metadata:');
+    const yarnBerry = version >= 2 || (await readRegularFile(path.join(lockRoot, 'yarn.lock'), root).catch(() => '')).includes('__metadata:');
     return {
       command: 'yarn',
       args: ['install', ...(yarnBerry ? ['--mode=skip-builds'] : ['--ignore-scripts'])],
@@ -411,7 +411,7 @@ async function scriptCommand(root: string, directory: string, pkg: PackageJson, 
 async function detectPackageManager(root: string, directory: string, pkg: PackageJson): Promise<{ lockRoot: string; manager: 'npm' | 'pnpm' | 'yarn'; declared?: string }> {
   const lockRoot = await findLockfileRoot(root, directory);
   const lockfile = await findLockfileName(lockRoot);
-  const rootPackage = await readPackageJson(lockRoot).catch(() => undefined);
+  const rootPackage = await readPackageJson(lockRoot, root).catch(() => undefined);
   const declared: unknown = pkg.packageManager ?? rootPackage?.packageManager;
   if (declared !== undefined && (typeof declared !== 'string' || !/^(npm|pnpm|yarn)@\d+\.\d+\.\d+(?:\+sha\d+\.[0-9a-f]+)?$/.test(declared))) {
     throw new Error(`Unsupported or unsafe packageManager field: ${String(declared)}. Use an exact npm, pnpm, or Yarn version.`);

@@ -954,6 +954,11 @@ export function unifiedDiff(file: string, before: string, after: string): string
   if (Buffer.byteLength(before) + Buffer.byteLength(after) > MAX_DIFF_INPUT_BYTES) {
     return `${file}: diff withheld because the source exceeds ${MAX_DIFF_INPUT_BYTES} bytes.`;
   }
+  const beforeLines = before.match(/\n/g)?.length ?? 0;
+  const afterLines = after.match(/\n/g)?.length ?? 0;
+  if (beforeLines + afterLines > 4_000) {
+    return `${file}: diff withheld because this file has too many lines for a bounded report.`;
+  }
   const patch = structuredPatch(
     `a/${file}`,
     `b/${file}`,
