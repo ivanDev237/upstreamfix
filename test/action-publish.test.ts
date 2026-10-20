@@ -46,9 +46,9 @@ describe('Action publication boundary', () => {
     const lockBefore = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^13.0.0' } }, 'node_modules/firebase-admin': { version: '13.0.0', resolved: 'https://registry.npmjs.org/firebase-admin/-/firebase-admin-13.0.0.tgz', integrity: 'sha512-old' } } });
     const lockAfter = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^14.0.0' } }, 'node_modules/firebase-admin': { version: '14.0.0', resolved: 'https://evil.invalid/firebase-admin.tgz', integrity: 'sha512-new' } } });
     const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
-    expect(() => validatePublishableBundle(proposal, { 'package.json': { before, after } }, identity)).toThrow(/package.json/i);
-    expect(() => validatePublishableBundle({ ...proposal, files: [...proposal.files, 'package-lock.json'] }, { 'package.json': { before, after: validAfter }, 'package-lock.json': { before: lockBefore, after: lockAfter } }, identity)).toThrow(/registry|lockfile/i);
-    expect(() => validatePublishableBundle(proposal, { 'package.json': { before, after: validAfter } }, { ...identity, author: 'attacker' })).toThrow(/identity/i);
+    expect(() => validatePublishableBundle({ ...proposal, files: ['package.json'] }, { 'package.json': { before, after } }, identity)).toThrow(/package.json/i);
+    expect(() => validatePublishableBundle({ ...proposal, files: ['package.json', 'package-lock.json'] }, { 'package.json': { before, after: validAfter }, 'package-lock.json': { before: lockBefore, after: lockAfter } }, identity)).toThrow(/registry|lockfile/i);
+    expect(() => validatePublishableBundle({ ...proposal, files: ['package.json'] }, { 'package.json': { before, after: validAfter } }, { ...identity, author: 'attacker' })).toThrow(/identity/i);
   });
   it('X1 rejects a scoped lookalike URL and extra lockfile capabilities', () => {
     const before = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^13.0.0' } }, 'node_modules/firebase-admin': { version: '13.0.0' } } });
@@ -87,6 +87,14 @@ describe('Action publication boundary', () => {
     const yarn = (version: number, registry = 'registry.npmjs.org') => `firebase-admin@^${version}.0.0:\n  version "${version}.0.0"\n  resolved "https://${registry}/firebase-admin/-/firebase-admin-${version}.0.0.tgz"\n  integrity sha512-QUJDRA==\n`;
     expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: yarn(13), after: yarn(14) } }, identity)).not.toThrow();
     expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: yarn(13), after: yarn(14, 'evil.invalid') } }, identity)).toThrow(/registry|lockfile/i);
+  });
+  it('X4 refuses source and configuration bytes not produced by the migration', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    for (const file of ['test/setup.js', 'jest.config.js', 'pnpm-workspace.yaml']) {
+      expect(() => validatePublishableBundle({ ...proposal, files: [file] }, { [file]: { before: 'export default {}\n', after: 'export default { unsafe: true }\n' } }, identity)).toThrow(/bundle|source|migration|unsupported/i);
+    }
+    const before = "import * as admin from 'firebase-admin';\nadmin.initializeApp();\n";
+    expect(() => validatePublishableBundle({ ...proposal, files: ['server.ts'] }, { 'server.ts': { before, after: 'require(\"evil\")\n' } }, identity)).toThrow(/migration|source/i);
   });
   it('T36 renders an already escaped migration report as Markdown exactly once', async () => {
     let body = '';

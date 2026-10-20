@@ -2,6 +2,7 @@ import { sanitizeTerminalText } from '../core/report.js';
 import { migrations } from '../migrations/index.js';
 import type { ActionConfig } from './config.js';
 import { isDeepStrictEqual } from 'node:util';
+import { Project } from 'ts-morph';
 
 export interface Proposal {
   schema: 1;
@@ -173,15 +174,36 @@ export function validatePublishableBundle(proposal: Proposal, blobs: Record<stri
   }
   const migration = migrations.find((item) => item.id === proposal.migration);
   if (!migration) throw new Error('Unknown bundle migration.');
+  const project = new Project({ useInMemoryFileSystem: true, skipAddingFilesFromTsConfig: true, compilerOptions: { allowJs: true } });
+  const sources = new Map<string, BundleBlob>();
+  if (proposal.files.length > 100) throw new Error('Bundle contains too many changed files.');
   for (const file of proposal.files) {
-    if (!/(?:^|\/)package\.json$/.test(file) && !/(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock)$/.test(file)) continue;
     const blob = blobs[file];
-    if (!blob?.before) throw new Error('Bundle package.json or lockfile has no reviewed base version.');
+    if (!blob || typeof blob.before !== 'string' || blob.before.length > 8 * 1024 * 1024 || blob.after.length > 8 * 1024 * 1024) {
+      throw new Error('Bundle file has no bounded reviewed base version.');
+    }
+    if (/\.(?:[cm]?[jt]sx?)$/.test(file)) {
+      if (blob.before.length > 2 * 1024 * 1024) throw new Error('Bundle source exceeds the migration size limit.');
+      project.createSourceFile(`/proposal/${file}`, blob.before);
+      sources.set(file, blob);
+      continue;
+    }
     if (/(?:^|\/)package\.json$/.test(file)) validateManifestDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
     else if (/(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json)$/.test(file)) validateNpmLockDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
     else if (/(?:^|\/)pnpm-lock\.yaml$/.test(file)) validatePnpmLockDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
     else if (/(?:^|\/)yarn\.lock$/.test(file)) validateYarnLockDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
-    else throw new Error('Bundle lockfile format cannot be independently validated for publication; keep this migration manual.');
+    else throw new Error('Bundle changes a file outside the deterministic migration output.');
+  }
+  if (sources.size) {
+    const result = migration.transform(project);
+    if (result.manual.length) throw new Error('Bundle migration still has manual source work.');
+    const generated = new Map(result.fileUpdates?.map((update) => [update.file, update.contents]));
+    for (const [file, blob] of sources) {
+      if (generated.get(`/proposal/${file}`) !== blob.after) {
+        throw new Error(`Bundle source ${file} differs from the deterministic migration output.`);
+      }
+    }
+    if (generated.size !== sources.size) throw new Error('Bundle omits a deterministic migration source change.');
   }
 }
 

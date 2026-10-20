@@ -141,7 +141,6 @@ for (const proposal of proposals) {
       if (identityFields.length !== 5) throw new Error('Bundle commit identity is malformed.');
       const blobs: Record<string, { before?: string; after: string }> = Object.create(null);
       for (const file of proposal.files) {
-        if (!/(?:^|\/)(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock)$/.test(file)) continue;
         blobs[file] = {
           before: await git(bareRoot!, ['show', `${expectedBase}:${file}`]),
           after: await git(bareRoot!, ['show', `${proposal.commit!}:${file}`]),
