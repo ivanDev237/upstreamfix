@@ -339,9 +339,11 @@ export async function readRegularFile(file: string): Promise<string> {
     if (next === parent) break;
     parent = next;
   }
-  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    if (!(await handle.stat()).isFile()) throw new Error('Verification metadata must be a regular file.');
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error('Verification metadata must be a regular file.');
+    if (info.size > 8 * 1024 * 1024) throw new Error('Verification metadata exceeds the size limit.');
     return await handle.readFile({ encoding: 'utf8' });
   } finally { await handle.close(); }
 }

@@ -78,6 +78,16 @@ describe('migration verification', () => {
     expect(installs[0]).toContain('--config.pnpmfile=/dev/null');
     expect(installs[0]).toContain('--config.global-pnpmfile=/dev/null');
   });
+  it('W6 rejects a FIFO and oversized metadata without blocking', async () => {
+    const cwd = await makeProject();
+    const fifo = path.join(cwd, 'metadata.fifo');
+    const created = spawnSync('mkfifo', [fifo], { timeout: 3_000 });
+    if (created.status !== 0) throw new Error('mkfifo is required for this Linux security test.');
+    await expect(readRegularFile(fifo)).rejects.toThrow(/regular file/i);
+    const large = path.join(cwd, 'large.json');
+    await writeFile(large, 'x'.repeat(8 * 1024 * 1024 + 1));
+    await expect(readRegularFile(large)).rejects.toThrow(/size limit/i);
+  });
   it('runs configured custom checks only in the isolated verification copy', async () => {
     const cwd = await makeProject();
     const observed: Array<{ command: string; args: string[]; directory: string; token?: string }> = [];
