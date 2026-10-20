@@ -59,6 +59,25 @@ afterEach(async () => {
 });
 
 describe('migration verification', () => {
+  it('W3 excludes pnpm workspace code hooks and disables pnpmfile loading during installation', async () => {
+    const cwd = await makeProject({ test: 'node -e "process.exit(0)"' }, 'pnpm@10.0.0');
+    await writeFile(path.join(cwd, 'pnpm-workspace.yaml'), 'packages:\n  - .\npnpmfile: ./evil.cjs\nconfigDependencies:\n  evil: ./evil.cjs\n');
+    await execFile('git', ['add', 'pnpm-workspace.yaml'], { cwd });
+    const installs: string[][] = [];
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (command, args, directory) => {
+        if (command === 'pnpm' && args[0] === 'install') {
+          installs.push(args);
+          await expect(readFile(path.join(path.dirname(directory), 'project', 'pnpm-workspace.yaml'), 'utf8')).rejects.toThrow();
+        }
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('passed');
+    expect(installs).toHaveLength(1);
+    expect(installs[0]).toContain('--config.pnpmfile=/dev/null');
+    expect(installs[0]).toContain('--config.global-pnpmfile=/dev/null');
+  });
   it('runs configured custom checks only in the isolated verification copy', async () => {
     const cwd = await makeProject();
     const observed: Array<{ command: string; args: string[]; directory: string; token?: string }> = [];

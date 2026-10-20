@@ -11,7 +11,7 @@ import { registerTemporaryCleanup, terminateProcessGroup, trackProcessGroup } fr
 import { IGNORED_PROJECT_DIRECTORIES } from './project-discovery.js';
 import { parseManifest } from './manifest.js';
 
-const ignoredFiles = new Set(['.npmrc', '.yarnrc', '.yarnrc.yml', '.pnpmfile.cjs', '.pnpmfile.mjs', 'yarn.config.cjs']);
+const ignoredFiles = new Set(['.npmrc', '.yarnrc', '.yarnrc.yml', '.pnpmfile.cjs', '.pnpmfile.mjs', 'pnpm-workspace.yaml', 'yarn.config.cjs']);
 const maxOutputLength = 4_000;
 const maxCopyBytes = 100 * 1024 * 1024;
 const maxCopyFileBytes = 20 * 1024 * 1024;
@@ -357,7 +357,7 @@ async function installCommand(
   pkg: PackageJson,
 ): Promise<{ command: string; args: string[]; cwd: string; yarnMajor?: number; yarnExact?: boolean }> {
   const { lockRoot, manager, declared } = await detectPackageManager(root, directory, pkg);
-  if (manager === 'pnpm') return { command: 'pnpm', args: ['install', '--ignore-scripts', '--no-frozen-lockfile'], cwd: lockRoot };
+  if (manager === 'pnpm') return { command: 'pnpm', args: ['install', '--ignore-scripts', '--no-frozen-lockfile', '--config.pnpmfile=/dev/null', '--config.global-pnpmfile=/dev/null'], cwd: lockRoot };
   if (manager === 'yarn') {
     const version = Number(/^yarn@(\d+)/.exec(declared ?? '')?.[1] ?? 1);
     const yarnBerry = version >= 2 || (await readRegularFile(path.join(lockRoot, 'yarn.lock')).catch(() => '')).includes('__metadata:');
