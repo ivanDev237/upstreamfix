@@ -77,6 +77,7 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
   const imported = new Set<string>();
   const edits: Edit[] = [];
   const manualStart = result.manual.length;
+  const typedSource = /\.[cm]?tsx?$/.test(file.getFilePath());
   for (const declaration of file.getImportDeclarations()) {
     if (declaration.getModuleSpecifierValue() === 'openai') {
       if (declaration.getNamespaceImport()) addManual(result, file, declaration, 'OpenAI namespace imports require manual review because receiver bindings cannot be proven safe.');
@@ -153,7 +154,11 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
   }
   for (const property of file.getDescendantsOfKind(SyntaxKind.PropertyDeclaration)) {
     const type = property.getTypeNode();
+    const initializer = property.getInitializer();
     if (isClientType(type)) rememberField(property, property.getName());
+    else if (typedSource && Node.isIdentifier(property.getNameNode()) && initializer && Node.isNewExpression(initializer)
+      && imported.has(initializer.getExpression().getText()))
+      rememberField(property, property.getName());
     else if (type && [...imported].some((name) => new RegExp(`\\b${name}\\b`).test(type.getText()))) {
       // Keep the field untracked; only an affected use below needs review.
     }
@@ -207,9 +212,20 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       }
     }
     const parent = constructor.getParent();
-    const assignedKnownClient = parent && Node.isBinaryExpression(parent) && parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken
-      && Node.isIdentifier(parent.getLeft()) && Boolean(parent.getLeft().getSymbol() && clients.has(parent.getLeft().getSymbol()!));
-    if (imported.has(constructor.getExpression().getText()) && !Node.isVariableDeclaration(parent) && !assignedKnownClient) {
+    const assignment = parent && Node.isBinaryExpression(parent)
+      && parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken ? parent : undefined;
+    const assignedLeft = assignment?.getLeft();
+    const assignedKnownClient = assignedLeft && Node.isIdentifier(assignedLeft)
+      && Boolean(assignedLeft.getSymbol() && clients.has(assignedLeft.getSymbol()!));
+    const assignedOwner = assignment?.getFirstAncestor((ancestor) => Node.isClassDeclaration(ancestor) || Node.isClassExpression(ancestor));
+    const assignedKnownClassField = assignedLeft && Node.isPropertyAccessExpression(assignedLeft)
+      && assignedLeft.getExpression().getKind() === SyntaxKind.ThisKeyword
+      && Boolean(constructor.getFirstAncestorByKind(SyntaxKind.Constructor))
+      && Boolean(assignedOwner && classFields.get(assignedOwner)?.has(assignedLeft.getName()));
+    const assignedClassField = typedSource && parent && Node.isPropertyDeclaration(parent)
+      && Node.isIdentifier(parent.getNameNode()) && parent.getInitializer() === constructor;
+    if (imported.has(constructor.getExpression().getText()) && !Node.isVariableDeclaration(parent)
+      && !assignedKnownClient && !assignedKnownClassField && !assignedClassField) {
       addManual(result, file, constructor, 'An OpenAI client stored outside a local variable needs manual receiver review.');
     }
   }
@@ -243,6 +259,8 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     if (moved) addEdit(edits, file, declaration.getModuleSpecifier(), `'${moved}'`, 'moved-import');
     else if (specifier === 'openai/shims' || specifier === 'openai/src' || specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
       addManual(result, file, declaration, 'OpenAI v5 removes this private or shim import; review the replacement and runtime configuration.');
+    if (specifier === 'openai/resources/beta/threads/messages/messages')
+      addManual(result, file, declaration, 'OpenAI v5 removes this deep beta resource import; review its public replacement before upgrading.');
     if (specifier.startsWith('openai/resources/') && declaration.getNamedImports().some((entry) => /Page$/.test(entry.getName()) && !declaration.isTypeOnly() && !entry.isTypeOnly()))
       addManual(result, file, declaration, 'OpenAI v5 converts resource-specific Page classes to type aliases; review runtime uses before upgrading.');
     if (specifier.startsWith('openai/') && declaration.getNamedImports().some((entry) => entry.getName() === 'APIClient'))

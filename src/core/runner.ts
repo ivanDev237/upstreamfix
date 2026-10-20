@@ -117,13 +117,15 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
     }
     if (!migration.declarativeRecipe && migration.id === 'openai@5' && !guaranteesNodeMajor(declaration.manifest.engines?.node ?? '', 20)
       && !(nodeRuntime === 20 && declaration.manifest.engines?.node === undefined)) {
-      manual.push({
-        file: sourcePath,
-        line: 1,
-        reason: `OpenAI SDK v5 requires Node.js 20 or later. Declare a compatible engines.node range in ${path.relative(root, declaration.file)} and confirm the deployed runtime before migrating; this source file was left unchanged.`,
-        snippet: `engines.node: ${declaration.manifest.engines?.node ?? 'not declared'}`,
-      });
-      if (!analysisRuntimeOverride) continue;
+      if (!analysisRuntimeOverride) {
+        manual.push({
+          file: sourcePath,
+          line: 1,
+          reason: `OpenAI SDK v5 requires Node.js 20 or later. Declare a compatible engines.node range in ${path.relative(root, declaration.file)} and confirm the deployed runtime before migrating; this source file was left unchanged.`,
+          snippet: `engines.node: ${declaration.manifest.engines?.node ?? 'not declared'}`,
+        });
+        continue;
+      }
     }
     project.addSourceFileAtPath(sourcePath);
     manifestBySource.set(sourcePath, declaration.file);
@@ -394,11 +396,17 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
       if (!config.error && config.config && typeof config.config.compilerOptions === 'object')
         compilerOptions = config.config.compilerOptions as Record<string, unknown>;
     } catch { /* A missing tsconfig cannot establish the active compiler environment. */ }
+    const target = typeof compilerOptions?.target === 'string' ? compilerOptions.target.toUpperCase() : '';
+    if (/^(?:ES3|ES5|ES6|ES201[567])$/.test(target)) {
+      findings.push({ file: tsconfigPath, line: 1,
+        reason: `OpenAI v5's Web type guidance starts at TypeScript target ES2018; this project declares ${target}. Review the runtime target before raising it and typecheck.`,
+        snippet: `compilerOptions.target: ${compilerOptions?.target}` });
+    }
 
     const nodeTypes = manifest.devDependencies?.['@types/node'] ?? manifest.dependencies?.['@types/node'];
     const nodeTypesMajor = /^\s*[~^]?(\d+)/.exec(nodeTypes ?? '');
     const workersTypes = manifest.devDependencies?.['@cloudflare/workers-types'] ?? manifest.dependencies?.['@cloudflare/workers-types'];
-    const workersVersion = /^\s*[~^]?(\d+)\.(\d+)\.(\d+)/.exec(workersTypes ?? '');
+    const workersVersion = /^\s*(?:[~^]|>=)?(\d+)\.(\d+)\.(\d+)/.exec(workersTypes ?? '');
     if (workersTypes && (!workersVersion || (Number(workersVersion[1]) === 0
       && Number(workersVersion[2]) < 20221111))) {
       findings.push({ file: manifestPath, line: 1,
@@ -412,7 +420,7 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
         snippet: `compilerOptions.types: ${JSON.stringify(compilerOptions.types ?? null)}` });
     }
     const bunTypes = manifest.devDependencies?.['@types/bun'] ?? manifest.dependencies?.['@types/bun'];
-    const bunVersion = /^\s*[~^]?(\d+)\.(\d+)/.exec(bunTypes ?? '');
+    const bunVersion = /^\s*(?:[~^]|>=)?(\d+)\.(\d+)/.exec(bunTypes ?? '');
     if (bunTypes && (!bunVersion || Number(bunVersion[1]) < 1
       || (Number(bunVersion[1]) === 1 && Number(bunVersion[2]) < 2))) {
       findings.push({ file: manifestPath, line: 1,
@@ -437,6 +445,7 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
     if (manifest.dependencies?.['@types/node'] || manifest.devDependencies?.['@types/node']) continue;
     for (const sourcePath of sourceFiles) {
       if (!(sourcePath === directory || sourcePath.startsWith(directory + path.sep))) continue;
+      if (!/\.[cm]?tsx?$/.test(sourcePath) && !(compilerOptions?.checkJs === true && /\.[cm]?jsx?$/.test(sourcePath))) continue;
       const source = readFileSync(sourcePath, 'utf8');
       const match = /\bprocess\s*[.[]/.exec(source);
       if (!match) continue;

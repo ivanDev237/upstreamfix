@@ -27,8 +27,9 @@ describe('openai v4 to v5', () => {
   });
   it('has at least 15 pinned and reviewed public repositories with at least 10 relevant uses', () => {
     const repos = JSON.parse(readFileSync(new URL('../benchmark/openai-5-repos.json', import.meta.url), 'utf8')) as BenchRepo[];
-    expect(repos.length).toBeGreaterThanOrEqual(15);
-    expect(repos.filter((repo) => /beta\.chat|files\.del|moved import|named path/.test(repo.reviewNote)).length).toBeGreaterThanOrEqual(10);
+    const validCandidates = repos.filter((repo) => !repo.invalidReason);
+    expect(validCandidates.length).toBeGreaterThanOrEqual(15);
+    expect(validCandidates.filter((repo) => /beta\.chat|files\.del|moved import|named path/.test(repo.reviewNote)).length).toBeGreaterThanOrEqual(10);
     expect(new Set(repos.map((repo) => repo.url)).size).toBe(repos.length);
     expect(repos.some((repo) => repo.name === 'lumen')).toBe(true);
     expect(repos.some((repo) => repo.name === 'ai-icon-generator')).toBe(true);
@@ -86,6 +87,17 @@ describe('openai v4 to v5', () => {
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
+  it('does not infer a TypeScript type error from process in a JavaScript-only project', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-js-process-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.29.1' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'server.js'), "const OpenAI = require('openai'); const client = new OpenAI(); console.log(process.env.NODE_ENV); client.files.del('f');\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
+      expect(outcome.manual.some((item) => item.reason.includes('@types/node'))).toBe(false);
+      expect(outcome.changes.some((change) => change.rule === 'del-to-delete')).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
   it('reports unsupported TypeScript and Jest versions from the v5 guide', async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-tooling-'));
     try {
@@ -127,6 +139,28 @@ describe('openai v4 to v5', () => {
       await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
       const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
       expect(outcome.manual.some((item) => item.reason.includes('@types/bun >=1.2.0'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('accepts declared supported Worker and Bun type ranges without a false manual finding', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-runtime-types-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.29.1' }, devDependencies: { '@cloudflare/workers-types': '>=0.20221111.0', '@types/bun': '>=1.2.0' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2020', lib: ['ES2020'], types: ['@cloudflare/workers-types'] } }));
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
+      expect(outcome.manual.some((item) => /@cloudflare\/workers-types >=|@types\/bun >=/.test(item.reason))).toBe(false);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('reports a TypeScript target below the Web type guidance for v5', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-old-target-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.29.1' }, devDependencies: { '@types/node': '^22.0.0' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2017', lib: ['DOM', 'ES2017'] } }));
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
+      expect(outcome.manual.some((item) => item.file === 'tsconfig.json' && item.reason.includes('ES2018'))).toBe(true);
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
@@ -188,6 +222,26 @@ function make(obj: ClientOptions | OpenAI) {
     expect(outcome.fileUpdates?.[0]?.contents).toContain("maybe?.files.delete('g')");
   });
 
+  it('rewrites beta chat on a class field initialized with a new OpenAI client', () => {
+    const outcome = migrate("import OpenAI from 'openai';\nclass Service { client = new OpenAI(); run() { return this.client.beta.chat.completions.parse({model:'gpt-4o',messages:[]}); } }\n");
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('this.client.chat.completions.parse(');
+  });
+
+  it('does not infer a JavaScript class field can never hold another receiver', () => {
+    const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { allowJs: true } });
+    project.createSourceFile('/client.js', "const OpenAI = require('openai');\nclass Service { client = new OpenAI(); reset(value) { this.client = value; } run() { return this.client.beta.chat.completions.parse({model:'gpt-4o',messages:[]}); } }\n");
+    const outcome = openaiV5.transform(project);
+    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual.some((item) => item.reason.includes('receiver review'))).toBe(true);
+  });
+
+  it('rewrites beta chat on a typed field assigned a client in the constructor', () => {
+    const outcome = migrate("import OpenAI from 'openai';\nclass Service { client: OpenAI; constructor() { this.client = new OpenAI(); } run() { return this.client.beta.chat.completions.runTools({model:'gpt-4o',messages:[],tools:[]}); } }\n");
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('this.client.chat.completions.runTools(');
+  });
+
   it('T33 reports destructured typed clients and bound runner methods instead of silently upgrading', () => {
     const outcome = migrate("import OpenAI from 'openai';\nfunction run({ files }: OpenAI) { files.del('f'); }\nconst client = new OpenAI();\nconst runner = client.chat.completions.runTools({tools: []});\nrunner.finalFunctionCall.bind(runner);\nconst { finalFunctionCall } = runner;\n");
     expect(outcome.fileUpdates).toEqual([]);
@@ -199,6 +253,12 @@ function make(obj: ClientOptions | OpenAI) {
     const outcome = migrate("import { fileFromPath } from 'openai/uploads';\nfileFromPath('/tmp/x');\n");
     expect(outcome.fileUpdates).toEqual([]);
     expect(outcome.manual.some((item) => item.reason.includes('fileFromPath'))).toBe(true);
+  });
+
+  it('flags a deep beta resource import removed by v5', () => {
+    const outcome = migrate("import type { Message } from 'openai/resources/beta/threads/messages/messages';\nexport type Saved = Message;\n");
+    expect(outcome.manual.some((item) => item.reason.includes('deep beta resource import'))).toBe(true);
+    expect(outcome.fileUpdates).toEqual([]);
   });
 
   it.each([
@@ -342,7 +402,6 @@ client.files.del('file_1');
   });
 
   it.each([
-    "import OpenAI from 'openai'; class S { client = new OpenAI(); run() { return this.client.files.del('f'); } }",
     "const { OpenAI } = require('openai'); const client = new OpenAI(); client.files.del('f');",
     "import * as oa from 'openai'; const client = new oa.OpenAI(); client.files.del('f');",
     "import OpenAI from 'openai'; const client = new OpenAI(); client.beta.threads.runs.poll('r', {thread_id:'t'});",
