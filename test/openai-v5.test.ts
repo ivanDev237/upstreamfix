@@ -422,15 +422,42 @@ client.files.del('file_1');
     expect(outcome.fileUpdates?.[0]?.contents).toContain("require('openai/core/error')");
   });
 
-  it('flags v4 runTools event and final method names for manual review', () => {
+  it('rewrites literal v4 runTools event and final method names from the official guide', () => {
     const outcome = migrate(`import OpenAI from 'openai';
 const client = new OpenAI();
 const runner = client.chat.completions.runTools({tools: []});
 runner.on('functionCall', () => {});
 runner.finalFunctionCall();
 `);
-    expect(outcome.manual.map((item) => item.reason).join(' ')).toMatch(/functionToolCall/);
-    expect(outcome.manual.map((item) => item.reason).join(' ')).toMatch(/finalFunctionToolCall/);
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("runner.on('functionToolCall'");
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('runner.finalFunctionToolCall()');
+  });
+
+  it('holds a runTools event name stored in a variable for manual review', () => {
+    const outcome = migrate("import OpenAI from 'openai'; const client = new OpenAI(); const runner = client.chat.completions.runTools({tools: []}); const event = 'functionCall'; runner.on(event, () => {});\n");
     expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual.some((item) => item.reason.includes('runTools event'))).toBe(true);
+  });
+
+  it.each([
+    ['functionCall', 'functionToolCall'],
+    ['functionCallResult', 'functionToolCallResult'],
+    ['finalFunctionCall', 'finalFunctionToolCall'],
+    ['finalFunctionCallResult', 'finalFunctionToolCallResult'],
+  ])('renames the direct runTools event %s to %s', (before, after) => {
+    const outcome = migrate(`import OpenAI from 'openai'; const client = new OpenAI(); const runner = client.chat.completions.runTools({tools: []}); runner.on('${before}', () => {});\n`);
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain(`runner.on('${after}'`);
+  });
+
+  it('renames both direct final methods but keeps a bound method manual', () => {
+    const direct = migrate("import OpenAI from 'openai'; const client = new OpenAI(); const runner = client.chat.completions.runTools({tools: []}); runner.finalFunctionCall(); runner.finalFunctionCallResult();\n");
+    expect(direct.manual).toEqual([]);
+    expect(direct.fileUpdates?.[0]?.contents).toContain('runner.finalFunctionToolCall()');
+    expect(direct.fileUpdates?.[0]?.contents).toContain('runner.finalFunctionToolCallResult()');
+    const bound = migrate("import OpenAI from 'openai'; const client = new OpenAI(); const runner = client.chat.completions.runTools({tools: []}); const fn = runner.finalFunctionCall.bind(runner);\n");
+    expect(bound.fileUpdates).toEqual([]);
+    expect(bound.manual.some((item) => item.reason.includes('bound or aliased'))).toBe(true);
   });
 });

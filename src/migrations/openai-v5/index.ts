@@ -33,6 +33,10 @@ const RUN_TOOLS_EVENTS = new Map([
   ['functionCall', 'functionToolCall'], ['functionCallResult', 'functionToolCallResult'],
   ['finalFunctionCall', 'finalFunctionToolCall'], ['finalFunctionCallResult', 'finalFunctionToolCallResult'],
 ]);
+const RUN_TOOLS_METHODS = new Map([
+  ['finalFunctionCall', 'finalFunctionToolCall'],
+  ['finalFunctionCallResult', 'finalFunctionToolCallResult'],
+]);
 const REQUEST_OPTION_OVERLOADS = new Set([
   'chat.completions.list', 'chat.completions.messages.list', 'files.list',
   'fineTuning.jobs.list', 'fineTuning.jobs.listEvents', 'fineTuning.jobs.checkpoints.list',
@@ -317,11 +321,14 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     const receiver = rootIdentifier(expression);
     const onRunner = Boolean(receiver?.getSymbol() && runners.has(receiver.getSymbol()!)) || expression.getText().includes('.runTools(');
     if (onRunner && expression.getName() === 'on') {
-      const event = call.getArguments()[0]?.getText().replace(/^['"]|['"]$/g, '');
-      const replacement = event ? RUN_TOOLS_EVENTS.get(event) : undefined;
-      if (replacement) addManual(result, file, call, `OpenAI v5 renames runTools event ${event} to ${replacement}; review the listener manually.`);
-    } else if (onRunner && expression.getName().startsWith('finalFunctionCall')) {
-      addManual(result, file, call, `OpenAI v5 renames ${expression.getName()} to ${expression.getName().replace('FunctionCall', 'FunctionToolCall')}; review the returned value manually.`);
+      const eventNode = call.getArguments()[0];
+      const replacement = eventNode && Node.isStringLiteral(eventNode)
+        ? RUN_TOOLS_EVENTS.get(eventNode.getLiteralText()) : undefined;
+      if (replacement && eventNode) {
+        const quote = eventNode.getText().startsWith('"') ? '"' : "'";
+        addEdit(edits, file, eventNode, `${quote}${replacement}${quote}`, 'run-tools-event');
+      } else if (eventNode && !Node.isStringLiteral(eventNode))
+        addManual(result, file, eventNode, 'A runTools event name passed indirectly needs manual review against the v5 event names.');
     }
     const parts = clientParts(expression);
     if (!parts || parts.length < 2) {
@@ -370,10 +377,17 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       if (annotated && [...apiErrorNames].some((name) => annotated.split(/[^A-Za-z0-9_$]+/).includes(name)))
         addManual(result, file, property, 'OpenAI v5 APIError.headers is a Web Headers object, not a string record; use Headers.get() after review.');
     }
-    if (property.getName().startsWith('finalFunctionCall')) {
+    const renamedRunnerMethod = RUN_TOOLS_METHODS.get(property.getName());
+    if (renamedRunnerMethod) {
       const runner = rootIdentifier(property);
-      if (runner?.getSymbol() && runners.has(runner.getSymbol()!))
-        addManual(result, file, property, `OpenAI v5 renames ${property.getName()} to ${property.getName().replace('FunctionCall', 'FunctionToolCall')}; review bound or aliased methods manually.`);
+      const tracked = Boolean(runner?.getSymbol() && runners.has(runner.getSymbol()!))
+        || property.getText().includes('.runTools(');
+      if (tracked) {
+        const parent = property.getParent();
+        if (parent && Node.isCallExpression(parent) && parent.getExpression() === property)
+          addEdit(edits, file, property.getNameNode(), renamedRunnerMethod, 'run-tools-method');
+        else addManual(result, file, property, `OpenAI v5 renames ${property.getName()} to ${renamedRunnerMethod}; review bound or aliased methods manually.`);
+      }
     }
     if (property.getName() !== 'chat') continue;
     const parent = property.getParentIfKind(SyntaxKind.PropertyAccessExpression);
