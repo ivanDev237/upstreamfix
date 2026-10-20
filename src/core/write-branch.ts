@@ -238,6 +238,7 @@ async function gitEnvironment(cwd: string, settings: Map<string, string>): Promi
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: os.devNull,
     GIT_TERMINAL_PROMPT: '0',
+    GIT_LITERAL_PATHSPECS: '1',
   };
   for (const key of ['GNUPGHOME', 'GPG_TTY', 'SSH_AUTH_SOCK', 'XDG_CONFIG_HOME', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL']) {
     if (process.env[key]) env[key] = process.env[key];
@@ -336,7 +337,7 @@ async function assertSafeLocalGitConfig(repositoryRoot: string): Promise<void> {
       const value = record.slice(separator + 1).trim();
       if (/^include(?:if\..*)?\.path$/.test(key)) dangerous.push(`${origin}: ${key}`);
       else if (key === 'core.fsmonitor' && value && !/^false$/i.test(value)) dangerous.push(`${origin}: ${key}`);
-      else if (/^(?:filter\..*\.(?:clean|smudge|process|required)|diff\.external|diff\..*\.command|gpg\..*)$/.test(key) && value) dangerous.push(`${origin}: ${key}`);
+      else if (/^(?:filter\..*\.(?:clean|smudge|process|required)|diff\.external|diff\..*\.command|gpg\..*|remote\..*\.pushurl|url\..*\.insteadof)$/.test(key) && value) dangerous.push(`${origin}: ${key}`);
     }
   }
   if (dangerous.length > 0) {

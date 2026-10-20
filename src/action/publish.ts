@@ -82,6 +82,13 @@ export function isDismissedManualIssueForProposal(
 const sha = /^[0-9a-f]{40}$/;
 const safePath = /^(?:[A-Za-z0-9_.@()+ -]+\/)*[A-Za-z0-9_.@()+ -]+$/;
 
+export function parseExactRemoteHead(raw: string, branch: string): string {
+  if (raw === '') return '';
+  const match = /^([0-9a-f]{40})\t([^\r\n]+)\n$/.exec(raw);
+  if (!match || match[2] !== `refs/heads/${branch}`) throw new Error('Remote branch response did not match the exact expected ref.');
+  return match[1]!;
+}
+
 /** Accept only the single machine-readable line emitted by rev-list --parents. */
 export function parseCommitParents(raw: string, expectedCommit: string): string[] {
   const fields = raw.trim().split(' ');
@@ -259,6 +266,8 @@ function quotedUntrustedReport(report: string): string {
     .replace(/&(?!(?:amp|lt|gt|quot|#(?:\d+|x[0-9a-f]+));)/gi, '&amp;')
     .replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/@/g, '&#64;')
+    .replace(/!/g, '&#33;').replace(/\[/g, '&#91;').replace(/\]/g, '&#93;')
+    .replace(/#(?=\d)/g, '&#35;').replace(/https?:\/\//gi, (url) => url.replace(':', '&#58;'))
     .split('\n').map((line) => `> ${line}`).join('\n');
 }
 

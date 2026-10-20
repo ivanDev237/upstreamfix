@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { reconcileProposal, validateProposal, validateProposalEnvelope, validatePublishableBundle, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from './publish.js';
+import { reconcileProposal, validateProposal, validateProposalEnvelope, validatePublishableBundle, parseExactRemoteHead, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from './publish.js';
 import { parseActionConfig } from './config.js';
 import { sanitizeTerminalText } from '../core/report.js';
 
@@ -157,9 +157,8 @@ for (const proposal of proposals) {
       findPullRequest,
       pushBranch: async (item) => {
         if (!bareRoot || !item.commit) throw new Error('Verified bundle is required before pushing.');
-        const remote = await git(bareRoot, ['ls-remote', gitUrl, `refs/heads/${item.branch}`]);
-        const previous = remote.split('\t')[0]?.trim() ?? '';
-        if (previous && !/^[0-9a-f]{40}$/.test(previous)) throw new Error('Invalid existing branch SHA.');
+        const remote = await git(bareRoot, ['ls-remote', '--refs', gitUrl, `refs/heads/${item.branch}`]);
+        const previous = parseExactRemoteHead(remote, item.branch);
         if (previous) {
           await git(bareRoot, ['fetch', '--no-tags', gitUrl, previous]);
           const oldTree = (await git(bareRoot, ['rev-parse', `${previous}^{tree}`])).trim();

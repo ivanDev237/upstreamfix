@@ -44,7 +44,10 @@ for (const query of queries) {
     }
   }
   for (const hit of hits) {
-      if (!/\.(?:[cm]?[jt]sx?)$/i.test(hit.path ?? '') || !/^[\w.-]+\/[\w.-]+$/.test(hit.repo ?? '')) continue;
+    if (!/\.(?:[cm]?[jt]sx?)$/i.test(hit.path ?? '') || !/^[\w.-]+\/[\w.-]+$/.test(hit.repo ?? '')) continue;
+    const sourceSegments = hit.path.split('/');
+    if (sourceSegments.some((segment) => !segment || segment === '.' || segment === '..' || !/^[A-Za-z0-9_.@()+ -]+$/.test(segment))) continue;
+    const encodedSourcePath = sourceSegments.map(encodeURIComponent).join('/');
       const key = `${hit.repo}:${hit.path}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -62,12 +65,12 @@ for (const query of queries) {
         const pkg = await manifest.json();
         const range = pkg.dependencies?.openai ?? pkg.devDependencies?.openai;
         if (!/^\s*[~^]?4(?:\.|$)/.test(range ?? '')) continue;
-        const source = await fetch(`https://raw.githubusercontent.com/${hit.repo}/${sha}/${hit.path}`, { signal: AbortSignal.timeout(10000) });
+        const source = await fetch(`https://raw.githubusercontent.com/${hit.repo}/${sha}/${encodedSourcePath}`, { signal: AbortSignal.timeout(10000) });
         if (!source.ok) continue;
         const body = await source.text();
         if (!body.includes(query)) continue;
         candidates.push({ repository: hit.repo, commit: sha, branch: metadata.default_branch, path: hit.path,
-          sdkRange: range, matched: query, url: `https://github.com/${hit.repo}/blob/${sha}/${hit.path}` });
+          sdkRange: range, matched: query, url: `https://github.com/${hit.repo}/blob/${sha}/${encodedSourcePath}` });
       } catch (error) { console.warn(`Skipped ${key}: ${String(error)}`); }
       if (candidates.length >= 20) break;
   }
