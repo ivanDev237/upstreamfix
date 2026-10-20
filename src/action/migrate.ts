@@ -44,10 +44,11 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
   await assertNoCheckoutCredentials(project);
   const applicable = new Set((await findApplicableMigrations(project, { includeExperimental: config.experimental.length > 0 })).map((item) => item.id));
   const proposals: Proposal[] = [];
+  const registryBefore = new Date().toISOString();
   for (const migration of migrations) {
     const branch = `upstreamfix/${migration.id.replace(/[^A-Za-z0-9._-]+/g, '-')}`;
     const common = {
-      schema: 1 as const, migration: migration.id, base, branch,
+      schema: 1 as const, migration: migration.id, base, branch, registryBefore,
       reviewers: config.reviewers, labels: config.labels,
     };
     if (config.ignore.includes(migration.id)) {
@@ -62,7 +63,7 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
       proposals.push({ ...common, status: 'none', files: [], verification: 'skipped', report: 'This migration is no longer applicable to the repository.' });
       continue;
     }
-    const preview = await runMigration(migration, { cwd: project, dryRun: true, excludedDirectories: config.exclude });
+    const preview = await runMigration(migration, { cwd: project, dryRun: true, excludedDirectories: config.exclude, registryBefore });
     if (preview.manual.length > 0) {
       proposals.push({ ...common, status: 'manual', files: [], verification: 'skipped', report: renderMarkdownReport(migration, preview, true) });
       continue;
@@ -79,7 +80,7 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
     }
     try {
       const result = await writeMigrationOnBranch(migration, {
-        cwd: project, excludedDirectories: config.exclude, customCommands: config.verify,
+        cwd: project, excludedDirectories: config.exclude, customCommands: config.verify, registryBefore,
         timeoutMs: 10 * 60 * 1000,
         ...(process.env.UPSTREAMFIX_CONTAINER_VERIFY === '1' ? { verificationOptions: { execute: executeClientCommand } } : {}),
       });

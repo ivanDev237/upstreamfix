@@ -11,7 +11,7 @@ const execFile = promisify(execFileCallback);
 const npmRegistry = 'registry.npmjs.org';
 
 /** Regenerate from reviewed manifests, with no client source, npm config, tokens, or lifecycle scripts. */
-export async function regenerateNpmLockfile(beforeLock: string, afterManifest: string, filename: 'package-lock.json' | 'npm-shrinkwrap.json'): Promise<string> {
+export async function regenerateNpmLockfile(beforeLock: string, afterManifest: string, filename: 'package-lock.json' | 'npm-shrinkwrap.json', registryBefore?: string): Promise<string> {
   const original = JSON.parse(beforeLock) as { lockfileVersion?: unknown };
   if (original.lockfileVersion !== 2 && original.lockfileVersion !== 3) throw new Error('Only npm v2 and v3 lockfiles can be regenerated.');
   if (beforeLock.length > 8 * 1024 * 1024 || afterManifest.length > 2 * 1024 * 1024) throw new Error('Lockfile regeneration input exceeds its size limit.');
@@ -65,7 +65,8 @@ export async function regenerateNpmLockfile(beforeLock: string, afterManifest: s
       await execFile('npm', [
         'install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund',
         `--lockfile-version=${original.lockfileVersion}`, `--registry=https://${npmRegistry}/`,
-      ], { cwd: temporaryRoot, env, timeout: 180_000, maxBuffer: 1024 * 1024 });
+        ...(registryBefore ? [`--before=${registryBefore}`] : []),
+      ], { cwd: temporaryRoot, env, timeout: 300_000, maxBuffer: 1024 * 1024 });
     } catch (error) {
       throw new Error(`Independent npm lockfile regeneration failed: ${error instanceof Error ? error.message.slice(0, 500) : 'unknown error'}`);
     }

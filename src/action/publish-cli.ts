@@ -160,7 +160,7 @@ for (const proposal of proposals) {
           committerEmail: identityFields[3]!, subject: identityFields[4]!,
         });
         regeneratedLocks[file] = await regenerateNpmLockfile(blobs[file]!.before!, manifest.after,
-          path.posix.basename(file) as 'package-lock.json' | 'npm-shrinkwrap.json');
+          path.posix.basename(file) as 'package-lock.json' | 'npm-shrinkwrap.json', proposal.registryBefore);
       }
       validatePublishableBundle(proposal, blobs, {
         author: identityFields[0]!, authorEmail: identityFields[1]!, committer: identityFields[2]!,

@@ -18,6 +18,12 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('Z2 accepts a recent lockfile cutoff and rejects stale or future proposal cutoffs', () => {
+    const timestamp = new Date(Date.now() - 10 * 60_000).toISOString();
+    expect(() => validateProposalEnvelope({ ...proposal, registryBefore: timestamp }, base)).not.toThrow();
+    expect(() => validateProposalEnvelope({ ...proposal, registryBefore: new Date(Date.now() - 3 * 60 * 60_000).toISOString() }, base)).toThrow(/cutoff|time|expired/i);
+    expect(() => validateProposalEnvelope({ ...proposal, registryBefore: new Date(Date.now() + 60_000).toISOString() }, base)).toThrow(/cutoff|time|future/i);
+  });
   it('W13 accepts only the exact remote branch ref', () => {
     expect(parseExactRemoteHead(`${base}\trefs/heads/upstreamfix/firebase-admin-14\n`, 'upstreamfix/firebase-admin-14')).toBe(base);
     expect(() => parseExactRemoteHead(`${base}\trefs/heads/upstreamfix/firebase-admin-14/evil\n`, 'upstreamfix/firebase-admin-14')).toThrow(/remote/i);
@@ -184,11 +190,14 @@ describe('Action publication boundary', () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-real-publish-lock-'));
     try {
       const manifest = (range: string) => JSON.stringify({ name: 'real-lock-fixture', version: '1.0.0', private: true, engines: { node: '>=22' }, dependencies: { 'firebase-admin': range } }, null, 2) + '\n';
+      // A historical cutoff excludes packages published between this date and
+      // the CI run, exercising the same registry snapshot in both jobs.
+      const cutoff = '2026-09-01T00:00:00.000Z';
       await writeFile(path.join(cwd, 'package.json'), manifest('^13.10.0'));
-      await runRealSdkNpm(cwd, ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], 180_000);
+      await runRealSdkNpm(cwd, ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund', `--before=${cutoff}`], 180_000);
       const before = await readFile(path.join(cwd, 'package-lock.json'), 'utf8');
       await writeFile(path.join(cwd, 'package.json'), manifest('^14.0.0'));
-      await runRealSdkNpm(cwd, ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], 180_000);
+      await runRealSdkNpm(cwd, ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund', `--before=${cutoff}`], 180_000);
       const after = await readFile(path.join(cwd, 'package-lock.json'), 'utf8');
       const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
       const fixtureRoot = process.env.UPSTREAMFIX_LOCK_FIXTURE_OUTPUT;
@@ -197,7 +206,7 @@ describe('Action publication boundary', () => {
         await writeFile(path.join(fixtureRoot, 'before.json'), before);
         await writeFile(path.join(fixtureRoot, 'after.json'), after);
       }
-      const regenerated = await regenerateNpmLockfile(before, manifest('^14.0.0'), 'package-lock.json');
+      const regenerated = await regenerateNpmLockfile(before, manifest('^14.0.0'), 'package-lock.json', cutoff);
       expect(regenerated).toBe(after);
       expect(() => validatePublishableBundle({ ...proposal, files: ['package-lock.json'] }, { 'package-lock.json': { before, after } }, identity, { 'package-lock.json': regenerated })).not.toThrow();
     } finally {

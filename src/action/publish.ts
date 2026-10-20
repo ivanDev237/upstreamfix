@@ -16,6 +16,7 @@ export interface Proposal {
   report: string;
   reviewers: string[];
   labels: string[];
+  registryBefore?: string;
 }
 
 export interface ProposalPublisher {
@@ -126,6 +127,18 @@ export function parseSafeRawDiff(raw: string): string[] {
 export function validateProposalEnvelope(proposal: Proposal, expectedBase: string, config?: Pick<ActionConfig, 'reviewers' | 'labels'>): void {
   if (!proposal || typeof proposal !== 'object') throw new Error('Invalid proposal metadata.');
   if (proposal.schema !== 1 || !migrations.some((migration) => migration.id === proposal.migration)) throw new Error('Unknown proposal schema or migration.');
+  if (proposal.registryBefore !== undefined) {
+    const parsed = Date.parse(proposal.registryBefore);
+    const age = Date.now() - parsed;
+    if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(proposal.registryBefore)
+      || !Number.isFinite(parsed) || new Date(parsed).toISOString() !== proposal.registryBefore
+      || age < 0 || age > 2 * 60 * 60 * 1000) {
+      throw new Error('Proposal registry cutoff time is invalid, expired, or in the future; rerun the migration.');
+    }
+  }
+  if (proposal.status === 'ready' && !proposal.registryBefore && proposal.files.some((file) => /(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json)$/.test(file))) {
+    throw new Error('A ready npm lockfile proposal requires a registry cutoff time.');
+  }
   if (!sha.test(proposal.base) || proposal.base !== expectedBase) throw new Error('Proposal base does not match the reviewed default-branch commit.');
   const expectedBranch = `upstreamfix/${proposal.migration.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')}`;
   if (proposal.branch !== expectedBranch) throw new Error('Proposal branch is outside the approved upstreamfix namespace.');

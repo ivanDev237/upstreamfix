@@ -15,6 +15,7 @@ export interface WriteBranchOptions {
   cwd: string;
   allowDirty?: boolean;
   nodeRuntime?: number;
+  registryBefore?: string;
   allowYarnLockInstall?: boolean;
   timeoutMs?: number;
   excludedDirectories?: readonly string[];
@@ -78,7 +79,7 @@ export async function writeMigrationOnBranch(
     await git(repositoryRoot, ['worktree', 'add', '--detach', worktree, head]);
     worktreeAdded = true;
     const projectCopy = projectRelative ? path.join(worktree, projectRelative) : worktree;
-    const outcome = await runMigration(migration, { cwd: projectCopy, dryRun: true, nodeRuntime: options.nodeRuntime, allowYarnLockInstall: options.allowYarnLockInstall, excludedDirectories: options.excludedDirectories });
+    const outcome = await runMigration(migration, { cwd: projectCopy, dryRun: true, nodeRuntime: options.nodeRuntime, allowYarnLockInstall: options.allowYarnLockInstall, excludedDirectories: options.excludedDirectories, registryBefore: options.registryBefore });
     if (outcome.manual.length > 0) {
       throw new Error(`Migration has ${outcome.manual.length} manual review item(s); no branch or commit was created.`);
     }

@@ -228,6 +228,8 @@ export interface RunOptions {
   allowYarnLockInstall?: boolean;
   /** Count source findings only; never regenerate lockfiles or prepare manifest writes. */
   analysisOnly?: boolean;
+  /** Registry snapshot cutoff shared with independent publication verification. */
+  registryBefore?: string;
 }
 
 export interface RunOutcome extends MigrationResult {
@@ -435,7 +437,7 @@ async function migrateManifests(
     let lockChange: ManifestFileChange | undefined;
     if (existingLocks.length > 0) {
       const lockResult = existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'package-lock.json'
-        ? await regeneratePackageLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd)
+        ? await regeneratePackageLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd, options.registryBefore)
         : existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'pnpm-lock.yaml'
           ? await regeneratePnpmLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd)
           : existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'yarn.lock'
@@ -493,6 +495,7 @@ async function regeneratePackageLock(
   lockPath: string,
   updatedManifest: string,
   projectRoot: string,
+  registryBefore?: string,
 ): Promise<LockfileRegenerationResult> {
   const directory = path.dirname(manifestPath);
   if (directory !== path.dirname(lockPath)) {
@@ -539,6 +542,7 @@ async function regeneratePackageLock(
     await writeFile(path.join(temporaryDirectory, 'package.json'), updatedManifest, 'utf8');
     await writeFile(path.join(temporaryDirectory, 'package-lock.json'), before, 'utf8');
     const args = ['install', '--package-lock-only', '--lockfile-version=3', '--ignore-scripts', '--no-audit', '--no-fund'];
+    if (registryBefore) args.push(`--before=${registryBefore}`);
     // npm_execpath may be pnpm or Yarn when launched through dlx; resolve npm from PATH instead.
     await execFile('npm', args, { cwd: temporaryDirectory, env: lockfileCommandEnvironment(temporaryDirectory), timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
     const contents = await readFile(path.join(temporaryDirectory, 'package-lock.json'), 'utf8');
