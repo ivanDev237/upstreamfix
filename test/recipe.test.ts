@@ -44,6 +44,29 @@ describe('declarative recipes', () => {
     expect(result.manual.length).toBeGreaterThan(0);
     expect(result.proposedFiles).toHaveLength(0);
   });
+  it('W12 preserves a type-only modifier on renamed imports and rejects prototype package names', async () => {
+    const template = `schemaVersion: 1
+id: acme-sdk@2
+package: acme-sdk
+fromMajor: 1
+toMajor: 2
+releasedAt: 2026-10-19
+title: Acme SDK v2
+guideUrl: https://example.org/upgrade
+nodeMajor: 22
+rules:
+  - kind: export-rename
+    id: rename-type
+    name: OldType
+    to: NewType
+`;
+    const recipe = parseRecipe(template);
+    const cwd = await fixture("import { type OldType } from 'acme-sdk';\nconst value: OldType | null = null;\n");
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { 'acme-sdk': '^1.0.0' }, engines: { node: '>=22' } }));
+    const result = await runMigration(recipe, { cwd, dryRun: true });
+    expect(result.proposedFiles.find((file) => file.relativePath === 'server.ts')?.after).toContain('type NewType as OldType');
+    expect(() => parseRecipe(template.replaceAll('acme-sdk', 'constructor'))).toThrow(/package/i);
+  });
   it.each([
     "const admin = require('firebase-admin');\nmodule.exports = { admin };\nadmin.firestore();\n",
     "import * as admin from 'firebase-admin';\nexport { admin };\nadmin.firestore();\n",

@@ -244,7 +244,7 @@ function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationR
           continue;
         }
         const local = specifier.getAliasNode()?.getText() ?? name;
-        if (rename) addEdit(specifier, `${rename.to} as ${local}`, rename.id);
+        if (rename) addEdit(specifier, `${specifier.isTypeOnly() ? 'type ' : ''}${rename.to} as ${local}`, rename.id);
         if (move) {
           const q = quoteOf(sourceFile);
           const replacement = `import { ${name}${local === name ? '' : ` as ${local}`} } from ${q}${move.from}${q};`;
