@@ -200,6 +200,19 @@ type Error = StripeCtor.errors.StripeError;
     project.createSourceFile('client.ts', "import Stripe from 'stripe';\nexport const stripe = new Stripe('sk_test_fixture');\n");
     expect(stripeV22.transform(project).manual).toEqual([]);
   });
+  it('W10 reports clients passed as parameters, stored on this, or imported from a local module', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('delegated.ts', "import Stripe from 'stripe';\nimport { stripe } from './client';\nfunction use(client: Stripe) { client.customers.create({}); }\nclass Service { constructor(private stripe: Stripe) {} send() { return this.stripe.customers.create({}); } }\nstripe.customers.create({});\n");
+    const result = stripeV22.transform(project);
+    expect(result.manual.filter((item) => /untracked|locally imported|indirect/i.test(item.reason))).toHaveLength(3);
+  });
+  it('W10 includes a sibling module using a locally imported Stripe client in project analysis', async () => {
+    const cwd = await makeProject("import Stripe from 'stripe';\nexport const stripe = new Stripe('sk_test_fixture');\n");
+    await writeFile(path.join(cwd, 'consumer.ts'), "import { stripe } from './client';\nstripe.customers.create({});\n");
+    const result = await runMigration(stripeV22, { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.file === 'consumer.ts' && /untracked/i.test(item.reason))).toBe(true);
+    expect(result.filesChanged).not.toContain('package.json');
+  });
 
   it('reports callback migration for review without inventing async control flow', () => {
     const project = new Project({ useInMemoryFileSystem: true });

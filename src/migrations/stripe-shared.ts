@@ -68,6 +68,7 @@ function emptyResult(): MigrationResult {
 function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
   if (withholdInvalidSource(sourceFile, result)) return;
   reportUnsupportedStripeImports(sourceFile, result);
+  reportIndirectStripeClients(sourceFile, result);
   const edits: TextEdit[] = [];
   const before = sourceFile.getFullText();
   const stripeBindings = findStripeBindings(sourceFile);
@@ -211,6 +212,7 @@ function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
 function migrateV23File(sourceFile: SourceFile, result: MigrationResult): void {
   if (withholdInvalidSource(sourceFile, result)) return;
   reportUnsupportedStripeImports(sourceFile, result);
+  reportIndirectStripeClients(sourceFile, result);
   const edits: TextEdit[] = [];
   const before = sourceFile.getFullText();
   const stripeBindings = findStripeBindings(sourceFile);
@@ -323,6 +325,26 @@ function hasStripePackageReference(sourceFile: SourceFile): boolean {
       && (Node.isStringLiteral(argument) || Node.isNoSubstitutionTemplateLiteral(argument))
       && argument.getLiteralValue() === PACKAGE;
   });
+}
+
+function reportIndirectStripeClients(sourceFile: SourceFile, result: MigrationResult): void {
+  const typedParameters = new Set(sourceFile.getDescendantsOfKind(SyntaxKind.Parameter)
+    .filter((parameter) => /\bStripe\b/.test(parameter.getTypeNode()?.getText() ?? ''))
+    .map((parameter) => parameter.getName()));
+  const locallyImported = new Set(sourceFile.getImportDeclarations()
+    .filter((declaration) => declaration.getModuleSpecifierValue().startsWith('.'))
+    .flatMap((declaration) => declaration.getNamedImports()
+      .filter((specifier) => specifier.getName().toLowerCase() === 'stripe')
+      .map((specifier) => specifier.getAliasNode()?.getText() ?? specifier.getName())));
+  for (const call of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+    const expression = call.getExpression();
+    const path = propertyPath(expression);
+    const text = expression.getText();
+    const indirect = text.startsWith('this.stripe.') && text.split('.').length >= 4
+      || path.length >= 3 && (typedParameters.has(path[0]!) || locallyImported.has(path[0]!));
+    if (!indirect || result.manual.some((item) => item.file === sourceFile.getFilePath() && item.line === call.getStartLineNumber())) continue;
+    addManual(sourceFile, result.manual, call, 'This indirectly held Stripe client is untracked; review its v22/v23 request behavior manually.', call.getText());
+  }
 }
 
 function findStripeBindings(sourceFile: SourceFile): { constructors: Set<string>; typeNames: Set<string>; constructorSymbols: Set<MorphSymbol> } {

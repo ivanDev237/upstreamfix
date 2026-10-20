@@ -187,7 +187,11 @@ function findSourceFiles(root: string, packageName: string, excludedDirectories:
       }
       if (!entry.isFile() || entry.name.endsWith('.d.ts')) continue;
       if (!SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
-      if (statSync(absolutePath).size > MAX_SOURCE_BYTES || readFileSync(absolutePath, 'utf8').includes(packageName)) found.push(absolutePath);
+      if (statSync(absolutePath).size > MAX_SOURCE_BYTES) found.push(absolutePath);
+      else {
+        const source = readFileSync(absolutePath, 'utf8');
+        if (source.includes(packageName) || (packageName === 'stripe' && /\bstripe\b/i.test(source))) found.push(absolutePath);
+      }
     }
   };
   visit(root);
