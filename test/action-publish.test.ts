@@ -70,6 +70,24 @@ describe('Action publication boundary', () => {
       expect(() => validatePublishableBundle(candidate, { 'package-lock.json': { before, after } }, identity)).toThrow(/lockfile|unexpected/i);
     }
   });
+  it('X3 accepts independently validated npm transitive changes and npm-shrinkwrap', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    const root = (range: string) => ({ dependencies: { 'firebase-admin': range } });
+    const item = (name: string, version: string) => ({ version, resolved: `https://registry.npmjs.org/${name}/-/${name.split('/').at(-1)}-${version}.tgz`, integrity: 'sha512-QUJDRA==' });
+    const before = JSON.stringify({ lockfileVersion: 3, packages: { '': root('^13.0.0'), 'node_modules/firebase-admin': item('firebase-admin', '13.10.0'), 'node_modules/old': item('old', '1.0.0') } });
+    const after = JSON.stringify({ lockfileVersion: 3, packages: { '': root('^14.0.0'), 'node_modules/firebase-admin': item('firebase-admin', '14.0.0'), 'node_modules/new': item('new', '2.0.0') } });
+    for (const filename of ['package-lock.json', 'npm-shrinkwrap.json']) {
+      expect(() => validatePublishableBundle({ ...proposal, files: [filename] }, { [filename]: { before, after } }, identity)).not.toThrow();
+    }
+  });
+  it('X3 accepts safe pnpm and Yarn lockfile upgrades but rejects foreign tarballs', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    const pnpm = (version: number, url = '') => `lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      firebase-admin:\n        specifier: ^${version}.0.0\n        version: ${version}.0.0\npackages:\n  firebase-admin@${version}.0.0:\n    resolution: {integrity: sha512-QUJDRA==${url}}\nsnapshots:\n  firebase-admin@${version}.0.0: {}\n`;
+    expect(() => validatePublishableBundle({ ...proposal, files: ['pnpm-lock.yaml'] }, { 'pnpm-lock.yaml': { before: pnpm(13), after: pnpm(14) } }, identity)).not.toThrow();
+    const yarn = (version: number, registry = 'registry.npmjs.org') => `firebase-admin@^${version}.0.0:\n  version "${version}.0.0"\n  resolved "https://${registry}/firebase-admin/-/firebase-admin-${version}.0.0.tgz"\n  integrity sha512-QUJDRA==\n`;
+    expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: yarn(13), after: yarn(14) } }, identity)).not.toThrow();
+    expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: yarn(13), after: yarn(14, 'evil.invalid') } }, identity)).toThrow(/registry|lockfile/i);
+  });
   it('T36 renders an already escaped migration report as Markdown exactly once', async () => {
     let body = '';
     const publisher: ProposalPublisher = {

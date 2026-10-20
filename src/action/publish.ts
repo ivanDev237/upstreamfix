@@ -178,7 +178,9 @@ export function validatePublishableBundle(proposal: Proposal, blobs: Record<stri
     const blob = blobs[file];
     if (!blob?.before) throw new Error('Bundle package.json or lockfile has no reviewed base version.');
     if (/(?:^|\/)package\.json$/.test(file)) validateManifestDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
-    else if (/(?:^|\/)package-lock\.json$/.test(file)) validateNpmLockDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
+    else if (/(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json)$/.test(file)) validateNpmLockDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
+    else if (/(?:^|\/)pnpm-lock\.yaml$/.test(file)) validatePnpmLockDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
+    else if (/(?:^|\/)yarn\.lock$/.test(file)) validateYarnLockDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
     else throw new Error('Bundle lockfile format cannot be independently validated for publication; keep this migration manual.');
   }
 }
@@ -229,8 +231,7 @@ function validateNpmLockDelta(beforeText: string, afterText: string, packageName
   const target = record(newPackages[targetPath]);
   const version = typeof target?.version === 'string' ? target.version : '';
   const resolved = typeof target?.resolved === 'string' ? target.resolved : '';
-  const packageBasename = packageName.split('/').at(-1)!;
-  const exactUrl = `https://registry.npmjs.org/${packageName}/-/${packageBasename}-${version}.tgz`;
+  const exactUrl = registryTarballUrl(packageName, version);
   if (!new RegExp(`^${targetMajor}\\.\\d+\\.\\d+$`).test(version)
     || resolved !== exactUrl
     || target?.hasInstallScript === true || typeof target?.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/=]+$/.test(target.integrity)) {
@@ -243,22 +244,169 @@ function validateNpmLockDelta(beforeText: string, afterText: string, packageName
       throw new Error('Bundle lockfile target package adds an unexpected capability.');
     }
   }
-  const normalized = structuredClone(after);
-  const normalizedPackages = record(normalized.packages)!;
-  if (Object.hasOwn(oldPackages, targetPath)) normalizedPackages[targetPath] = oldPackages[targetPath];
-  else delete normalizedPackages[targetPath];
   const oldRoot = record(oldPackages['']);
-  const newRoot = record(normalizedPackages['']);
+  const newRoot = record(newPackages['']);
   if (!oldRoot || !newRoot) throw new Error('Bundle lockfile root package is missing.');
+  const normalizedRoot = structuredClone(newRoot);
   for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
     const oldValue = record(oldRoot[section])?.[packageName];
     const newValue = record(newRoot[section])?.[packageName];
     if (oldValue !== newValue) {
       if (typeof oldValue !== 'string' || newValue !== `^${targetMajor}.0.0`) throw new Error('Bundle lockfile changes an unexpected SDK dependency.');
-      record(newRoot[section])![packageName] = oldValue;
+      record(normalizedRoot[section])![packageName] = oldValue;
     }
   }
-  if (!isDeepStrictEqual(normalized, before)) throw new Error('Bundle lockfile changes packages or fields beyond the approved SDK upgrade.');
+  if (!isDeepStrictEqual(normalizedRoot, oldRoot)) throw new Error('Bundle lockfile changes unexpected root fields.');
+  const beforeTop = structuredClone(before);
+  const afterTop = structuredClone(after);
+  delete beforeTop.packages;
+  delete afterTop.packages;
+  if (!isDeepStrictEqual(beforeTop, afterTop)) throw new Error('Bundle lockfile changes unexpected metadata.');
+  for (const [packagePath, value] of Object.entries(newPackages)) {
+    if (packagePath === '' || isDeepStrictEqual(value, oldPackages[packagePath])) continue;
+    const packageEntry = record(value);
+    const match = /(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)$/.exec(packagePath);
+    const actualName = match?.[1];
+    if (!packageEntry || !actualName || !/^(?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+$/.test(actualName)) {
+      throw new Error('Bundle lockfile contains an unsupported package path.');
+    }
+    const itemVersion = packageEntry.version;
+    if (typeof itemVersion !== 'string' || !/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(itemVersion)
+      || packageEntry.resolved !== registryTarballUrl(actualName, itemVersion)
+      || typeof packageEntry.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/=]+$/.test(packageEntry.integrity)
+      || packageEntry.hasInstallScript === true || Object.hasOwn(packageEntry, 'scripts')) {
+      throw new Error('Bundle lockfile contains an unverified npm registry package.');
+    }
+    const oldEntry = record(oldPackages[packagePath]);
+    for (const [key] of Object.entries(packageEntry)) {
+      if (!allowedTargetKeys.has(key) && !['cpu', 'os', 'libc', 'funding', 'deprecated'].includes(key)) {
+        throw new Error('Bundle lockfile contains an unexpected package capability.');
+      }
+      if (key === 'bin' && !Object.hasOwn(oldEntry ?? {}, key)) throw new Error('Bundle lockfile adds an executable package binary.');
+    }
+  }
+}
+
+function registryTarballUrl(name: string, version: string): string {
+  return `https://registry.npmjs.org/${name}/-/${name.split('/').at(-1)}-${version}.tgz`;
+}
+
+function boundedLockfile(text: string): void {
+  if (text.length > 8 * 1024 * 1024 || /[\0\r]/.test(text)) throw new Error('Bundle lockfile is malformed or too large.');
+}
+
+function lockSections(text: string): Map<string, string> {
+  const sections = new Map<string, string>();
+  let current = '';
+  for (const line of text.split('\n')) {
+    const top = /^([A-Za-z][A-Za-z0-9_-]*):(?:\s|$)/.exec(line);
+    if (top) current = top[1]!;
+    if (current) sections.set(current, `${sections.get(current) ?? ''}${line}\n`);
+    else if (line.trim() && !line.trim().startsWith('#')) throw new Error('Bundle lockfile has an unsupported YAML structure.');
+  }
+  return sections;
+}
+
+function indentedEntries(section: string): Map<string, string> {
+  const entries = new Map<string, string>();
+  let key = '';
+  for (const line of section.split('\n').slice(1)) {
+    const head = /^  (['"]?)([^\s'"]+)\1:(?:\s.*)?$/.exec(line);
+    if (head) key = head[2]!;
+    if (key) entries.set(key, `${entries.get(key) ?? ''}${line}\n`);
+    else if (line.trim()) throw new Error('Bundle lockfile has an unsupported package entry.');
+  }
+  return entries;
+}
+
+function packageFromPnpmKey(key: string): { name: string; version: string } {
+  const match = /^((?:@[^/]+\/)?[^@]+)@(\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?)(?:\([^)]*\))?$/.exec(key);
+  if (!match) throw new Error('Bundle lockfile has an unsupported pnpm package key.');
+  return { name: match[1]!, version: match[2]! };
+}
+
+function validatePnpmLockDelta(beforeText: string, afterText: string, packageName: string, targetMajor: number): void {
+  boundedLockfile(beforeText);
+  boundedLockfile(afterText);
+  const before = lockSections(beforeText);
+  const after = lockSections(afterText);
+  if (!before.has('packages') || !after.has('packages') || !before.has('importers') || !after.has('importers')) {
+    throw new Error('Bundle pnpm lockfile has no packages or importers.');
+  }
+  if (before.get('lockfileVersion') !== after.get('lockfileVersion')) throw new Error('Bundle pnpm lockfile changes its format.');
+  for (const [section, value] of after) {
+    if (!['packages', 'snapshots', 'importers'].includes(section) && value !== before.get(section)) throw new Error('Bundle pnpm lockfile changes unsupported metadata.');
+  }
+  const oldImporters = before.get('importers')!;
+  const newImporters = after.get('importers')!;
+  const escapedName = packageName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const targetBlock = new RegExp(`(^[ ]{6}${escapedName}:\\n[ ]{8}specifier: )\\^${targetMajor}\\.0\\.0(\\n[ ]{8}version: )${targetMajor}[^\\n]*`, 'gm');
+  const oldTargetBlock = new RegExp(`^[ ]{6}${escapedName}:\\n[ ]{8}specifier: [^\\n]+\\n[ ]{8}version: [^\\n]+`, 'gm');
+  const oldMatches = [...oldImporters.matchAll(oldTargetBlock)].map((match) => match[0]);
+  let index = 0;
+  const normalizedImporters = newImporters.replace(targetBlock, () => oldMatches[index++] ?? '');
+  if (!index || index !== oldMatches.length || normalizedImporters !== oldImporters) throw new Error('Bundle pnpm lockfile changes unapproved importers.');
+  const oldPackages = indentedEntries(before.get('packages')!);
+  const newPackages = indentedEntries(after.get('packages')!);
+  let targetSeen = false;
+  for (const [key, block] of newPackages) {
+    const { name, version } = packageFromPnpmKey(key);
+    if (name === packageName && version.startsWith(`${targetMajor}.`)) targetSeen = true;
+    if (block === oldPackages.get(key)) continue;
+    if (!/\bintegrity: sha512-[A-Za-z0-9+/=]+/.test(block) || /\b(?:scripts|hasInstallScript|requiresBuild|hasBin):/.test(block)) {
+      throw new Error('Bundle pnpm lockfile contains an unverified package.');
+    }
+    const tarball = /\btarball:\s*['"]?([^\s,'"}]+)/.exec(block)?.[1];
+    if (tarball && tarball !== registryTarballUrl(name, version)) throw new Error('Bundle pnpm lockfile contains a foreign registry tarball.');
+    if (/^    (?!resolution:|id:|engines:|peerDependencies:|peerDependenciesMeta:|dependencies:|optionalDependencies:|deprecated:|cpu:|os:|libc:|dev:|optional:)[A-Za-z][^\n]*:/m.test(block)) {
+      throw new Error('Bundle pnpm lockfile contains an unexpected package field.');
+    }
+  }
+  if (!targetSeen) throw new Error('Bundle pnpm lockfile does not contain the target SDK.');
+  const newSnapshots = indentedEntries(after.get('snapshots') ?? 'snapshots:\n');
+  for (const [key, block] of newSnapshots) {
+    const { name, version } = packageFromPnpmKey(key);
+    if (!newPackages.has(`${name}@${version}`) && !newPackages.has(key)) throw new Error('Bundle pnpm lockfile snapshot has no verified package.');
+    if (/\b(?:tarball|scripts|hasInstallScript|requiresBuild|hasBin):/.test(block)
+      || /^    (?!dependencies:|optionalDependencies:|transitivePeerDependencies:|peerDependencies:)[A-Za-z][^\n]*:/m.test(block)) {
+      throw new Error('Bundle pnpm lockfile snapshot contains an unexpected field.');
+    }
+  }
+}
+
+function validateYarnLockDelta(beforeText: string, afterText: string, packageName: string, targetMajor: number): void {
+  boundedLockfile(beforeText);
+  boundedLockfile(afterText);
+  const parse = (text: string): Map<string, string> => {
+    const blocks = new Map<string, string>();
+    let key = '';
+    for (const line of text.split('\n')) {
+      if (!line || line.startsWith('#')) continue;
+      if (!/^\s/.test(line)) {
+        if (!line.endsWith(':') || line.startsWith('__metadata')) throw new Error('Bundle Yarn lockfile format is unsupported.');
+        key = line.slice(0, -1);
+      } else if (!key) throw new Error('Bundle Yarn lockfile has an unexpected entry.');
+      blocks.set(key, `${blocks.get(key) ?? ''}${line}\n`);
+    }
+    return blocks;
+  };
+  const oldBlocks = parse(beforeText);
+  const newBlocks = parse(afterText);
+  let targetSeen = false;
+  for (const [key, block] of newBlocks) {
+    const name = key.startsWith('@') ? key.slice(0, key.indexOf('@', 1)) : key.split('@')[0]!;
+    if (!/^(?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+$/.test(name)) throw new Error('Bundle Yarn lockfile has an invalid package name.');
+    const version = /^  version "(\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?)"$/m.exec(block)?.[1];
+    if (!version) throw new Error('Bundle Yarn lockfile package lacks a valid version.');
+    if (name === packageName && version.startsWith(`${targetMajor}.`)) targetSeen = true;
+    if (block === oldBlocks.get(key)) continue;
+    const resolved = /^  resolved "([^"]+)"$/m.exec(block)?.[1];
+    if (resolved !== registryTarballUrl(name, version) || !/^  integrity sha512-[A-Za-z0-9+/=]+$/m.test(block)
+      || /^  (?:scripts|hasInstallScript|bin)\b/m.test(block)) {
+      throw new Error('Bundle Yarn lockfile contains an unverified npm registry package.');
+    }
+  }
+  if (!targetSeen) throw new Error('Bundle Yarn lockfile does not contain the target SDK.');
 }
 
 function sameList(left: string[], right: string[]): boolean {
