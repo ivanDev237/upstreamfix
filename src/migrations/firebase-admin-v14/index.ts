@@ -598,6 +598,31 @@ function reportUnsupportedReferences(sourceFile: SourceFile, manual: ManualItem[
 }
 
 const declaredNamesCache = new WeakMap<SourceFile, Set<string>>();
+const importNamesCache = new WeakMap<SourceFile, Map<string, Array<{ module: string; typeOnly: boolean; defaultOrNamespace: boolean }>>>();
+
+function importNames(sourceFile: SourceFile): Map<string, Array<{ module: string; typeOnly: boolean; defaultOrNamespace: boolean }>> {
+  const cached = importNamesCache.get(sourceFile);
+  if (cached) return cached;
+  const names = new Map<string, Array<{ module: string; typeOnly: boolean; defaultOrNamespace: boolean }>>();
+  const add = (name: string, module: string, typeOnly: boolean, defaultOrNamespace: boolean): void => {
+    const entries = names.get(name) ?? [];
+    entries.push({ module, typeOnly, defaultOrNamespace });
+    names.set(name, entries);
+  };
+  for (const declaration of sourceFile.getImportDeclarations()) {
+    const module = declaration.getModuleSpecifierValue();
+    const defaultImport = declaration.getDefaultImport();
+    const namespaceImport = declaration.getNamespaceImport();
+    if (defaultImport) add(defaultImport.getText(), module, declaration.isTypeOnly(), true);
+    if (namespaceImport) add(namespaceImport.getText(), module, declaration.isTypeOnly(), true);
+    for (const specifier of declaration.getNamedImports()) {
+      const localName = (specifier.getAliasNode() ?? specifier.getNameNode()).getText();
+      add(localName, module, declaration.isTypeOnly() || specifier.isTypeOnly(), false);
+    }
+  }
+  importNamesCache.set(sourceFile, names);
+  return names;
+}
 
 function declaredNames(sourceFile: SourceFile): Set<string> {
   const cached = declaredNamesCache.get(sourceFile);
@@ -616,20 +641,8 @@ function declaredNames(sourceFile: SourceFile): Set<string> {
 }
 
 function hasImportCollision(sourceFile: SourceFile, needed: NeededImport): boolean {
-  for (const declaration of sourceFile.getImportDeclarations()) {
-    const module = declaration.getModuleSpecifierValue();
-    const defaultImport = declaration.getDefaultImport();
-    const namespaceImport = declaration.getNamespaceImport();
-    if (defaultImport?.getText() === needed.name || namespaceImport?.getText() === needed.name) {
-      if (module !== needed.module) return true;
-      return true;
-    }
-    for (const specifier of declaration.getNamedImports()) {
-      const localName = (specifier.getAliasNode() ?? specifier.getNameNode()).getText();
-      if (localName !== needed.name) continue;
-      if (module !== needed.module) return true;
-      if (!needed.typeOnly && (declaration.isTypeOnly() || specifier.isTypeOnly())) return true;
-    }
+  for (const entry of importNames(sourceFile).get(needed.name) ?? []) {
+    if (entry.defaultOrNamespace || entry.module !== needed.module || (!needed.typeOnly && entry.typeOnly)) return true;
   }
   return declaredNames(sourceFile).has(needed.name);
 }

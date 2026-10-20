@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { execFile as execFileCallback } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { registerTemporaryCleanup } from './process-cleanup.js';
@@ -187,7 +187,9 @@ function findSourceFiles(root: string, packageName: string, excludedDirectories:
       }
       if (!entry.isFile() || entry.name.endsWith('.d.ts')) continue;
       if (!SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
-      if (statSync(absolutePath).size > MAX_SOURCE_BYTES) found.push(absolutePath);
+      if (statSync(absolutePath).size > MAX_SOURCE_BYTES) {
+        if (largeFileContainsPackage(absolutePath, packageName)) found.push(absolutePath);
+      }
       else {
         const source = readFileSync(absolutePath, 'utf8');
         if (source.includes(packageName) || (packageName === 'stripe' && /\bstripe\b/i.test(source))) found.push(absolutePath);
@@ -196,6 +198,24 @@ function findSourceFiles(root: string, packageName: string, excludedDirectories:
   };
   visit(root);
   return found;
+}
+
+function largeFileContainsPackage(file: string, packageName: string): boolean {
+  const needle = packageName === 'stripe' ? 'stripe' : packageName;
+  const descriptor = openSync(file, 'r');
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let tail = '';
+  try {
+    for (;;) {
+      const count = readSync(descriptor, buffer, 0, buffer.length, null);
+      if (count === 0) return false;
+      const chunk = tail + buffer.toString('utf8', 0, count);
+      if ((packageName === 'stripe' ? chunk.toLowerCase() : chunk).includes(needle)) return true;
+      tail = chunk.slice(-(needle.length - 1));
+    }
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 export interface RunOptions {

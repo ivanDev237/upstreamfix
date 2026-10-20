@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Project } from 'ts-morph';
 import { loadProject, runMigration } from '../src/core/runner.js';
 import { verifyProposedMigration } from '../src/core/verify.js';
 import { firebaseAdminV14, hasOverlappingEdits } from '../src/migrations/firebase-admin-v14/index.js';
@@ -37,6 +38,20 @@ describe('firebase-admin v14 migration', () => {
     const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
     expect(result.manual.some((item) => item.file.endsWith('large.ts') && /size|large/i.test(item.reason))).toBe(true);
     expect(result.proposedFiles.some((file) => file.relativePath === 'large.ts')).toBe(false);
+  });
+  it('X7 skips a huge unrelated source without blocking an SDK upgrade', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'vendor.min.js'), 'const unrelated = 1;\n' + 'x'.repeat(2 * 1024 * 1024));
+    const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.file.endsWith('vendor.min.js'))).toBe(false);
+    expect(result.proposedFiles.some((file) => file.relativePath === 'package.json')).toBe(true);
+  });
+  it('X7 reads Firebase import declarations a bounded number of times', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    const file = project.createSourceFile('server.ts', "import * as admin from 'firebase-admin';\n" + 'admin.firestore();\n'.repeat(100));
+    const declarations = vi.spyOn(file, 'getImportDeclarations');
+    firebaseAdminV14.transform(project);
+    expect(declarations.mock.calls.length).toBeLessThan(20);
   });
   it.each(["class getAuth {}", "import getAuth = require('./other');"])('W12 reports a Firebase import collision: %s', async (declaration) => {
     const cwd = await makeProject();
