@@ -90,6 +90,14 @@ describe('public repository benchmark helpers', () => {
     expect(report).toContain('2 of 3 detected migration items');
     expect(report).toContain('| sample | `aaaaaaaaaaaa` | completed | 3 | 2 | 1 | pass | fail: TS error | fail: existing test | pass |  |');
   });
+  it('Z3 shows the file, line and reason for each benchmark manual finding', () => {
+    const report = renderBenchmarkReport([{
+      name: 'sample', commit: 'a'.repeat(40), status: 'manual review required', usages: 1, migrated: 0, manual: 1,
+      typecheck: { before: 'pass', after: 'pass' }, tests: { before: 'pass', after: 'pass' }, details: '',
+      manualFindings: [{ file: 'src/stripe.ts', line: 42, reason: 'Variable RequestOptions need review.' }],
+    }]);
+    expect(report).toContain('| sample | src/stripe.ts | 42 | Variable RequestOptions need review. |');
+  });
 
   it('identifies the exact GitHub run and tool commit behind a benchmark report', () => {
     const oldRun = process.env.GITHUB_RUN_ID;

@@ -107,6 +107,7 @@ export interface BenchResult {
   usages: number;
   migrated: number;
   manual: number;
+  manualFindings?: Array<{ file: string; line: number; reason: string }>;
   typecheck: CheckResult;
   tests: CheckResult;
   details: string;
@@ -554,6 +555,7 @@ export async function benchmarkOne(
     const outcome = await analyzeBenchmarkMigration(migration, checkout);
     result.migrated = outcome.changes.length;
     result.manual = outcome.manual.length;
+    result.manualFindings = outcome.manual.slice(0, 500).map(({ file, line, reason }) => ({ file, line, reason }));
     result.usages = result.migrated + result.manual;
     result.details = outcome.manifestNotes.join(' ');
 
@@ -634,6 +636,13 @@ export function renderBenchmarkReport(
     '| Repository | Pinned commit | Status | Detected items | Migrated | Manual | Types before | Types after | Tests before | Tests after | Details |',
     '|---|---|---:|---:|---:|---:|---|---|---|---|---|',
     ...results.map((row) => `| ${cell(row.name)} | \`${row.commit.slice(0, 12)}\` | ${cell(row.status)} | ${row.usages} | ${row.migrated} | ${row.manual} | ${cell(row.typecheck.before)} | ${cell(row.typecheck.after)} | ${cell(row.tests.before)} | ${cell(row.tests.after)} | ${cell(row.details)} |`),
+    ...(results.some((row) => row.manualFindings?.length) ? [
+      '', '## Manual findings', '',
+      '| Repository | File | Line | Reason |',
+      '|---|---|---:|---|',
+      ...results.flatMap((row) => (row.manualFindings ?? []).map((finding) =>
+        `| ${cell(row.name)} | ${cell(finding.file)} | ${finding.line} | ${cell(finding.reason)} |`)),
+    ] : []),
     '', `Project checks run only inside Docker image \`${nodeImage}\` with networking disabled. Dependency installation runs in Docker with no host credentials; lifecycle scripts are disabled.`, '',
   ];
   return lines.join('\n');

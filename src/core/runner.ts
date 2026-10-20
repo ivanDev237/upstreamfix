@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { structuredPatch } from 'diff';
-import { Project } from 'ts-morph';
+import { Node, Project, SyntaxKind } from 'ts-morph';
 import type { ManualItem, Migration, MigrationResult, PackageManifest, ProposedFileChange } from './types.js';
 import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from './project-discovery.js';
 import { parseManifest } from './manifest.js';
@@ -97,6 +97,7 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
       continue;
     }
     if (!declaration) {
+      if (migration.packageName === 'stripe' && !hasLikelyStripeSdkUsage(sourcePath)) continue;
       manual.push({
         file: sourcePath,
         line: 1,
@@ -129,6 +130,20 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
   }
 
   return { project, manual, manifestBySource };
+}
+
+function hasLikelyStripeSdkUsage(sourcePath: string): boolean {
+  const probe = new Project({ skipAddingFilesFromTsConfig: true, compilerOptions: { allowJs: true } });
+  const source = probe.addSourceFileAtPath(sourcePath);
+  if (source.getImportDeclarations().some((declaration) => declaration.getModuleSpecifierValue() === 'stripe')) return true;
+  if (source.getDescendantsOfKind(SyntaxKind.ImportEqualsDeclaration).some((declaration) =>
+    /^require\s*\(\s*['"]stripe['"]\s*\)$/.test(declaration.getModuleReference().getText()))) return true;
+  if (source.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) =>
+    ['require', 'import'].includes(call.getExpression().getText())
+    && Node.isStringLiteral(call.getArguments()[0]) && call.getArguments()[0]!.getText().slice(1, -1) === 'stripe')) return true;
+  const resources = new Set(['customers', 'products', 'accounts', 'checkout', 'billingPortal', 'paymentIntents', 'paymentMethods', 'subscriptions', 'subscriptionItems', 'invoices', 'charges', 'balance', 'prices', 'webhooks']);
+  return source.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression).some((access) =>
+    resources.has(access.getName()) && ['stripe', 'this.stripe'].includes(access.getExpression().getText()));
 }
 
 function isRegistryVersionSpec(spec: string): boolean {
