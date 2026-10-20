@@ -1,4 +1,4 @@
-import { Node, SyntaxKind, type Project, type SourceFile } from 'ts-morph';
+import { Node, SyntaxKind, type Project, type SourceFile, type Symbol as MorphSymbol } from 'ts-morph';
 import type { Change, ManualItem, MigrationResult } from '../core/types.js';
 
 const PACKAGE = 'stripe';
@@ -74,6 +74,8 @@ function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
     }
     const alias = binding.getNameNode().getText();
     constructorNames.add(alias);
+    const symbol = binding.getNameNode().getSymbol();
+    if (symbol) stripeBindings.constructorSymbols.add(symbol);
     stripeBindings.typeNames.add(alias);
     edits.push(edit(sourceFile, name, alias, 'cjs-default-export', name.getText()));
   }
@@ -169,7 +171,8 @@ function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
 
   for (const call of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
     const expression = call.getExpression();
-    if (Node.isIdentifier(expression) && constructorNames.has(expression.getText())) {
+    if (Node.isIdentifier(expression) && constructorNames.has(expression.getText())
+      && stripeBindings.constructorSymbols.has(expression.getSymbol()!)) {
       const parent = call.getParent();
       if (Node.isNewExpression(parent) && parent.getExpression() === expression) continue;
       edits.push(edit(sourceFile, expression, `new ${expression.getText()}`, 'stripe-constructor', expression.getText()));
@@ -288,21 +291,26 @@ function reportUnsupportedStripeImports(sourceFile: SourceFile, result: Migratio
   }
 }
 
-function findStripeBindings(sourceFile: SourceFile): { constructors: Set<string>; typeNames: Set<string> } {
+function findStripeBindings(sourceFile: SourceFile): { constructors: Set<string>; typeNames: Set<string>; constructorSymbols: Set<MorphSymbol> } {
   const constructors = new Set<string>();
   const typeNames = new Set<string>();
+  const constructorSymbols = new Set<MorphSymbol>();
   for (const declaration of sourceFile.getImportDeclarations()) {
     if (declaration.getModuleSpecifierValue() !== PACKAGE) continue;
     const defaultImport = declaration.getDefaultImport();
     if (defaultImport) {
       constructors.add(defaultImport.getText());
       typeNames.add(defaultImport.getText());
+      const symbol = defaultImport.getSymbol();
+      if (symbol) constructorSymbols.add(symbol);
     }
     for (const specifier of declaration.getNamedImports()) {
       if (specifier.getName() !== 'Stripe') continue;
       const localName = specifier.getAliasNode()?.getText() ?? specifier.getName();
       constructors.add(localName);
       typeNames.add(localName);
+      const symbol = (specifier.getAliasNode() ?? specifier.getNameNode()).getSymbol();
+      if (symbol) constructorSymbols.add(symbol);
     }
   }
   for (const declaration of sourceFile.getDescendantsOfKind(SyntaxKind.ImportEqualsDeclaration)) {
@@ -311,6 +319,8 @@ function findStripeBindings(sourceFile: SourceFile): { constructors: Set<string>
     if (expression && Node.isStringLiteral(expression) && expression.getLiteralValue() === PACKAGE) {
       constructors.add(declaration.getName());
       typeNames.add(declaration.getName());
+      const symbol = declaration.getNameNode().getSymbol();
+      if (symbol) constructorSymbols.add(symbol);
     }
   }
   for (const declaration of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
@@ -321,9 +331,11 @@ function findStripeBindings(sourceFile: SourceFile): { constructors: Set<string>
       && ['default', 'Stripe'].includes(initializer.getName()) && isRequireStripe(initializer.getExpression()))) {
       constructors.add(name.getText());
       typeNames.add(name.getText());
+      const symbol = name.getSymbol();
+      if (symbol) constructorSymbols.add(symbol);
     }
   }
-  return { constructors, typeNames };
+  return { constructors, typeNames, constructorSymbols };
 }
 
 function findStripeClients(sourceFile: SourceFile, constructors: Set<string>): Set<string> {

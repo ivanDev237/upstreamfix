@@ -180,6 +180,14 @@ type Error = StripeCtor.errors.StripeError;
     expect(migrated).toContain('StripeCtor.StripeContextType');
     expect(migrated).toContain('InstanceType<typeof StripeCtor.errors.StripeError>');
   });
+  it('W7 leaves a parameter shadowing the imported Stripe constructor untouched', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('shadow.ts', "import Stripe from 'stripe';\nfunction make(Stripe: (key: string) => unknown) { return Stripe('key'); }\nconst client = Stripe('key');\n");
+    const result = stripeV22.transform(project);
+    const migrated = result.fileUpdates?.[0]?.contents ?? '';
+    expect(migrated).toContain("return Stripe('key')");
+    expect(migrated).toContain("const client = new Stripe('key')");
+  });
 
   it('reports callback migration for review without inventing async control flow', () => {
     const project = new Project({ useInMemoryFileSystem: true });
