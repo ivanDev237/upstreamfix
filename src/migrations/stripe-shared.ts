@@ -8,11 +8,11 @@ const REQUEST_OPTION_KEYS = new Set([
 const REMOVED_RESOURCE_METHODS = new Set([
   'createFullPath', 'createResourcePathWithSymbols', 'extend', 'method', '_joinUrlParts',
 ]);
-const ID_FIRST_REQUEST_METHODS = new Set([
-  'retrieve', 'update', 'del', 'delete', 'cancel', 'close', 'finalize', 'pay', 'send', 'void',
-  'capture', 'confirm', 'resume', 'pause', 'release', 'reverse', 'expire', 'submit', 'reject',
-  'accept', 'attach', 'detach', 'increment', 'decrement', 'markUncollectible',
-]);
+// These exact signatures have an ID followed by optional params and options in
+// stripe-node v22. The published v22 migration guide documents customers.retrieve;
+// CustomersResource.update uses the same first three arguments. Other resources
+// can have ID-less methods with the same name, so keep them manual until checked.
+const ID_FIRST_REQUEST_METHODS = new Set(['customers.retrieve', 'customers.update']);
 const PARAMS_FIRST_REQUEST_METHODS = new Set(['create', 'list', 'search']);
 // Removed from these parameter types in the published Stripe declarations.
 // The destination SDK rejects the old field; replacing it can change payment behavior.
@@ -145,14 +145,15 @@ function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
       // only for known ID-first methods called as `(id, options)`. In particular,
       // create/list take `(params?, options?)` and must never gain an `undefined`.
       const method = path.at(-1);
+      const resourceMethod = path.join('.');
       const optionCandidate = args.length === 2 ? args[1] : undefined;
-      if (!hostArgument && method && ID_FIRST_REQUEST_METHODS.has(method) && args.length === 2
+      if (!hostArgument && method && ID_FIRST_REQUEST_METHODS.has(resourceMethod) && args.length === 2
         && isResourceIdArgument(args[0]!) && optionCandidate && isRequestOptionsObject(optionCandidate)) {
         edits.push(edit(sourceFile, optionCandidate, `undefined, ${optionCandidate.getText()}`, 'request-options-position', optionCandidate.getText()));
       } else if (!hostArgument && method && args.length === 2
         && ((optionCandidate && containsRequestOptionKey(optionCandidate)
           && !PARAMS_FIRST_REQUEST_METHODS.has(method)
-          && (!ID_FIRST_REQUEST_METHODS.has(method) || !isResourceIdArgument(args[0]!) || !isRequestOptionsObject(optionCandidate)))
+          && (!ID_FIRST_REQUEST_METHODS.has(resourceMethod) || !isResourceIdArgument(args[0]!) || !isRequestOptionsObject(optionCandidate)))
           || (PARAMS_FIRST_REQUEST_METHODS.has(method) && containsRequestOptionKey(args[0]!)))) {
         addManual(sourceFile, result.manual, call, 'The Stripe request arguments resemble RequestOptions, but their v22 parameter position is ambiguous. Verify this method’s `(id, params?, options?)` or `(params?, options?)` signature and move options manually; no arguments were changed.', redactedSnippet(call.getText()));
       } else if (!hostArgument && method && args.length === 1 && containsRequestOptionKey(args[0]!)) {
@@ -377,7 +378,7 @@ function containsRequestOptionKey(node: Node): boolean {
 function isResourceIdArgument(node: Node): boolean {
   return Node.isStringLiteral(node)
     || Node.isNoSubstitutionTemplateLiteral(node)
-    || Node.isIdentifier(node)
+    || (Node.isIdentifier(node) && node.getText() !== 'undefined')
     || Node.isPropertyAccessExpression(node)
     || Node.isElementAccessExpression(node);
 }

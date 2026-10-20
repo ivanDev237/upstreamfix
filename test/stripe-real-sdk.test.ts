@@ -13,6 +13,24 @@ const enabled = process.env.UPSTREAMFIX_RUN_REAL_SDK_TESTS === '1';
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
 
 describe.skipIf(!enabled)('Stripe migrations against the official published Node SDKs', () => {
+  it('W2 typechecks only confirmed ID-first request options against stripe@22.0.0', async () => {
+    const cwd = await makeProject('^21.0.0');
+    const file = path.join(cwd, 'connect.ts');
+    await writeFile(file, `import Stripe from 'stripe';
+const stripe = new Stripe('sk_test_fixture');
+stripe.customers.retrieve('cus_123', { stripeAccount: 'acct_123' });
+stripe.customers.update('cus_123', { stripeAccount: 'acct_123' });
+`);
+    const project = new Project({ skipAddingFilesFromTsConfig: true });
+    project.addSourceFileAtPath(file);
+    const result = stripeV22.transform(project);
+    expect(result.manual).toEqual([]);
+    expect(result.changes.filter((change) => change.rule === 'request-options-position')).toHaveLength(2);
+    await applyUpdates(result.fileUpdates ?? []);
+    await installSdk(cwd, '22.0.0');
+    await typecheck(cwd);
+  }, 300_000);
+
   it('typechecks each of three files before and after v21 → v22 transformations', async () => {
     const cwd = await makeProject('^21.0.0');
     const sources = new Map([

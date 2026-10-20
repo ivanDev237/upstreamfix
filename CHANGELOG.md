@@ -10,6 +10,7 @@ series are experimental; review proposed migrations before applying them.
 - Added experimental declarative YAML migration recipes for SDK publishers. Preview one with `upstreamfix migrate --recipe <file.yml> --experimental`.
 - Published a strict [JSON schema](docs/recipe.schema.json) and an [English format guide](docs/recipe-format.md). Recipes are data only: they cannot execute code or provide arbitrary regular expressions.
 - Made recipe migrations conservative: unsupported or ambiguous usages become manual review items; files with syntax errors, overlapping edits, or unsafe generated code are not rewritten. The ordinary verification and guarded Git branch workflow still applies.
+- Fixed Stripe v22 request-option migration: only confirmed ID-first methods gain a missing parameters slot. ID-less calls and an `undefined` ID now require manual review, protecting Connect account selection.
 
 ## 0.2.0
 

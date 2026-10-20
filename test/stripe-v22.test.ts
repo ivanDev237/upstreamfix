@@ -120,6 +120,18 @@ stripe.customers.update('cus_123', {stripeAccount: 'acct_123'});
     expect(migrated).toContain("list({limit: 10}, {stripeAccount: 'acct_123'})");
     expect(migrated).toContain("update('cus_123', undefined, {stripeAccount: 'acct_123'})");
   });
+  it.each([
+    "stripe.balance.retrieve(params, { stripeAccount: 'acct_123' });",
+    "stripe.tax.settings.retrieve(params, { stripeAccount: 'acct_123' });",
+    "stripe.customers.retrieve(undefined, { stripeAccount: 'acct_123' });",
+  ])('W2 leaves non-ID-first or undefined-ID calls for manual review: %s', (call) => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('connect.ts', `import Stripe from 'stripe';\nconst stripe = new Stripe('sk_test_fixture');\nconst params = { expand: ['available'] };\n${call}\n`);
+    const result = stripeV22.transform(project);
+    expect(result.changes.map((change) => change.rule)).not.toContain('request-options-position');
+    expect(result.manual.length).toBeGreaterThan(0);
+    expect(result.fileUpdates).toEqual([]);
+  });
 
   it('flags ambiguous ID-first request options for manual review without changing them', () => {
     const project = new Project({ useInMemoryFileSystem: true });
