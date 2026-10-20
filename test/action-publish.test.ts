@@ -105,6 +105,12 @@ describe('Action publication boundary', () => {
     const lock = (major: number) => `firebase-admin@^${major}.0.0:\n  version "${major}.0.0"\n  resolved "https://registry.npmjs.org/firebase-admin/-/firebase-admin-${major}.0.0.tgz#${'a'.repeat(40)}"\n  integrity sha512-QUJDRA==\n\n"@scope/helper@^${major}.0.0":\n  version "${major}.0.0"\n  resolved "https://registry.npmjs.org/@scope/helper/-/helper-${major}.0.0.tgz#${'b'.repeat(40)}"\n  integrity sha512-QUJDRA==\n`;
     expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: lock(13), after: lock(14) } }, identity)).not.toThrow();
   });
+  it('X3 rejects ambiguous duplicate package records in text lockfiles', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    const before = "lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      firebase-admin:\n        specifier: ^13.0.0\n        version: 13.0.0\npackages:\n  firebase-admin@13.0.0:\n    resolution: {integrity: sha512-QUJDRA==}\nsnapshots:\n  firebase-admin@13.0.0: {}\n";
+    const after = before.replaceAll('13.0.0', '14.0.0') + 'packages:\n  firebase-admin@14.0.0:\n    resolution: {integrity: sha512-QUJDRA==}\n';
+    expect(() => validatePublishableBundle({ ...proposal, files: ['pnpm-lock.yaml'] }, { 'pnpm-lock.yaml': { before, after } }, identity)).toThrow(/duplicate|lockfile/i);
+  });
   it('X4 refuses source and configuration bytes not produced by the migration', () => {
     const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
     for (const file of ['test/setup.js', 'jest.config.js', 'pnpm-workspace.yaml']) {

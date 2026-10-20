@@ -371,7 +371,10 @@ function lockSections(text: string): Map<string, string> {
   let current = '';
   for (const line of text.split('\n')) {
     const top = /^([A-Za-z][A-Za-z0-9_-]*):(?:\s|$)/.exec(line);
-    if (top) current = top[1]!;
+    if (top) {
+      current = top[1]!;
+      if (sections.has(current)) throw new Error('Bundle lockfile contains a duplicate YAML section.');
+    }
     if (current) sections.set(current, `${sections.get(current) ?? ''}${line}\n`);
     else if (line.trim() && !line.trim().startsWith('#')) throw new Error('Bundle lockfile has an unsupported YAML structure.');
   }
@@ -383,7 +386,10 @@ function indentedEntries(section: string): Map<string, string> {
   let key = '';
   for (const line of section.split('\n').slice(1)) {
     const head = /^  (['"]?)([^\s'"]+)\1:(?:\s.*)?$/.exec(line);
-    if (head) key = head[2]!;
+    if (head) {
+      key = head[2]!;
+      if (entries.has(key)) throw new Error('Bundle lockfile contains a duplicate package entry.');
+    }
     if (key) entries.set(key, `${entries.get(key) ?? ''}${line}\n`);
     else if (line.trim()) throw new Error('Bundle lockfile has an unsupported package entry.');
   }
@@ -456,6 +462,7 @@ function validateYarnLockDelta(beforeText: string, afterText: string, packageNam
       if (!/^\s/.test(line)) {
         if (!line.endsWith(':') || line.startsWith('__metadata')) throw new Error('Bundle Yarn lockfile format is unsupported.');
         key = line.slice(0, -1);
+        if (blocks.has(key)) throw new Error('Bundle Yarn lockfile contains a duplicate package entry.');
       } else if (!key) throw new Error('Bundle Yarn lockfile has an unexpected entry.');
       blocks.set(key, `${blocks.get(key) ?? ''}${line}\n`);
     }
