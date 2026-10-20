@@ -5,15 +5,15 @@ Source of truth: [official `MIGRATION.md` at the v5.0.0 release commit](https://
 | Official guide section | UpstreamFix handling | Evidence |
 |---|---|---|
 | Environment requirements | Node >=20 must be declared or explicitly confirmed; TypeScript <4.9 and Jest <28 are manual findings. | `test/openai-v5.test.ts` — runtime and tooling tests |
-| Web types for `withResponse`, `asResponse`, and `APIError.headers` | `.asResponse().body.pipe(...)` is manual; environment with no DOM or Node Web types is manual. Other Web response uses and `APIError.headers` require additional detection. | `test/openai-v5.test.ts` — Web response and type environment |
+| Web types for `withResponse`, `asResponse`, and `APIError.headers` | `.asResponse().body.pipe(...)`, typed `APIError.headers`, and an environment with no DOM or Node Web types are manual. Other Web response uses remain a gap. | `test/openai-v5.test.ts` — Web response, Headers, and type environment |
 | Named path parameters | Listed multi-argument methods are manual; no argument order is guessed. | `test/openai-v5.test.ts` — changed path calls |
-| URI encoded path parameters | Direct `encodeURIComponent` in a client call is manual. Indirect pre-encoding remains a gap. | `test/openai-v5.test.ts` — URI encoding |
-| Removed request options overloads | Literal request-options objects passed as the sole argument to a listed method are manual. Variables holding options remain a gap. | `test/openai-v5.test.ts` — request options |
+| URI encoded path parameters | Direct `encodeURIComponent` and one-step pre-encoding in a local variable are manual. Interprocedural pre-encoding remains a gap. | `test/openai-v5.test.ts` — direct and indirect URI encoding |
+| Removed request options overloads | Literal request-options objects and one-step local variables passed as the sole argument to a listed method are manual. Parameters passed through functions remain a gap. | `test/openai-v5.test.ts` — literal and variable request options |
 | HTTP method naming | Bound `del` calls are renamed to `delete`; multi-path argument calls remain manual. | `test/openai-v5.test.ts` — del-to-delete; `test/openai-real-sdk.test.ts` |
 | Removed `httpAgent` in favor of `fetchOptions` | An `httpAgent` option on a direct OpenAI constructor is manual because transport semantics change. Aliased options remain a gap. | `test/openai-v5.test.ts` — semantic changes |
-| Changed exports | Known moved subpaths are rewritten; imports from private `openai/core` must be reviewed. | `test/openai-v5.test.ts` — moved re-exports |
+| Changed exports | Known moved subpaths are rewritten; imports from private `openai/core` produce a manual review. | `test/openai-v5.test.ts` — moved re-exports and private core |
 | Resource classes | Runtime imports of resource-specific `*Page` classes are manual. Root CommonJS destructuring is manual. | `test/openai-v5.test.ts` — resource classes and unsupported forms |
-| uploads exports | Removed `fileFromPath` references are manual before moving the import; other removed uploads exports remain a gap. | `test/openai-v5.test.ts` — all fileFromPath forms |
+| uploads exports | All twelve removed named exports are manual before moving the import; `fileFromPath` references are also manual. | `test/openai-v5.test.ts` — removed uploads exports and all fileFromPath forms |
 | APIClient | Imports of the removed `APIClient` base class are manual. | `test/openai-v5.test.ts` — removed APIClient |
 | File handling | Every detected `fileFromPath` form is manual; replacement with a stream is a runtime decision. | `test/openai-v5.test.ts` — fileFromPath forms |
 | Shims removal | `openai/shims/*` imports are manual pending environment configuration. | `test/openai-v5.test.ts` — unsupported v4 usage |

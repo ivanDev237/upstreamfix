@@ -43,6 +43,12 @@ const REQUEST_OPTION_OVERLOADS = new Set([
   'containers.list', 'containers.files.list',
 ]);
 const REQUEST_OPTION_KEYS = new Set(['headers', 'timeout', 'maxRetries', 'signal', 'idempotencyKey']);
+const REMOVED_UPLOAD_EXPORTS = new Set([
+  'fileFromPath', 'BlobPart', 'BlobLike', 'FileLike', 'ResponseLike',
+  'isResponseLike', 'isBlobLike', 'isFileLike', 'isUploadable',
+  'isMultipartBody', 'maybeMultipartFormRequestOptions',
+  'multipartFormRequestOptions', 'createForm',
+]);
 interface Edit { start: number; end: number; replacement: string; rule: string; before: string; line: number }
 
 function pathParts(node: Node): string[] {
@@ -106,6 +112,17 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
   }
   const clients = new Set<MorphSymbol>();
   const complexClients = new Set<MorphSymbol>();
+  const variableInitializers = new Map<MorphSymbol, Node>();
+  for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    const symbol = variable.getNameNode().getSymbol();
+    const initializer = variable.getInitializer();
+    if (symbol && initializer) variableInitializers.set(symbol, initializer);
+  }
+  const apiErrorNames = new Set(file.getImportDeclarations()
+    .filter((declaration) => declaration.getModuleSpecifierValue() === 'openai')
+    .flatMap((declaration) => declaration.getNamedImports()
+      .filter((entry) => entry.getName() === 'APIError')
+      .map((entry) => entry.getAliasNode()?.getText() ?? 'APIError')));
   const classFields = new Map<Node, Set<string>>();
   const isClientType = (type: Node | undefined): boolean => {
     if (!type) return false;
@@ -205,6 +222,12 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
   }
   for (const declaration of file.getImportDeclarations()) {
     const specifier = declaration.getModuleSpecifierValue();
+    if (specifier === 'openai/uploads') {
+      for (const entry of declaration.getNamedImports()) {
+        if (REMOVED_UPLOAD_EXPORTS.has(entry.getName()))
+          addManual(result, file, entry, `OpenAI v5 removes uploads export ${entry.getName()}; choose a supported replacement manually.`);
+      }
+    }
     const moved = MOVED_IMPORTS.get(specifier);
     if (moved) addEdit(edits, file, declaration.getModuleSpecifier(), `'${moved}'`, 'moved-import');
     else if (specifier === 'openai/src' || specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
@@ -213,6 +236,8 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       addManual(result, file, declaration, 'OpenAI v5 converts resource-specific Page classes to type aliases; review runtime uses before upgrading.');
     if (specifier.startsWith('openai/') && declaration.getNamedImports().some((entry) => entry.getName() === 'APIClient'))
       addManual(result, file, declaration, 'OpenAI v5 removes APIClient; review replacement with the main OpenAI class.');
+    if (specifier === 'openai/core')
+      addManual(result, file, declaration, 'OpenAI v5 refactors openai/core; review every imported export against the public v5 entry points.');
   }
   if (file.getFullText().includes('zodResponseFormat')) {
     for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
@@ -223,6 +248,12 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
   }
   for (const declaration of file.getExportDeclarations()) {
     const specifier = declaration.getModuleSpecifierValue();
+    if (specifier === 'openai/uploads') {
+      for (const entry of declaration.getNamedExports()) {
+        if (REMOVED_UPLOAD_EXPORTS.has(entry.getName()))
+          addManual(result, file, entry, `OpenAI v5 removes uploads export ${entry.getName()}; review this public re-export manually.`);
+      }
+    }
     const moved = specifier ? MOVED_IMPORTS.get(specifier) : undefined;
     if (moved && declaration.getModuleSpecifier()) addEdit(edits, file, declaration.getModuleSpecifier()!, `'${moved}'`, 'moved-import');
   }
@@ -261,10 +292,16 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     if (call.getArguments().some((argument) => Node.isCallExpression(argument)
       && argument.getExpression().getText() === 'encodeURIComponent'))
       addManual(result, file, call, 'OpenAI v5 URI-encodes path parameters itself; remove only deliberate pre-encoding after reviewing the endpoint.');
+    if (call.getArguments().some((argument) => Node.isIdentifier(argument)
+      && argument.getSymbol() && Node.isCallExpression(variableInitializers.get(argument.getSymbol()!) ?? undefined)
+      && (variableInitializers.get(argument.getSymbol()!) as Node).getText().startsWith('encodeURIComponent(')))
+      addManual(result, file, call, 'OpenAI v5 URI-encodes path parameters itself; this argument was pre-encoded in a local variable. Review the endpoint.');
     if (REQUEST_OPTION_OVERLOADS.has(method) && call.getArguments().length === 1) {
       const argument = call.getArguments()[0];
-      if (argument && Node.isObjectLiteralExpression(argument)
-        && argument.getProperties().some((property) =>
+      const resolved = argument && Node.isIdentifier(argument) && argument.getSymbol()
+        ? variableInitializers.get(argument.getSymbol()!) : argument;
+      if (resolved && Node.isObjectLiteralExpression(resolved)
+        && resolved.getProperties().some((property) =>
           (Node.isPropertyAssignment(property) || Node.isShorthandPropertyAssignment(property))
           && REQUEST_OPTION_KEYS.has(property.getName())))
         addManual(result, file, call, 'OpenAI v5 removed this request options overload; separate params from request options manually.');
@@ -282,6 +319,14 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     }
   }
   for (const property of file.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)) {
+    if (property.getName() === 'headers' && apiErrorNames.size > 0 && Node.isIdentifier(property.getExpression())) {
+      const receiver = property.getExpression();
+      const declaration = receiver.getSymbol()?.getDeclarations()[0];
+      const annotated = declaration && (Node.isParameterDeclaration(declaration) || Node.isVariableDeclaration(declaration))
+        ? declaration.getTypeNode()?.getText() : undefined;
+      if (annotated && [...apiErrorNames].some((name) => annotated.split(/[^A-Za-z0-9_$]+/).includes(name)))
+        addManual(result, file, property, 'OpenAI v5 APIError.headers is a Web Headers object, not a string record; use Headers.get() after review.');
+    }
     if (property.getName().startsWith('finalFunctionCall')) {
       const runner = rootIdentifier(property);
       if (runner?.getSymbol() && runners.has(runner.getSymbol()!))

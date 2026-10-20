@@ -232,6 +232,29 @@ client.vectorStores.files.retrieve('store', 'file');
     }
   });
 
+  it.each(['BlobPart', 'BlobLike', 'FileLike', 'ResponseLike', 'isResponseLike', 'isBlobLike',
+    'isFileLike', 'isUploadable', 'isMultipartBody', 'maybeMultipartFormRequestOptions',
+    'multipartFormRequestOptions', 'createForm'])('keeps removed uploads export %s for manual review', (name) => {
+    const outcome = migrate(`import { ${name} } from 'openai/uploads';\nconsole.log(${name});\n`);
+    expect(outcome.manual.some((item) => item.reason.includes(name))).toBe(true);
+    expect(outcome.fileUpdates).toEqual([]);
+  });
+
+  it('flags indirect URI pre-encoding and request options stored in a variable', () => {
+    const source = "import OpenAI from 'openai'; const client = new OpenAI(); const id = encodeURIComponent(raw); const options = { headers: { 'X-Test': '1' } }; client.files.retrieve(id); client.files.list(options);";
+    const outcome = migrate(source);
+    expect(outcome.manual.map((item) => item.reason).join(' ')).toContain('URI');
+    expect(outcome.manual.map((item) => item.reason).join(' ')).toContain('request options');
+    expect(outcome.fileUpdates).toEqual([]);
+  });
+
+  it('flags APIError.headers access and a direct openai/core import for review', () => {
+    const source = "import OpenAI, { APIError } from 'openai'; import { APIPromise } from 'openai/core'; function read(error: APIError) { return error.headers['x']; }";
+    const outcome = migrate(source);
+    expect(outcome.manual.map((item) => item.reason).join(' ')).toContain('Headers');
+    expect(outcome.manual.map((item) => item.reason).join(' ')).toContain('openai/core');
+  });
+
   it('withholds multi-argument del calls whose v5 path parameters changed', () => {
     const outcome = migrate(`import OpenAI from 'openai';
 const client = new OpenAI();
