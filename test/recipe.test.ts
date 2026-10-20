@@ -141,6 +141,14 @@ describe('declarative recipes', () => {
     const cwd = await fixture("import * as admin from 'firebase-admin';\nadmin.firestore();\n");
     await expect(createProgram().parseAsync(['node', 'upstreamfix', 'migrate', '--recipe', recipePath, '--cwd', cwd])).rejects.toThrow(/experimental/i);
   });
+  it('distinguishes an experimental recipe from the validated catalog migration', async () => {
+    const cwd = await fixture("import * as admin from 'firebase-admin';\nadmin.firestore();\n");
+    const message = await createProgram().parseAsync(['node', 'upstreamfix', 'migrate', '--recipe', recipePath, '--cwd', cwd])
+      .then(() => '', (error: unknown) => error instanceof Error ? error.message : String(error));
+    expect(message).toContain('This recipe is experimental');
+    expect(message).not.toContain('firebase-admin@14 is experimental');
+    expect(message).toContain('--experimental');
+  });
   it('V7 is never less cautious than the built-in Firebase migration across 65 cases', async () => {
     const recipe = await loadRecipe(recipePath);
     const bindings = [
