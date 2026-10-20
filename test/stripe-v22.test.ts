@@ -188,6 +188,13 @@ type Error = StripeCtor.errors.StripeError;
     expect(migrated).toContain("return Stripe('key')");
     expect(migrated).toContain("const client = new Stripe('key')");
   });
+  it('W10 reports unrecognized Stripe bindings instead of silently upgrading the SDK', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('client.ts', "const Stripe = require(`stripe`);\nfunction send(client: Stripe) { return client.customers.create({}); }\n");
+    const result = stripeV22.transform(project);
+    expect(result.manual.length).toBeGreaterThan(0);
+    expect(result.fileUpdates).toHaveLength(0);
+  });
 
   it('reports callback migration for review without inventing async control flow', () => {
     const project = new Project({ useInMemoryFileSystem: true });

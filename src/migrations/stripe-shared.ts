@@ -35,13 +35,27 @@ interface TextEdit {
 
 export function migrateStripeV22(project: Project): MigrationResult {
   const result = emptyResult();
-  for (const sourceFile of project.getSourceFiles()) migrateV22File(sourceFile, result);
+  for (const sourceFile of project.getSourceFiles()) {
+    const manualBefore = result.manual.length;
+    const changesBefore = result.changes.length;
+    migrateV22File(sourceFile, result);
+    if (manualBefore === result.manual.length && changesBefore === result.changes.length && hasStripePackageReference(sourceFile)) {
+      addManual(sourceFile, result.manual, sourceFile, 'This file mentions Stripe without a recognized migration binding; inspect its SDK usage manually.', 'stripe');
+    }
+  }
   return result;
 }
 
 export function migrateStripeV23(project: Project): MigrationResult {
   const result = emptyResult();
-  for (const sourceFile of project.getSourceFiles()) migrateV23File(sourceFile, result);
+  for (const sourceFile of project.getSourceFiles()) {
+    const manualBefore = result.manual.length;
+    const changesBefore = result.changes.length;
+    migrateV23File(sourceFile, result);
+    if (manualBefore === result.manual.length && changesBefore === result.changes.length && hasStripePackageReference(sourceFile)) {
+      addManual(sourceFile, result.manual, sourceFile, 'This file mentions Stripe without a recognized migration binding; inspect its SDK usage manually.', 'stripe');
+    }
+  }
   return result;
 }
 
@@ -280,6 +294,13 @@ function migrateV23File(sourceFile: SourceFile, result: MigrationResult): void {
 }
 
 function reportUnsupportedStripeImports(sourceFile: SourceFile, result: MigrationResult): void {
+  for (const call of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+    if (call.getExpression().getText() !== 'require') continue;
+    const argument = call.getArguments()[0];
+    if (Node.isNoSubstitutionTemplateLiteral(argument) && argument.getLiteralValue() === PACKAGE) {
+      addManual(sourceFile, result.manual, call, 'A backtick Stripe require needs manual review before upgrading.', 'require(`stripe`)');
+    }
+  }
   for (const declaration of sourceFile.getImportDeclarations()) {
     if (declaration.getModuleSpecifierValue() !== PACKAGE) continue;
     if (declaration.getNamespaceImport()) {
@@ -289,6 +310,17 @@ function reportUnsupportedStripeImports(sourceFile: SourceFile, result: Migratio
       addManual(sourceFile, result.manual, declaration, 'A named default Stripe import needs manual review before this migration.', declaration.getText());
     }
   }
+}
+
+function hasStripePackageReference(sourceFile: SourceFile): boolean {
+  if (sourceFile.getImportDeclarations().some((declaration) => declaration.getModuleSpecifierValue() === PACKAGE)) return true;
+  if (sourceFile.getDescendantsOfKind(SyntaxKind.ImportEqualsDeclaration).some((declaration) => declaration.getText().includes("'stripe'") || declaration.getText().includes('"stripe"'))) return true;
+  return sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) => {
+    const argument = call.getArguments()[0];
+    return ['require', 'import'].includes(call.getExpression().getText())
+      && (Node.isStringLiteral(argument) || Node.isNoSubstitutionTemplateLiteral(argument))
+      && argument.getLiteralValue() === PACKAGE;
+  });
 }
 
 function findStripeBindings(sourceFile: SourceFile): { constructors: Set<string>; typeNames: Set<string>; constructorSymbols: Set<MorphSymbol> } {

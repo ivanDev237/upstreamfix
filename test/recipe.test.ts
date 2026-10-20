@@ -38,6 +38,12 @@ describe('declarative recipes', () => {
     expect(result.manual.some((item) => /write|assign|mutat/i.test(item.reason))).toBe(true);
     expect(result.proposedFiles).toHaveLength(0);
   });
+  it('W10 reports a backtick require instead of upgrading without a binding', async () => {
+    const cwd = await fixture("const admin = require(`firebase-admin`);\nadmin.firestore();\n");
+    const result = await runMigration(await loadRecipe(recipePath), { cwd, dryRun: true });
+    expect(result.manual.length).toBeGreaterThan(0);
+    expect(result.proposedFiles).toHaveLength(0);
+  });
   it.each([
     "const admin = require('firebase-admin');\nmodule.exports = { admin };\nadmin.firestore();\n",
     "import * as admin from 'firebase-admin';\nexport { admin };\nadmin.firestore();\n",
