@@ -89,6 +89,21 @@ function addManual(result: MigrationResult, sourceFile: SourceFile, node: Node, 
   } satisfies ManualItem);
 }
 
+function writesNamespaceProperty(access: Node): boolean {
+  let nested: Node = access;
+  for (let parent = nested.getParent(); parent; nested = parent, parent = parent.getParent()) {
+    if (Node.isDeleteExpression(parent) && parent.getExpression() === nested) return true;
+    if ((Node.isPrefixUnaryExpression(parent) || Node.isPostfixUnaryExpression(parent))
+      && [SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken].includes(parent.getOperatorToken())) return true;
+    if (Node.isBinaryExpression(parent) && /^(?:=|(?:\+|-|\*|\/|%|<<|>>|>>>|&|\||\^|\*\*|&&|\|\||\?\?)=)$/.test(parent.getOperatorToken().getText())
+      && access.getStart() >= parent.getLeft().getStart() && access.getEnd() <= parent.getLeft().getEnd()) return true;
+    if ((Node.isForOfStatement(parent) || Node.isForInStatement(parent))
+      && access.getStart() >= parent.getInitializer().getStart() && access.getEnd() <= parent.getInitializer().getEnd()) return true;
+    if (Node.isStatement(parent) && !Node.isExpressionStatement(parent)) break;
+  }
+  return false;
+}
+
 function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationResult {
   const result: MigrationResult = { changes: [], manual: [], filesChanged: [], fileUpdates: [] };
   for (const sourceFile of project.getSourceFiles()) {
@@ -212,12 +227,7 @@ function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationR
       }
       const propertyRule = findRule('namespace-property', member);
       if (!directCall && propertyRule) {
-        const parent = access.getParent();
-        const writesProperty = (Node.isBinaryExpression(parent) && parent.getLeft() === access
-          && /^(?:=|(?:\+|-|\*|\/|%|<<|>>|>>>|&|\||\^|\*\*|&&|\|\||\?\?)=)$/.test(parent.getOperatorToken().getText()))
-          || ((Node.isPrefixUnaryExpression(parent) || Node.isPostfixUnaryExpression(parent))
-            && [SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken].includes(parent.getOperatorToken()));
-        if (writesProperty) {
+        if (writesNamespaceProperty(access)) {
           addManual(result, sourceFile, access, `The ${access.getText()} SDK property is written to; migrate this mutation manually.`);
           continue;
         }

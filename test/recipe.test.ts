@@ -38,6 +38,19 @@ describe('declarative recipes', () => {
     expect(result.manual.some((item) => /write|assign|mutat/i.test(item.reason))).toBe(true);
     expect(result.proposedFiles).toHaveLength(0);
   });
+  it.each([
+    'delete admin.apps;',
+    '[admin.apps] = [[]];',
+    '({x: admin.apps} = {x: []});',
+    'for (admin.apps of [[]]) {}',
+    '(admin.apps) = [];',
+    'admin.apps! = [];',
+  ])('X6 withholds recipe namespace-property mutations: %s', async (statement) => {
+    const cwd = await fixture(`import * as admin from 'firebase-admin';\n${statement}\n`);
+    const result = await runMigration(await loadRecipe(recipePath), { cwd, dryRun: true });
+    expect(result.manual.some((item) => /write|assign|mutat/i.test(item.reason))).toBe(true);
+    expect(result.proposedFiles).toHaveLength(0);
+  });
   it('W10 reports a backtick require instead of upgrading without a binding', async () => {
     const cwd = await fixture("const admin = require(`firebase-admin`);\nadmin.firestore();\n");
     const result = await runMigration(await loadRecipe(recipePath), { cwd, dryRun: true });
