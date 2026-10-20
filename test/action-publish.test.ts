@@ -84,6 +84,12 @@ describe('Action publication boundary', () => {
       expect(() => validatePublishableBundle({ ...proposal, files: [filename] }, { [filename]: { before, after } }, identity)).not.toThrow();
     }
   });
+  it('X3 accepts the committed npm-generated Firebase 13 to 14 lockfile pair', () => {
+    const before = readFileSync(new URL('./fixtures/firebase-lockfiles/13-to-14-before.json', import.meta.url), 'utf8');
+    const after = readFileSync(new URL('./fixtures/firebase-lockfiles/13-to-14-after.json', import.meta.url), 'utf8');
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    expect(() => validatePublishableBundle({ ...proposal, files: ['package-lock.json'] }, { 'package-lock.json': { before, after } }, identity)).not.toThrow();
+  });
   it('X3 accepts safe pnpm and Yarn lockfile upgrades but rejects foreign tarballs', () => {
     const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
     const pnpm = (version: number, url = '') => `lockfileVersion: '9.0'\nimporters:\n  .:\n    dependencies:\n      firebase-admin:\n        specifier: ^${version}.0.0\n        version: ${version}.0.0\npackages:\n  firebase-admin@${version}.0.0:\n    resolution: {integrity: sha512-QUJDRA==${url}}\nsnapshots:\n  firebase-admin@${version}.0.0: {}\n`;

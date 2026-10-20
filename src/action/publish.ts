@@ -293,24 +293,62 @@ function validateNpmLockDelta(beforeText: string, afterText: string, packageName
       throw new Error('Bundle lockfile contains an unsupported package path.');
     }
     const itemVersion = packageEntry.version;
+    const resolvedName = npmAliasTarget(actualName, packageEntry.resolved, newPackages, itemVersion);
     if (typeof itemVersion !== 'string' || !/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(itemVersion)
-      || packageEntry.resolved !== registryTarballUrl(actualName, itemVersion)
+      || !resolvedName || packageEntry.resolved !== registryTarballUrl(resolvedName, itemVersion)
       || typeof packageEntry.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/=]+$/.test(packageEntry.integrity)
       || packageEntry.hasInstallScript === true || Object.hasOwn(packageEntry, 'scripts')) {
       throw new Error('Bundle lockfile contains an unverified npm registry package.');
     }
+    if (Object.hasOwn(packageEntry, 'name') && (resolvedName === actualName || packageEntry.name !== resolvedName)) {
+      throw new Error('Bundle lockfile contains an invalid npm alias name.');
+    }
     const oldEntry = record(oldPackages[packagePath]);
     for (const [key] of Object.entries(packageEntry)) {
-      if (!allowedTargetKeys.has(key) && !['cpu', 'os', 'libc', 'funding', 'deprecated'].includes(key)) {
+      if (!allowedTargetKeys.has(key) && !['cpu', 'os', 'libc', 'funding', 'deprecated', 'name'].includes(key)) {
         throw new Error('Bundle lockfile contains an unexpected package capability.');
       }
-      if (key === 'bin' && !Object.hasOwn(oldEntry ?? {}, key)) throw new Error('Bundle lockfile adds an executable package binary.');
+      if (key === 'bin' && !Object.hasOwn(oldEntry ?? {}, key)) {
+        // npm may add a genuine new transitive package with a binary. Never
+        // allow an existing package's binary map to change through the bundle.
+        if (oldEntry || packagePath === targetPath || !safeNpmBin(packageEntry.bin)) {
+          throw new Error('Bundle lockfile adds an unexpected executable package binary.');
+        }
+      }
     }
   }
 }
 
 function registryTarballUrl(name: string, version: string): string {
   return `https://registry.npmjs.org/${name}/-/${name.split('/').at(-1)}-${version}.tgz`;
+}
+
+function npmAliasTarget(alias: string, resolved: unknown, packages: Record<string, unknown>, version: unknown): string | undefined {
+  if (typeof version !== 'string' || typeof resolved !== 'string') return undefined;
+  if (resolved === registryTarballUrl(alias, version)) return alias;
+  const names = new Set<string>();
+  for (const value of Object.values(packages)) {
+    const entry = record(value);
+    if (!entry) continue;
+    for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+      const spec = record(entry[section])?.[alias];
+      const match = typeof spec === 'string' ? /^npm:((?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+)@[^\s]+$/.exec(spec) : null;
+      if (match) names.add(match[1]!);
+    }
+  }
+  if (names.size !== 1) return undefined;
+  const name = [...names][0]!;
+  return resolved === registryTarballUrl(name, version) ? name : undefined;
+}
+
+function safeNpmBin(value: unknown): boolean {
+  const bins = record(value);
+  if (!bins || !Object.keys(bins).length || Object.keys(bins).length > 20) return false;
+  return Object.entries(bins).every(([name, location]) =>
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)
+    && typeof location === 'string' && location.length <= 200
+    && /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/.test(location)
+    && !location.split('/').some((part) => part === '.' || part === '..'));
 }
 
 function boundedLockfile(text: string): void {
