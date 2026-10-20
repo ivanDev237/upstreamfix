@@ -397,6 +397,28 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
 
     const nodeTypes = manifest.devDependencies?.['@types/node'] ?? manifest.dependencies?.['@types/node'];
     const nodeTypesMajor = /^\s*[~^]?(\d+)/.exec(nodeTypes ?? '');
+    const workersTypes = manifest.devDependencies?.['@cloudflare/workers-types'] ?? manifest.dependencies?.['@cloudflare/workers-types'];
+    const workersVersion = /^\s*[~^]?(\d+)\.(\d+)\.(\d+)/.exec(workersTypes ?? '');
+    if (workersTypes && (!workersVersion || (Number(workersVersion[1]) === 0
+      && Number(workersVersion[2]) < 20221111))) {
+      findings.push({ file: manifestPath, line: 1,
+        reason: `OpenAI v5's Cloudflare Workers guide requires @cloudflare/workers-types >=0.20221111.0; declared ${workersTypes} needs review and typecheck.`,
+        snippet: `@cloudflare/workers-types: ${workersTypes}` });
+    }
+    if (workersTypes && compilerOptions && (!Array.isArray(compilerOptions.types)
+      || !compilerOptions.types.includes('@cloudflare/workers-types'))) {
+      findings.push({ file: tsconfigPath, line: 1,
+        reason: 'OpenAI v5 Cloudflare Workers tsconfig should include @cloudflare/workers-types in compilerOptions.types; review this runtime configuration and typecheck.',
+        snippet: `compilerOptions.types: ${JSON.stringify(compilerOptions.types ?? null)}` });
+    }
+    const bunTypes = manifest.devDependencies?.['@types/bun'] ?? manifest.dependencies?.['@types/bun'];
+    const bunVersion = /^\s*[~^]?(\d+)\.(\d+)/.exec(bunTypes ?? '');
+    if (bunTypes && (!bunVersion || Number(bunVersion[1]) < 1
+      || (Number(bunVersion[1]) === 1 && Number(bunVersion[2]) < 2))) {
+      findings.push({ file: manifestPath, line: 1,
+        reason: `OpenAI v5's Bun guide requires @types/bun >=1.2.0; declared ${bunTypes} needs review and typecheck.`,
+        snippet: `@types/bun: ${bunTypes}` });
+    }
     if (compilerOptions && Array.isArray(compilerOptions.lib)
       && !compilerOptions.lib.some((lib) => typeof lib === 'string' && /^dom(?:\.iterable)?$/i.test(lib))
       && nodeTypesMajor && Number(nodeTypesMajor[1]) < 20) {
@@ -407,7 +429,7 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
 
     if (compilerOptions && Array.isArray(compilerOptions.lib)
       && !compilerOptions.lib.some((lib) => typeof lib === 'string' && /^dom(?:\.iterable)?$/i.test(lib))
-      && !manifest.dependencies?.['@types/node'] && !manifest.devDependencies?.['@types/node']) {
+      && !nodeTypes && !workersTypes && !bunTypes) {
       findings.push({ file: tsconfigPath, line: 1,
         reason: 'OpenAI v5 requires Web fetch types (RequestInit, Headers, Blob, File). This tsconfig excludes DOM and the package lacks @types/node; choose a compatible DOM lib or @types/node >=20, then typecheck. The correct runtime target cannot be inferred safely.',
         snippet: `compilerOptions.lib: ${JSON.stringify(compilerOptions.lib)}` });

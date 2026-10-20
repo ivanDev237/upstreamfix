@@ -108,6 +108,28 @@ describe('openai v4 to v5', () => {
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
+  it('reports an obsolete Cloudflare Workers type environment precisely', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-workers-types-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.29.1' }, devDependencies: { '@cloudflare/workers-types': '0.20210101.0' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2020', lib: ['ES2020'], types: [] } }));
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
+      expect(outcome.manual.some((item) => item.reason.includes('@cloudflare/workers-types >=0.20221111.0'))).toBe(true);
+      expect(outcome.manual.some((item) => item.reason.includes('tsconfig') && item.reason.includes('@cloudflare/workers-types'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('reports Bun types older than the v5 guide requires', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-bun-types-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.29.1' }, devDependencies: { '@types/bun': '1.1.0' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
+      expect(outcome.manual.some((item) => item.reason.includes('@types/bun >=1.2.0'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
   it('rewrites only bound client methods and beta chat paths', () => {
     const outcome = migrate(`import OpenAI from 'openai';
 const client = new OpenAI();
