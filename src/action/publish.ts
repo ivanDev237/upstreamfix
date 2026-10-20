@@ -284,6 +284,7 @@ function validateNpmLockDelta(beforeText: string, afterText: string, packageName
   delete beforeTop.packages;
   delete afterTop.packages;
   if (!isDeepStrictEqual(beforeTop, afterTop)) throw new Error('Bundle lockfile changes unexpected metadata.');
+  const aliasTargets = npmAliasTargets(newPackages);
   for (const [packagePath, value] of Object.entries(newPackages)) {
     if (packagePath === '' || isDeepStrictEqual(value, oldPackages[packagePath])) continue;
     const packageEntry = record(value);
@@ -293,7 +294,7 @@ function validateNpmLockDelta(beforeText: string, afterText: string, packageName
       throw new Error('Bundle lockfile contains an unsupported package path.');
     }
     const itemVersion = packageEntry.version;
-    const resolvedName = npmAliasTarget(actualName, packageEntry.resolved, newPackages, itemVersion);
+    const resolvedName = npmAliasTarget(actualName, packageEntry.resolved, aliasTargets, itemVersion);
     if (typeof itemVersion !== 'string' || !/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(itemVersion)
       || !resolvedName || packageEntry.resolved !== registryTarballUrl(resolvedName, itemVersion)
       || typeof packageEntry.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/=]+$/.test(packageEntry.integrity)
@@ -323,19 +324,29 @@ function registryTarballUrl(name: string, version: string): string {
   return `https://registry.npmjs.org/${name}/-/${name.split('/').at(-1)}-${version}.tgz`;
 }
 
-function npmAliasTarget(alias: string, resolved: unknown, packages: Record<string, unknown>, version: unknown): string | undefined {
-  if (typeof version !== 'string' || typeof resolved !== 'string') return undefined;
-  if (resolved === registryTarballUrl(alias, version)) return alias;
-  const names = new Set<string>();
+function npmAliasTargets(packages: Record<string, unknown>): Map<string, Set<string>> {
+  const aliases = new Map<string, Set<string>>();
   for (const value of Object.values(packages)) {
     const entry = record(value);
     if (!entry) continue;
     for (const section of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
-      const spec = record(entry[section])?.[alias];
-      const match = typeof spec === 'string' ? /^npm:((?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+)@[^\s]+$/.exec(spec) : null;
-      if (match) names.add(match[1]!);
+      for (const [alias, spec] of Object.entries(record(entry[section]) ?? {})) {
+        const match = typeof spec === 'string' ? /^npm:((?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+)@[^\s]+$/.exec(spec) : null;
+        if (!match) continue;
+        const targets = aliases.get(alias) ?? new Set<string>();
+        targets.add(match[1]!);
+        aliases.set(alias, targets);
+      }
     }
   }
+  return aliases;
+}
+
+function npmAliasTarget(alias: string, resolved: unknown, aliases: Map<string, Set<string>>, version: unknown): string | undefined {
+  if (typeof version !== 'string' || typeof resolved !== 'string') return undefined;
+  if (resolved === registryTarballUrl(alias, version)) return alias;
+  const names = aliases.get(alias);
+  if (!names) return undefined;
   if (names.size !== 1) return undefined;
   const name = [...names][0]!;
   return resolved === registryTarballUrl(name, version) ? name : undefined;
@@ -454,14 +465,19 @@ function validateYarnLockDelta(beforeText: string, afterText: string, packageNam
   const newBlocks = parse(afterText);
   let targetSeen = false;
   for (const [key, block] of newBlocks) {
-    const name = key.startsWith('@') ? key.slice(0, key.indexOf('@', 1)) : key.split('@')[0]!;
+    const selectors = key.split(/,\s*/).map((selector) => selector.replace(/^"|"$/g, ''));
+    const names = selectors.map((selector) => /^(@[^/]+\/[^@]+|[^@]+)@/.exec(selector)?.[1]);
+    const name = names[0];
+    if (!name || names.some((candidate) => candidate !== name)) throw new Error('Bundle Yarn lockfile mixes package names in an entry.');
     if (!/^(?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+$/.test(name)) throw new Error('Bundle Yarn lockfile has an invalid package name.');
     const version = /^  version "(\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?)"$/m.exec(block)?.[1];
     if (!version) throw new Error('Bundle Yarn lockfile package lacks a valid version.');
     if (name === packageName && version.startsWith(`${targetMajor}.`)) targetSeen = true;
     if (block === oldBlocks.get(key)) continue;
     const resolved = /^  resolved "([^"]+)"$/m.exec(block)?.[1];
-    if (resolved !== registryTarballUrl(name, version) || !/^  integrity sha512-[A-Za-z0-9+/=]+$/m.test(block)
+    const canonical = registryTarballUrl(name, version);
+    if (!resolved || (resolved !== canonical && !new RegExp(`^${canonical.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}#[a-fA-F0-9]{40}$`).test(resolved))
+      || !/^  integrity sha512-[A-Za-z0-9+/=]+$/m.test(block)
       || /^  (?:scripts|hasInstallScript|bin)\b/m.test(block)) {
       throw new Error('Bundle Yarn lockfile contains an unverified npm registry package.');
     }

@@ -4,6 +4,8 @@ import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { runRealSdkNpm } from './helpers/real-sdk-command.js';
+import { Project } from 'ts-morph';
+import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 import { validateProposal, validateProposalEnvelope, validatePublishableBundle, parseExactRemoteHead, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
 
 const base = 'a'.repeat(40);
@@ -98,6 +100,11 @@ describe('Action publication boundary', () => {
     expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: yarn(13), after: yarn(14) } }, identity)).not.toThrow();
     expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: yarn(13), after: yarn(14, 'evil.invalid') } }, identity)).toThrow(/registry|lockfile/i);
   });
+  it('X3 validates scoped Yarn Classic entries and canonical tarball fragments', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    const lock = (major: number) => `firebase-admin@^${major}.0.0:\n  version "${major}.0.0"\n  resolved "https://registry.npmjs.org/firebase-admin/-/firebase-admin-${major}.0.0.tgz#${'a'.repeat(40)}"\n  integrity sha512-QUJDRA==\n\n"@scope/helper@^${major}.0.0":\n  version "${major}.0.0"\n  resolved "https://registry.npmjs.org/@scope/helper/-/helper-${major}.0.0.tgz#${'b'.repeat(40)}"\n  integrity sha512-QUJDRA==\n`;
+    expect(() => validatePublishableBundle({ ...proposal, files: ['yarn.lock'] }, { 'yarn.lock': { before: lock(13), after: lock(14) } }, identity)).not.toThrow();
+  });
   it('X4 refuses source and configuration bytes not produced by the migration', () => {
     const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
     for (const file of ['test/setup.js', 'jest.config.js', 'pnpm-workspace.yaml']) {
@@ -105,6 +112,15 @@ describe('Action publication boundary', () => {
     }
     const before = "import * as admin from 'firebase-admin';\nadmin.initializeApp();\n";
     expect(() => validatePublishableBundle({ ...proposal, files: ['server.ts'] }, { 'server.ts': { before, after: 'require(\"evil\")\n' } }, identity)).toThrow(/migration|source/i);
+  });
+  it('X4 accepts the exact bytes of a normal Firebase source migration', () => {
+    const before = "import * as admin from 'firebase-admin';\nadmin.initializeApp();\n";
+    const project = new Project({ useInMemoryFileSystem: true, skipAddingFilesFromTsConfig: true, compilerOptions: { allowJs: true } });
+    project.createSourceFile('/proposal/server.ts', before);
+    const after = firebaseAdminV14.transform(project).fileUpdates?.[0]?.contents;
+    expect(after).toBeDefined();
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    expect(() => validatePublishableBundle({ ...proposal, files: ['server.ts'] }, { 'server.ts': { before, after: after! } }, identity)).not.toThrow();
   });
   it.skipIf(process.env.UPSTREAMFIX_RUN_LOCKFILE_NETWORK_TESTS !== '1')('X3 validates a real firebase-admin 13 to 14 npm lockfile upgrade', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-real-publish-lock-'));
