@@ -32,6 +32,12 @@ afterEach(async () => {
 });
 
 describe('declarative recipes', () => {
+  it.each(["admin.apps = [];", "admin.apps++;"])('W8 reports an SDK namespace-property write: %s', async (statement) => {
+    const cwd = await fixture(`import * as admin from 'firebase-admin';\n${statement}\n`);
+    const result = await runMigration(await loadRecipe(recipePath), { cwd, dryRun: true });
+    expect(result.manual.some((item) => /write|assign|mutat/i.test(item.reason))).toBe(true);
+    expect(result.proposedFiles).toHaveLength(0);
+  });
   it.each([
     "const admin = require('firebase-admin');\nmodule.exports = { admin };\nadmin.firestore();\n",
     "import * as admin from 'firebase-admin';\nexport { admin };\nadmin.firestore();\n",

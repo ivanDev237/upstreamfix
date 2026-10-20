@@ -208,6 +208,15 @@ function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationR
       }
       const propertyRule = findRule('namespace-property', member);
       if (!directCall && propertyRule) {
+        const parent = access.getParent();
+        const writesProperty = (Node.isBinaryExpression(parent) && parent.getLeft() === access
+          && /^(?:=|(?:\+|-|\*|\/|%|<<|>>|>>>|&|\||\^|\*\*|&&|\|\||\?\?)=)$/.test(parent.getOperatorToken().getText()))
+          || ((Node.isPrefixUnaryExpression(parent) || Node.isPostfixUnaryExpression(parent))
+            && [SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken].includes(parent.getOperatorToken()));
+        if (writesProperty) {
+          addManual(result, sourceFile, access, `The ${access.getText()} SDK property is written to; migrate this mutation manually.`);
+          continue;
+        }
         addEdit(access, propertyRule.to!, propertyRule.id);
         neededImport(propertyRule.from!, propertyRule.to!.replace(/\(\)$/, ''));
         continue;
