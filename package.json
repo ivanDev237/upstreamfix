@@ -1,6 +1,6 @@
 {
   "name": "upstreamfix",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Preview supported migrations for breaking SDK changes.",
   "repository": {
     "type": "git",
