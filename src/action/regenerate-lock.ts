@@ -6,6 +6,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { hasUnsafeDependencySpecs } from '../core/runner.js';
+import type { PackageManifest } from '../core/types.js';
 
 const execFile = promisify(execFileCallback);
 const npmRegistry = 'registry.npmjs.org';
@@ -13,6 +15,7 @@ const npmRegistry = 'registry.npmjs.org';
 /** Regenerate from reviewed manifests, with no client source, npm config, tokens, or lifecycle scripts. */
 export async function regenerateNpmLockfile(beforeLock: string, afterManifest: string, filename: 'package-lock.json' | 'npm-shrinkwrap.json', registryBefore?: string): Promise<string> {
   const original = JSON.parse(beforeLock) as { lockfileVersion?: unknown };
+  assertSafeNpmLockfileInputs(beforeLock, afterManifest);
   if (original.lockfileVersion !== 2 && original.lockfileVersion !== 3) throw new Error('Only npm v2 and v3 lockfiles can be regenerated.');
   if (beforeLock.length > 8 * 1024 * 1024 || afterManifest.length > 2 * 1024 * 1024) throw new Error('Lockfile regeneration input exceeds its size limit.');
   const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-publish-lock-'));
@@ -77,5 +80,25 @@ export async function regenerateNpmLockfile(beforeLock: string, afterManifest: s
     for (const socket of sockets) socket.destroy();
     if (proxy.listening) await new Promise<void>((resolve) => proxy.close(() => resolve()));
     await rm(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
+export function assertSafeNpmLockfileInputs(beforeLock: string, afterManifest: string): void {
+  const original = JSON.parse(beforeLock) as { lockfileVersion?: unknown };
+  const manifest = JSON.parse(afterManifest) as PackageManifest;
+  const oldPackages = (original as { packages?: Record<string, PackageManifest & { resolved?: unknown; link?: unknown }> }).packages;
+  const normalizedLockEntry = (entry: PackageManifest): PackageManifest => {
+    const copy = structuredClone(entry);
+    for (const field of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const) {
+      const dependencies = copy[field];
+      if (!dependencies) continue;
+      for (const [name, spec] of Object.entries(dependencies)) if (spec === '*') dependencies[name] = '0.0.0';
+    }
+    return copy;
+  };
+  if (hasUnsafeDependencySpecs(manifest) || Object.values(oldPackages ?? {}).some((entry) =>
+    hasUnsafeDependencySpecs(normalizedLockEntry(entry)) || entry.link === true
+    || (typeof entry.resolved === 'string' && !entry.resolved.startsWith('https://registry.npmjs.org/')))) {
+    throw new Error('Independent lockfile regeneration accepts only ordinary npm registry dependency specs.');
   }
 }

@@ -240,22 +240,25 @@ function rejectExecutableShadowing(before: Record<string, unknown>, after: Recor
     if (typeof value === 'string') return [packagePath.split('/').at(-1)!];
     return Object.keys(record(value) ?? {});
   };
+  const topLevel = (packagePath: string): boolean => /^node_modules\/(?:@[^/]+\/)?[^/]+$/.test(packagePath);
   const existing = new Set<string>();
   for (const [packagePath, entry] of Object.entries(oldPackages)) {
-    for (const name of binaries(entry, packagePath)) existing.add(name);
+    if (topLevel(packagePath)) for (const name of binaries(entry, packagePath)) existing.add(name);
   }
   const added = new Set<string>();
   for (const [packagePath, entry] of Object.entries(newPackages)) {
     const oldEntry = oldPackages[packagePath];
-    if (oldEntry && !isDeepStrictEqual(record(oldEntry)?.bin, record(entry)?.bin)) {
-      throw new Error('Bundle npm lockfile changes an existing executable package binary.');
+    if (oldEntry) {
+      const beforeNames = binaries(oldEntry, packagePath).sort();
+      const afterNames = binaries(entry, packagePath).sort();
+      if (!isDeepStrictEqual(beforeNames, afterNames)) throw new Error('Bundle npm lockfile changes an existing executable command name.');
     }
     if (oldEntry) continue;
     for (const name of binaries(entry, packagePath)) {
-      if (dangerous.has(name.toLowerCase()) || existing.has(name) || added.has(name)) {
+      if (dangerous.has(name.toLowerCase()) || (topLevel(packagePath) && (existing.has(name) || added.has(name)))) {
         throw new Error('Bundle npm lockfile adds an executable that shadows an existing command.');
       }
-      added.add(name);
+      if (topLevel(packagePath)) added.add(name);
     }
   }
 }
@@ -302,7 +305,7 @@ function sameList(left: string[], right: string[]): boolean {
 
 /** A fenced block prevents GitHub from parsing mentions, autolinks, HTML or client Markdown. */
 function quotedUntrustedReport(report: string): string {
-  const safe = maskSecrets(sanitizeTerminalText(report));
+  const safe = maskSecrets(sanitizeTerminalText(report)).replace(/&#(91|93|124|96|33);/g, (_entity, code: string) => String.fromCharCode(Number(code)));
   let longest = 0;
   for (const [run] of safe.matchAll(/~+/g)) longest = Math.max(longest, run.length);
   const fence = '~'.repeat(Math.max(4, longest + 1));

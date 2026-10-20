@@ -7,7 +7,7 @@ import { runRealSdkNpm } from './helpers/real-sdk-command.js';
 import { Project } from 'ts-morph';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 import { validateProposal, validateProposalEnvelope, validatePublishableBundle, parseExactRemoteHead, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
-import { regenerateNpmLockfile } from '../src/action/regenerate-lock.js';
+import { assertSafeNpmLockfileInputs, regenerateNpmLockfile } from '../src/action/regenerate-lock.js';
 
 const base = 'a'.repeat(40);
 const commit = 'b'.repeat(40);
@@ -18,6 +18,30 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('Z4 permits a nested executable with an existing name and a moved entry point', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    const before = JSON.stringify({ lockfileVersion: 3, packages: { '': {}, 'node_modules/mime': { bin: { mime: 'old.js' } } } });
+    const after = JSON.stringify({ lockfileVersion: 3, packages: { '': {}, 'node_modules/mime': { bin: { mime: 'new.js' } }, 'node_modules/dep/node_modules/mime': { bin: { mime: 'cli.js' } } } });
+    expect(() => validatePublishableBundle({ ...proposal, files: ['package-lock.json'] }, { 'package-lock.json': { before, after } }, identity, { 'package-lock.json': after })).not.toThrow();
+  });
+  it('Z4 refuses non-registry dependency specs before independent lockfile regeneration', async () => {
+    const before = JSON.stringify({ lockfileVersion: 3, packages: { '': {} } });
+    await expect(regenerateNpmLockfile(before, JSON.stringify({ dependencies: { x: 'git+https://example.test/x.git' } }), 'package-lock.json')).rejects.toThrow(/registry|dependency|spec/i);
+  });
+  it('Z4 accepts wildcard transitive dependencies from a real Firebase lockfile', () => {
+    const before = readFileSync(new URL('./fixtures/firebase-lockfiles/13-to-14-before.json', import.meta.url), 'utf8');
+    expect(() => assertSafeNpmLockfileInputs(before, JSON.stringify({ dependencies: { 'firebase-admin': '^14.0.0' } }))).not.toThrow();
+  });
+  it('Z4 displays previously escaped punctuation inside the quoted report', async () => {
+    let body = '';
+    const publisher: ProposalPublisher = {
+      findPullRequest: async () => undefined, pushBranch: async () => undefined,
+      openPullRequest: async (value) => { body = value; }, updatePullRequest: async () => undefined,
+      closePullRequest: async () => undefined, upsertIssue: async () => undefined, closeIssue: async () => undefined,
+    };
+    await reconcileProposal({ ...proposal, report: 'array&#91;0&#93; &#124; test&#33;' }, publisher);
+    expect(body).toContain('array[0] | test!');
+  });
   it('Z2 accepts a recent lockfile cutoff and rejects stale or future proposal cutoffs', () => {
     const timestamp = new Date(Date.now() - 10 * 60_000).toISOString();
     expect(() => validateProposalEnvelope({ ...proposal, registryBefore: timestamp }, base)).not.toThrow();
