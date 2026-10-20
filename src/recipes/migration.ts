@@ -310,6 +310,14 @@ function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationR
     if (result.manual.length > initialManual) continue;
     const changed = applyEdits(source, edits);
     if (changed === source) continue;
+    const parsePath = file.replace(/(\.[cm]?[jt]sx?)$/i, '.upstreamfix-parse$1');
+    const parsed = project.createSourceFile(parsePath, changed, { overwrite: true });
+    const hasSyntaxErrors = ((parsed.compilerNode as unknown as { parseDiagnostics?: unknown[] }).parseDiagnostics ?? []).length > 0;
+    project.removeSourceFile(parsed);
+    if (hasSyntaxErrors) {
+      addManual(result, sourceFile, sourceFile, 'The generated source has syntax errors; review this migration manually.');
+      continue;
+    }
     for (const alias of aliases) {
       const escaped = alias.name.getText().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       if (new RegExp(`(?<![\\w$])${escaped}\\s*[.\\[]`).test(changed)) {

@@ -63,6 +63,10 @@ describe('declarative recipes', () => {
     expect(result.manual.length).toBeGreaterThan(0);
     expect(result.proposedFiles).toHaveLength(0);
   });
+  it.each(['default', 'eval', 'arguments', 'require'])('V4 rejects unsafe generated identifier %s', async (target) => {
+    const template = await readFile(recipePath, 'utf8');
+    expect(() => parseRecipe(template.replace('to: getFirestore', `to: ${target}`))).toThrow(/identifier|reserved|unsafe/i);
+  });
   it.each([
     "import * as admin from 'firebase-admin';\nadmin.initializeApp();\nconst db = admin.firestore();\n",
     "import * as admin from 'firebase-admin';\nconst app = admin.app();\nconst apps = admin.apps;\nconst auth = admin.auth();\n",

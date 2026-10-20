@@ -5,6 +5,7 @@ import { recipeSchema } from './schema.js';
 const MAX_RECIPE_BYTES = 64 * 1024;
 const SAFE_PACKAGE = /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$/;
 const SAFE_EXPORT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+const FORBIDDEN_TARGET = new Set(['arguments', 'eval', 'require', 'default', 'import', 'export', 'class', 'function', 'const', 'let', 'var', 'return', 'new', 'await', 'yield', 'this', 'super', 'null', 'true', 'false', 'switch', 'case', 'if', 'else', 'while', 'for', 'do', 'try', 'catch', 'finally', 'throw', 'delete', 'void', 'typeof', 'instanceof', 'in', 'of', 'extends', 'interface', 'enum', 'type', 'namespace', 'package', 'private', 'protected', 'public', 'static', 'implements']);
 const SAFE_MODULE = /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)(?:\/[a-z0-9][a-z0-9._-]*)*$/;
 const RULE_KINDS = new Set(['export-rename', 'import-move', 'namespace-call', 'chained-namespace-call', 'namespace-property', 'method-rename', 'manual-namespace-call']);
 
@@ -130,6 +131,7 @@ function validateRecipe(value: unknown): RecipeDefinition {
     }
     if (rule.name && !SAFE_EXPORT.test(String(rule.name))) fail(`${location}.name`, 'expected a JavaScript identifier.');
     if (rule.to && !SAFE_EXPORT.test(String(rule.to)) && !(rule.kind === 'namespace-property' && /^[$A-Za-z_][$\w]*\(\)$/.test(String(rule.to)))) fail(`${location}.to`, 'expected an identifier (or a zero-argument call for namespace-property).');
+    if (rule.to && FORBIDDEN_TARGET.has(String(rule.to).replace(/\(\)$/, ''))) fail(`${location}.to`, 'reserved or unsafe generated identifier.');
     if (rule.from && !SAFE_MODULE.test(String(rule.from))) fail(`${location}.from`, 'expected a package subpath, without traversal or URL.');
     if (rule.from && !(String(rule.from) === record.package || String(rule.from).startsWith(`${record.package}/`))) fail(`${location}.from`, 'must stay within the recipe package.');
     if (rule.kind === 'manual-namespace-call' && String(rule.message).length > 300) fail(`${location}.message`, 'must be at most 300 characters.');
