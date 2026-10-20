@@ -1,11 +1,12 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
-import { writeMigrationOnBranch } from '../src/core/write-branch.js';
+import { assertChangedSourcesUseTargetSdk, writeMigrationOnBranch } from '../src/core/write-branch.js';
+import type { RunOutcome } from '../src/core/runner.js';
 
 const execFile = promisify(execFileCallback);
 const roots: string[] = [];
@@ -50,6 +51,23 @@ afterEach(async () => {
 });
 
 describe('verified Git branch writes', () => {
+  it('W4 refuses a symlinked package manifest without exposing its target contents', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-manifest-link-'));
+    roots.push(root);
+    const nested = path.join(root, 'src');
+    await mkdir(nested);
+    const secret = path.join(root, 'secret.txt');
+    await writeFile(secret, 'root:x:0:0:secret-data');
+    await symlink(secret, path.join(nested, 'package.json'));
+    const outcome: RunOutcome = {
+      changes: [], manual: [], filesChanged: ['src/index.js'], fileUpdates: [],
+      manifestNotes: [], proposedDiff: [], proposedFiles: [],
+    };
+    const message = await assertChangedSourcesUseTargetSdk(root, firebaseAdminV14, outcome)
+      .then(() => '', (error: unknown) => error instanceof Error ? error.message : String(error));
+    expect(message).toContain('Unsafe package.json');
+    expect(message).not.toContain('root:x:0:0');
+  });
   it('commits a changed file larger than the former Git output buffer', async () => {
     const source = `// ${'x'.repeat(2_200_000)}\nconst admin = require('firebase-admin');\nadmin.firestore();\n`;
     const cwd = await makeRepository(source);

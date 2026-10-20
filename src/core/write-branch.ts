@@ -1,11 +1,11 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { Migration, PackageManifest } from './types.js';
 import { runMigration, type RunOutcome } from './runner.js';
-import { applyProposedFiles, verifyProposedMigration, type VerificationOptions, type VerificationResult } from './verify.js';
+import { applyProposedFiles, readRegularFile, verifyProposedMigration, type VerificationOptions, type VerificationResult } from './verify.js';
 import { registerTemporaryCleanup } from './process-cleanup.js';
 import { parseManifest } from './manifest.js';
 
@@ -152,7 +152,7 @@ async function removeUncommittedBranch(repositoryRoot: string, branch: string, o
 }
 
 /** Do not commit vNext source code while its containing manifest still installs vOld. */
-async function assertChangedSourcesUseTargetSdk(projectRoot: string, migration: Migration, outcome: RunOutcome): Promise<void> {
+export async function assertChangedSourcesUseTargetSdk(projectRoot: string, migration: Migration, outcome: RunOutcome): Promise<void> {
   const proposed = new Map(outcome.proposedFiles.map((file) => [path.resolve(projectRoot, file.relativePath), file.after]));
   const targetPattern = new RegExp(`^\\s*[~^]?${migration.toMajor}(?:\\.(?:\\d+|x|\\*)){0,2}\\s*$`, 'i');
   for (const relativeFile of outcome.filesChanged) {
@@ -166,9 +166,14 @@ async function assertChangedSourcesUseTargetSdk(projectRoot: string, migration: 
     let foundRange: string | undefined;
     while (directory === projectRoot || directory.startsWith(`${projectRoot}${path.sep}`)) {
       const manifestFile = path.join(directory, 'package.json');
-      const raw = proposed.get(manifestFile) ?? await readFile(manifestFile, 'utf8').catch(() => undefined);
+      const raw = proposed.get(manifestFile) ?? await readRegularFile(manifestFile).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return undefined;
+        throw new Error('Unsafe package.json: manifest is not a regular file or cannot be read safely.');
+      });
       if (raw) {
-        const manifest = parseManifest<PackageManifest>(raw);
+        let manifest: PackageManifest;
+        try { manifest = parseManifest<PackageManifest>(raw); }
+        catch { throw new Error('Unsafe package.json: manifest could not be parsed safely.'); }
         const ranges = (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
           .map((section) => manifest[section]?.[migration.packageName])
           .filter((range): range is string => typeof range === 'string');
