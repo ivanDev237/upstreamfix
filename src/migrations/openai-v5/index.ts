@@ -195,6 +195,17 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     }
   }
   for (const constructor of file.getDescendantsOfKind(SyntaxKind.NewExpression)) {
+    if (imported.has(constructor.getExpression().getText())) {
+      const option = constructor.getArguments()[0];
+      const resolved = option && Node.isIdentifier(option) && option.getSymbol()
+        ? variableInitializers.get(option.getSymbol()!) : option;
+      if (resolved && Node.isObjectLiteralExpression(resolved)) {
+        for (const property of resolved.getProperties()) {
+          if ((Node.isPropertyAssignment(property) || Node.isShorthandPropertyAssignment(property)) && property.getName() === 'httpAgent')
+            addManual(result, file, property, 'httpAgent uses a different transport from fetchOptions in OpenAI v5; review this aliased constructor option manually.');
+        }
+      }
+    }
     const parent = constructor.getParent();
     const assignedKnownClient = parent && Node.isBinaryExpression(parent) && parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken
       && Node.isIdentifier(parent.getLeft()) && Boolean(parent.getLeft().getSymbol() && clients.has(parent.getLeft().getSymbol()!));
@@ -230,7 +241,7 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     }
     const moved = MOVED_IMPORTS.get(specifier);
     if (moved) addEdit(edits, file, declaration.getModuleSpecifier(), `'${moved}'`, 'moved-import');
-    else if (specifier === 'openai/src' || specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
+    else if (specifier === 'openai/shims' || specifier === 'openai/src' || specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
       addManual(result, file, declaration, 'OpenAI v5 removes this private or shim import; review the replacement and runtime configuration.');
     if (specifier.startsWith('openai/resources/') && declaration.getNamedImports().some((entry) => /Page$/.test(entry.getName()) && !declaration.isTypeOnly() && !entry.isTypeOnly()))
       addManual(result, file, declaration, 'OpenAI v5 converts resource-specific Page classes to type aliases; review runtime uses before upgrading.');
@@ -269,8 +280,22 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       const specifier = argument?.getText().replace(/^['"]|['"]$/g, '');
       const moved = specifier ? MOVED_IMPORTS.get(specifier) : undefined;
       if (moved && argument) addEdit(edits, file, argument, `'${moved}'`, 'moved-import');
+      if (specifier === 'openai/uploads') {
+        const declaration = call.getParentIfKind(SyntaxKind.VariableDeclaration);
+        const binding = declaration?.getNameNode();
+        if (binding && Node.isObjectBindingPattern(binding)) {
+          for (const element of binding.getElements()) {
+            const name = element.getPropertyNameNode()?.getText() ?? element.getNameNode().getText();
+            if (REMOVED_UPLOAD_EXPORTS.has(name))
+              addManual(result, file, element, `OpenAI v5 removes uploads export ${name}; review this CommonJS binding manually.`);
+          }
+        }
+      }
     }
     if (!Node.isPropertyAccessExpression(expression)) continue;
+    if (expression.getName() === 'withResponse' || expression.getName() === 'asResponse') {
+      addManual(result, file, call, 'OpenAI v5 Web response helpers return standard Web response types; review Headers and ReadableStream handling.');
+    }
     const receiver = rootIdentifier(expression);
     const onRunner = Boolean(receiver?.getSymbol() && runners.has(receiver.getSymbol()!)) || expression.getText().includes('.runTools(');
     if (onRunner && expression.getName() === 'on') {

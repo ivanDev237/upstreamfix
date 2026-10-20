@@ -268,6 +268,19 @@ client.vectorStores.files.retrieve('store', 'file');
     expect(outcome.manual.map((item) => item.reason).join(' ')).toContain('openai/core');
   });
 
+  it('flags aliased httpAgent configuration and removed uploads exports in CommonJS', () => {
+    const outcome = migrate("import OpenAI from 'openai'; const options = { httpAgent: agent }; const client = new OpenAI(options); const { BlobPart } = require('openai/uploads');");
+    expect(outcome.manual.map((item) => item.reason).join(' ')).toContain('httpAgent');
+    expect(outcome.manual.map((item) => item.reason).join(' ')).toContain('BlobPart');
+    expect(outcome.fileUpdates).toEqual([]);
+  });
+
+  it('flags the exact openai/shims import and Web response helper use', () => {
+    const outcome = migrate("import 'openai/shims'; import OpenAI from 'openai'; const client = new OpenAI(); const value = client.files.list().withResponse();");
+    expect(outcome.manual.map((item) => item.reason).join(' ')).toContain('shim');
+    expect(outcome.manual.map((item) => item.reason).join(' ')).toContain('Web');
+  });
+
   it('withholds multi-argument del calls whose v5 path parameters changed', () => {
     const outcome = migrate(`import OpenAI from 'openai';
 const client = new OpenAI();
