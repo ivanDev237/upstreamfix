@@ -14,7 +14,7 @@ const execFile = promisify(execFileCallback);
 export interface WriteBranchOptions {
   cwd: string;
   allowDirty?: boolean;
-  nodeRuntime?: 20 | 22;
+  nodeRuntime?: number;
   allowYarnLockInstall?: boolean;
   timeoutMs?: number;
   excludedDirectories?: readonly string[];
@@ -175,10 +175,10 @@ async function assertChangedSourcesUseTargetSdk(projectRoot: string, migration: 
         if (ranges.length > 0) {
           foundRange = ranges[0];
           if (ranges.some((range) => !targetPattern.test(range))) {
-            if (migration.id === 'firebase-admin@14' && !manifest.engines?.node) {
+            if (!migration.declarativeRecipe && migration.id === 'firebase-admin@14' && !manifest.engines?.node) {
               throw new Error(`${relativeFile} cannot be committed: firebase-admin v14 requires Node.js 22 or newer. Add \"engines\": { \"node\": \">=22\" } to ${path.relative(projectRoot, manifestFile)}, or pass --node-runtime 22 to confirm the deployment runtime and include that declaration in the migration commit.`);
             }
-            if (migration.id === 'firebase-admin@14') {
+            if (!migration.declarativeRecipe && migration.id === 'firebase-admin@14') {
               throw new Error(`${relativeFile} cannot be committed: ${path.relative(projectRoot, manifestFile)} still declares ${migration.packageName} ${ranges.join(', ')}. Its engines.node range (${manifest.engines?.node}) may include Node.js versions below 22; review and update the range to guarantee Node.js 22 or newer, then preview again.`);
             }
             throw new Error(`${relativeFile} cannot be committed: ${path.relative(projectRoot, manifestFile)} does not declare ${migration.packageName} v${migration.toMajor} in every dependency section.`);

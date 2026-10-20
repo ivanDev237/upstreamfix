@@ -1,0 +1,63 @@
+# A declarative subset of the built-in firebase-admin v14 migration.
+schemaVersion: 1
+id: firebase-admin@14
+package: firebase-admin
+fromMajor: 13
+toMajor: 14
+releasedAt: 2026-06-08
+title: firebase-admin v13 → v14 (declarative subset)
+guideUrl: https://firebase.google.com/docs/admin/migrate-node-v10
+nodeMajor: 22
+rules:
+  - kind: namespace-call
+    id: service-getter
+    name: firestore
+    to: getFirestore
+    from: firebase-admin/firestore
+  - kind: namespace-call
+    id: service-getter
+    name: auth
+    to: getAuth
+    from: firebase-admin/auth
+  - kind: namespace-call
+    id: service-getter
+    name: database
+    to: getDatabase
+    from: firebase-admin/database
+  - kind: namespace-call
+    id: service-getter
+    name: storage
+    to: getStorage
+    from: firebase-admin/storage
+  - kind: chained-namespace-call
+    id: app-service-getter
+    via: app
+    name: firestore
+    to: getFirestore
+    from: firebase-admin/firestore
+  - kind: chained-namespace-call
+    id: app-service-getter
+    via: app
+    name: auth
+    to: getAuth
+    from: firebase-admin/auth
+  - kind: namespace-call
+    id: app-lifecycle
+    name: initializeApp
+    to: initializeApp
+    from: firebase-admin/app
+  - kind: namespace-call
+    id: app-lifecycle
+    name: app
+    to: getApp
+    from: firebase-admin/app
+    noArguments: true
+  - kind: namespace-property
+    id: app-lifecycle
+    name: apps
+    to: getApps()
+    from: firebase-admin/app
+  - kind: manual-namespace-call
+    id: removed-instance-id
+    name: instanceId
+    message: 'Instance ID was removed in v14: migrate to getInstallations() from firebase-admin/installations.'

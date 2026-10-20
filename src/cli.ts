@@ -15,6 +15,7 @@ import { diffPublishedApi } from './core/diff-api.js';
 import { generateTypeFixtures } from './core/type-fixtures.js';
 import { analyzeImpact } from './core/impact.js';
 import { probeProject } from './core/probe.js';
+import { loadRecipe } from './recipes/index.js';
 
 function existingMigration(value: string): string {
   if (!migrations.some((migration) => migration.id === value)) {
@@ -108,7 +109,8 @@ export function createProgram(): Command {
   program
     .command('migrate')
     .description('Run a supported migration against a project.')
-    .argument('<migration>', 'migration identifier, for example firebase-admin@14', existingMigration)
+    .argument('[migration]', 'catalog migration identifier, for example firebase-admin@14', existingMigration)
+    .option('--recipe <file>', 'experimental: load a validated, declarative YAML migration recipe')
     .option('-C, --cwd <directory>', 'project directory to migrate', process.cwd())
     .option('--write', 'apply verified changes in a new Git branch and create a commit')
     .option('--allow-dirty', 'allow a dirty working tree; the migration branch is based on committed HEAD')
@@ -118,10 +120,11 @@ export function createProgram(): Command {
     .option('--verify-timeout <seconds>', 'maximum time per verification command', parsePositiveInteger)
     .option('--allow-yarn-lock-install', 'allow a full Yarn Classic installation to regenerate yarn.lock (estimated 50–400 MB)')
     .option('--report <file>', 'write the Markdown report to this explicit path (relative paths use --cwd)')
-    .action(async (migrationId: string, options: { cwd: string; write?: boolean; allowDirty?: boolean; verify?: boolean; experimental?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: 20 | 22; allowYarnLockInstall?: boolean }) => {
-      const migration = migrations.find((candidate) => candidate.id === migrationId)!;
+    .action(async (migrationId: string | undefined, options: { cwd: string; recipe?: string; write?: boolean; allowDirty?: boolean; verify?: boolean; experimental?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: number; allowYarnLockInstall?: boolean }) => {
+      if (Boolean(migrationId) === Boolean(options.recipe)) throw new Error('Choose exactly one catalog migration identifier or --recipe <file>.');
+      const migration = options.recipe ? await loadRecipe(path.resolve(options.recipe)) : migrations.find((candidate) => candidate.id === migrationId)!;
       if (migration.experimental && !options.experimental) throw new Error(`${migration.id} is experimental. Re-run with --experimental after reviewing its limits.`);
-      if (options.nodeRuntime && !((options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (options.nodeRuntime === 20 && migration.id === 'openai@5'))) throw new Error('--node-runtime 22 applies to firebase-admin@14; --node-runtime 20 applies to openai@5.');
+      if (options.nodeRuntime && !((!migration.declarativeRecipe && options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (!migration.declarativeRecipe && options.nodeRuntime === 20 && migration.id === 'openai@5') || options.nodeRuntime === migration.requiredNodeMajor)) throw new Error('--node-runtime 22 applies to firebase-admin@14; --node-runtime 20 applies to openai@5; recipes require their declared nodeMajor.');
       const cwd = path.resolve(options.cwd);
       if (options.allowYarnLockInstall) console.log('Yarn Classic lockfile regeneration may download about 50–400 MB without a warm cache.');
       if (options.allowDirty && !options.write) throw new Error('--allow-dirty can only be used together with --write.');
@@ -243,9 +246,10 @@ function parsePositiveInteger(value: string): number {
   return parsed;
 }
 
-function parseNodeRuntime(value: string): 20 | 22 {
-  if (value !== '20' && value !== '22') throw new InvalidArgumentError('Use --node-runtime 22 for firebase-admin@14 or --node-runtime 20 for openai@5.');
-  return Number(value) as 20 | 22;
+function parseNodeRuntime(value: string): number {
+  const major = Number(value);
+  if (!Number.isSafeInteger(major) || major < 1 || major > 99) throw new InvalidArgumentError('--node-runtime must be a Node.js major from 1 to 99.');
+  return major;
 }
 
 let invokedPath = '';

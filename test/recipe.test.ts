@@ -1,0 +1,327 @@
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile as execFileCallback } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
+import { afterEach, describe, expect, it } from 'vitest';
+import { Project } from 'ts-morph';
+import { runMigration } from '../src/core/runner.js';
+import { createProgram } from '../src/cli.js';
+import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
+import { loadRecipe, parseRecipe } from '../src/recipes/index.js';
+import { recipeSchema } from '../src/recipes/schema.js';
+import { verifyProposedMigration } from '../src/core/verify.js';
+import { renderMarkdownReport } from '../src/core/report.js';
+
+const directories: string[] = [];
+const recipePath = path.resolve('docs/recipes/firebase-admin-v14.yml');
+const execFile = promisify(execFileCallback);
+
+async function fixture(source: string): Promise<string> {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-recipe-'));
+  directories.push(cwd);
+  await writeFile(path.join(cwd, 'package.json'), JSON.stringify({
+    dependencies: { 'firebase-admin': '^13.0.0' }, engines: { node: '>=22' },
+  }, null, 2) + '\n');
+  await writeFile(path.join(cwd, 'server.ts'), source);
+  return cwd;
+}
+
+afterEach(async () => {
+  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+describe('declarative recipes', () => {
+  it.each([
+    "const admin = require('firebase-admin');\nmodule.exports = { admin };\nadmin.firestore();\n",
+    "import * as admin from 'firebase-admin';\nexport { admin };\nadmin.firestore();\n",
+    "import * as admin from 'firebase-admin';\nexport const deps = { admin };\nadmin.firestore();\n",
+  ])('V1 preserves an SDK alias used as a value %#', async (source) => {
+    const cwd = await fixture(source);
+    const result = await runMigration(await loadRecipe(recipePath), { cwd, dryRun: true });
+    expect(result.manual.length).toBeGreaterThan(0);
+    expect(result.proposedFiles).toHaveLength(0);
+  });
+  it.each([
+    "const admin = require('firebase-admin'), x = 1;\nadmin.firestore(); console.log(x);\n",
+    "export const admin = require('firebase-admin');\nadmin.firestore();\n",
+  ])('V2 preserves multi-declaration and exported bindings %#', async (source) => {
+    const cwd = await fixture(source);
+    const result = await runMigration(await loadRecipe(recipePath), { cwd, dryRun: true });
+    expect(result.manual.length).toBeGreaterThan(0);
+    expect(result.proposedFiles).toHaveLength(0);
+  });
+  it.each([
+    "const { firestore } = require('firebase-admin');\nfirestore();\n",
+    "const admin = require('firebase-admin').default;\nadmin.firestore();\n",
+    "import admin = require('firebase-admin');\nadmin.firestore();\n",
+    "async function load() { return await import('firebase-admin'); }\n",
+    "import 'firebase-admin';\n",
+    "import { credential } from 'firebase-admin';\ncredential.applicationDefault();\n",
+    "import admin, { firestore } from 'firebase-admin';\nadmin.firestore(); firestore();\n",
+  ])('V3 reports unsupported package references %#', async (source) => {
+    const cwd = await fixture(source);
+    const result = await runMigration(await loadRecipe(recipePath), { cwd, dryRun: true });
+    expect(result.manual.length).toBeGreaterThan(0);
+    expect(result.proposedFiles).toHaveLength(0);
+  });
+  it.each(['default', 'eval', 'arguments', 'require'])('V4 rejects unsafe generated identifier %s', async (target) => {
+    const template = await readFile(recipePath, 'utf8');
+    expect(() => parseRecipe(template.replace('to: getFirestore', `to: ${target}`))).toThrow(/identifier|reserved|unsafe/i);
+  });
+  it('V5 escapes an untrusted official guide URL in Markdown', async () => {
+    const template = await readFile(recipePath, 'utf8');
+    const recipe = parseRecipe(template.replace('https://firebase.google.com/docs/admin/migrate-node-v10', 'https://example.org/guide?x=[click](https://attacker.test)'));
+    const cwd = await fixture('');
+    const report = renderMarkdownReport(recipe, await runMigration(recipe, { cwd, dryRun: true }), true);
+    expect(report).not.toContain('[click](https://attacker.test)');
+    expect(report).toContain('Official guide: https');
+  });
+  it.each(['\u202e', '\u0085', '\u2067'])('V6 rejects invisible control characters %#', async (invisible) => {
+    const template = await readFile(recipePath, 'utf8');
+    expect(() => parseRecipe(template.replace('Instance ID was removed', `Instance ID ${invisible}was removed`))).toThrow(/control|invisible/i);
+  });
+  it.each([
+    "import * as admin from 'firebase-admin';\nadmin.initializeApp();\nconst db = admin.firestore();\n",
+    "import * as admin from 'firebase-admin';\nconst app = admin.app();\nconst apps = admin.apps;\nconst auth = admin.auth();\n",
+    "const admin = require('firebase-admin');\nadmin.initializeApp();\nconst db = admin.firestore();\n",
+    "import * as admin from 'firebase-admin';\nconst db = admin.app().firestore();\n",
+    "import admin from 'firebase-admin';\nconst app = admin.app();\n",
+    "#!/usr/bin/env node\n'use strict';\nconst admin = require('firebase-admin');\nconst db = admin.firestore();\n",
+  ])('matches Firebase service-getter and app-lifecycle output exactly for fixture %#', async (source) => {
+    const cwd = await fixture(source);
+    const recipe = await loadRecipe(recipePath);
+    const expected = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    const actual = await runMigration(recipe, { cwd, dryRun: true });
+    expect(actual).toEqual(expected);
+  });
+
+  it('rejects syntax errors and nested overlapping edits without rewriting the file', async () => {
+    const recipe = await loadRecipe(recipePath);
+    const bad = await fixture("import * as admin from 'firebase-admin';\nconst broken = ;\nadmin.firestore();\n");
+    const badResult = await runMigration(recipe, { cwd: bad, dryRun: true });
+    expect(badResult.manual.some((item) => item.reason.includes('syntax errors'))).toBe(true);
+    expect(badResult.proposedFiles).toHaveLength(0);
+    const overlapping = await fixture("import * as admin from 'firebase-admin';\nadmin.app().database(admin.app().options.databaseURL);\n");
+    const result = await runMigration(recipe, { cwd: overlapping, dryRun: true });
+    expect(result.manual.some((item) => /overlap|no safe recipe mapping|nested API|arguments/.test(item.reason))).toBe(true);
+    expect(result.proposedFiles).toHaveLength(0);
+  });
+
+  it('reports always-manual patterns without changing the dependency', async () => {
+    const recipe = await loadRecipe(recipePath);
+    const cwd = await fixture("import * as admin from 'firebase-admin';\nadmin.instanceId();\n");
+    const result = await runMigration(recipe, { cwd, dryRun: true });
+    expect(result.manual.map((item) => item.reason).join(' ')).toContain('Instance ID');
+    expect(result.proposedFiles).toHaveLength(0);
+  });
+
+  it('rejects malformed and dangerous YAML with a bounded parser', async () => {
+    expect(() => parseRecipe('package: x\npackage: y\n')).toThrow(/duplicate/i);
+    expect(() => parseRecipe('package: &anchor x\n')).toThrow(/unsupported|anchor/i);
+    expect(() => parseRecipe('package: !!js/function foo\n')).toThrow(/unsupported|tag/i);
+    expect(() => parseRecipe('x'.repeat(70_000))).toThrow(/size/i);
+    expect(() => parseRecipe('package: ../evil\n')).toThrow(/package|schema/i);
+  });
+
+  it('supports a recipe passed through the experimental CLI flag', async () => {
+    const cwd = await fixture("import * as admin from 'firebase-admin';\nadmin.firestore();\n");
+    const printed: string[] = [];
+    const previous = console.log;
+    console.log = (...args) => { printed.push(args.map(String).join(' ')); };
+    try {
+      await createProgram().parseAsync(['node', 'upstreamfix', 'migrate', '--recipe', recipePath, '--experimental', '--cwd', cwd]);
+    } finally {
+      console.log = previous;
+    }
+    expect(printed.join('\n')).toContain('service-getter');
+    expect(await readFile(path.join(cwd, 'server.ts'), 'utf8')).toContain('admin.firestore()');
+  });
+  it('V7 requires an explicit experimental opt-in for a recipe', async () => {
+    const cwd = await fixture("import * as admin from 'firebase-admin';\nadmin.firestore();\n");
+    await expect(createProgram().parseAsync(['node', 'upstreamfix', 'migrate', '--recipe', recipePath, '--cwd', cwd])).rejects.toThrow(/experimental/i);
+  });
+  it('V7 is never less cautious than the built-in Firebase migration across 65 cases', async () => {
+    const recipe = await loadRecipe(recipePath);
+    const bindings = [
+      "import * as admin from 'firebase-admin';", "import admin from 'firebase-admin';",
+      "const admin = require('firebase-admin');", "const admin = require('firebase-admin'), x = 1;",
+      "export const admin = require('firebase-admin');", "const { firestore } = require('firebase-admin');",
+      "const admin = require('firebase-admin').default;", "import admin = require('firebase-admin');",
+      "import { credential } from 'firebase-admin';", "import admin, { firestore } from 'firebase-admin';",
+      "import 'firebase-admin';", "async function dynamic() { return import('firebase-admin'); }",
+      "import * as admin from 'firebase-admin'; export { admin };",
+    ];
+    const usages = [
+      'admin.firestore();', 'admin.initializeApp();', 'const app = admin.app();',
+      'module.exports = { admin };', 'export const deps = { admin };',
+    ];
+    expect(bindings.length * usages.length).toBeGreaterThanOrEqual(60);
+    for (const [bindingIndex, binding] of bindings.entries()) {
+      for (const [usageIndex, usage] of usages.entries()) {
+        const source = `${binding}\n${usage}\n`;
+        const run = (migration: typeof recipe) => {
+          const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { allowJs: true } });
+          project.createSourceFile('/server.ts', source);
+          return migration.transform(project);
+        };
+        const expected = run(firebaseAdminV14);
+        const actual = run(recipe);
+        if (actual.manual.length > 0) continue;
+        expect({ manual: actual.manual.length, files: actual.filesChanged.length, text: actual.fileUpdates?.[0]?.contents ?? source },
+          `case ${bindingIndex}/${usageIndex}: ${source}`)
+          .toEqual({ manual: expected.manual.length, files: expected.filesChanged.length, text: expected.fileUpdates?.[0]?.contents ?? source });
+      }
+    }
+  }, 120_000);
+  it.each([
+    "const { OldClient } = require('acme-sdk');\nOldClient();\n",
+    "const { helper } = require('acme-sdk');\nhelper();\n",
+    "const client = require('acme-sdk');\nclient.fetchOld();\n",
+    "import * as client from 'acme-sdk';\nclient.fetchOld();\n",
+  ])('V7 conservatively reports unsupported CommonJS and namespace rule forms %#', async (source) => {
+    const recipe = parseRecipe(`schemaVersion: 1
+id: acme-sdk@2
+package: acme-sdk
+fromMajor: 1
+toMajor: 2
+releasedAt: 2026-10-19
+title: Acme SDK v2
+guideUrl: https://example.org/upgrade
+nodeMajor: 22
+rules:
+  - kind: export-rename
+    id: rename-client
+    name: OldClient
+    to: NewClient
+  - kind: import-move
+    id: move-helper
+    name: helper
+    from: acme-sdk/helpers
+  - kind: method-rename
+    id: rename-method
+    name: fetchOld
+    to: fetchNew
+    receiver: client
+`);
+    const cwd = await fixture(source);
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { 'acme-sdk': '^1.0.0' }, engines: { node: '>=22' } }));
+    const outcome = await runMigration(recipe, { cwd, dryRun: true });
+    expect(outcome.manual.length).toBeGreaterThan(0);
+    expect(outcome.proposedFiles).toHaveLength(0);
+  });
+  it('V7 does not inherit catalog runtime behavior from a matching recipe ID', async () => {
+    const yaml = (await readFile(recipePath, 'utf8')).replace('nodeMajor: 22', 'nodeMajor: 20');
+    const recipe = parseRecipe(yaml);
+    const cwd = await fixture("import * as admin from 'firebase-admin';\nadmin.firestore();\n");
+    await expect(runMigration(recipe, { cwd, dryRun: true, nodeRuntime: 22 })).rejects.toThrow(/declared nodeMajor/);
+  });
+
+  it('applies export renames, import moves and method renames without changing local names', async () => {
+    const recipe = parseRecipe(`schemaVersion: 1
+id: acme-sdk@2
+package: acme-sdk
+fromMajor: 1
+toMajor: 2
+releasedAt: 2026-10-19
+title: Acme SDK v2
+guideUrl: https://example.org/upgrade
+nodeMajor: 22
+rules:
+  - kind: export-rename
+    id: rename-client
+    name: OldClient
+    to: NewClient
+  - kind: import-move
+    id: move-helper
+    name: helper
+    from: acme-sdk/helpers
+  - kind: method-rename
+    id: rename-method
+    name: fetchOld
+    to: fetchNew
+    receiver: client
+`);
+    const cwd = await fixture('');
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { 'acme-sdk': '^1.0.0' }, engines: { node: '>=22' } }));
+    await writeFile(path.join(cwd, 'server.ts'), "import { OldClient as client } from 'acme-sdk';\nimport { helper } from 'acme-sdk';\nclient.fetchOld();\nhelper();\n");
+    const result = await runMigration(recipe, { cwd, dryRun: true });
+    const source = result.proposedFiles.find((item) => item.relativePath === 'server.ts')?.after;
+    expect(source).toContain("import { NewClient as client } from 'acme-sdk'");
+    expect(source).toContain("import { helper } from 'acme-sdk/helpers'");
+    expect(source).toContain('client.fetchNew()');
+    expect(result.proposedFiles.find((item) => item.relativePath === 'package.json')?.after).toContain('^2.0.0');
+    expect(result.manual).toHaveLength(0);
+  });
+
+  it('withholds a mixed import instead of dropping its default binding', async () => {
+    const recipe = parseRecipe(`schemaVersion: 1
+id: acme-sdk@2
+package: acme-sdk
+fromMajor: 1
+toMajor: 2
+releasedAt: 2026-10-19
+title: Acme SDK v2
+guideUrl: https://example.org/upgrade
+nodeMajor: 22
+rules:
+  - kind: import-move
+    id: move-helper
+    name: helper
+    from: acme-sdk/helpers
+`);
+    const cwd = await fixture('');
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { 'acme-sdk': '^1.0.0' }, engines: { node: '>=22' } }));
+    await writeFile(path.join(cwd, 'server.ts'), "import Acme, { helper } from 'acme-sdk';\nhelper(); Acme();\n");
+    const result = await runMigration(recipe, { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.reason.includes('mixed'))).toBe(true);
+    expect(result.proposedFiles).toHaveLength(0);
+  });
+
+  it('rejects malformed schema fields with a path-specific error', () => {
+    const valid = `schemaVersion: 1
+id: acme-sdk@2
+package: acme-sdk
+fromMajor: 1
+toMajor: 2
+releasedAt: 2026-10-19
+title: Acme SDK v2
+guideUrl: https://example.org/upgrade
+nodeMajor: 22
+rules:
+  - kind: namespace-call
+    id: get-client
+    name: client
+    to: getClient
+    from: acme-sdk/client
+`;
+    expect(() => parseRecipe(valid.replace('from: acme-sdk/client', 'from: ../secret'))).toThrow(/rules\[0\]\.from/);
+    expect(() => parseRecipe(valid.replace('nodeMajor: 22', 'nodeMajor: twenty-two'))).toThrow(/nodeMajor/);
+    expect(() => parseRecipe(valid.replace('to: getClient', 'to: getClient\n    pattern: (a+)+'))).toThrow(/pattern/);
+  });
+
+  it('keeps the published JSON schema equal to the runtime validator schema', async () => {
+    const published = JSON.parse(await readFile('docs/recipe.schema.json', 'utf8')) as unknown;
+    expect(recipeSchema).toEqual(published);
+  });
+
+  it('passes the ordinary proposal through temporary-copy verification and reporting', async () => {
+    const cwd = await fixture("import * as admin from 'firebase-admin';\nadmin.initializeApp();\n");
+    const manifestFile = path.join(cwd, 'package.json');
+    const manifest = JSON.parse(await readFile(manifestFile, 'utf8')) as Record<string, unknown>;
+    manifest.scripts = { typecheck: 'node -e "process.exit(0)"' };
+    await writeFile(manifestFile, JSON.stringify(manifest));
+    await execFile('git', ['init', '-q'], { cwd });
+    await execFile('git', ['add', 'server.ts', 'package.json'], { cwd });
+    const recipe = await loadRecipe(recipePath);
+    const outcome = await runMigration(recipe, { cwd, dryRun: true });
+    const verification = await verifyProposedMigration(cwd, outcome.proposedDiff, {
+      packageName: recipe.packageName,
+      fileChanges: outcome.proposedFiles,
+      execute: async () => ({ stdout: 'offline check passed' }),
+    });
+    expect(verification.status).toBe('passed');
+    expect(verification.checks.some((check) => check.name.includes('Typecheck'))).toBe(true);
+    expect(await readFile(path.join(cwd, 'server.ts'), 'utf8')).toContain('admin.initializeApp()');
+  });
+});

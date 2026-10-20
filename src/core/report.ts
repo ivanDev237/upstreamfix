@@ -20,7 +20,7 @@ export function renderMarkdownReport(
   lines.push(`- ${dryRun ? 'Proposed transformations' : 'Applied transformations'}: **${outcome.changes.length}**`);
   lines.push(`- Need your attention: **${outcome.manual.length}**`);
   lines.push(`- ${dryRun ? 'Files with proposed changes' : 'Files changed'}: **${outcome.filesChanged.length}**`);
-  lines.push(`- Official guide: ${migration.guideUrl}`);
+  lines.push(`- Official guide: ${escapeMarkdownText(migration.guideUrl)}`);
   lines.push('');
 
   if (total === 0) {
