@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { reconcileProposal, validateProposal, validateProposalEnvelope, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from './publish.js';
+import { reconcileProposal, validateProposal, validateProposalEnvelope, validatePublishableBundle, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from './publish.js';
 import { parseActionConfig } from './config.js';
 import { sanitizeTerminalText } from '../core/report.js';
 
@@ -55,7 +55,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFile('git', [
     '-c', `core.hooksPath=${os.devNull}`, '-c', 'core.fsmonitor=false',
     '-c', 'core.untrackedCache=false', ...args,
-  ], { cwd, env: gitEnv, timeout: 45_000, maxBuffer: 2 * 1024 * 1024 });
+  ], { cwd, env: gitEnv, timeout: 45_000, maxBuffer: 9 * 1024 * 1024 });
   return stdout;
 }
 
@@ -136,6 +136,22 @@ for (const proposal of proposals) {
       changedFiles = parseSafeRawDiff(await git(bareRoot, ['diff', '--raw', '--no-renames', '--no-abbrev', '-z', expectedBase, proposal.commit!]));
     }
     validateProposal(proposal, expectedBase, parents, changedFiles, reviewedConfig);
+    if (proposal.status === 'ready') {
+      const identityFields = (await git(bareRoot!, ['show', '-s', '--format=%an%x00%ae%x00%cn%x00%ce%x00%s', proposal.commit!])).trimEnd().split('\0');
+      if (identityFields.length !== 5) throw new Error('Bundle commit identity is malformed.');
+      const blobs: Record<string, { before?: string; after: string }> = Object.create(null);
+      for (const file of proposal.files) {
+        if (!/(?:^|\/)(?:package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock)$/.test(file)) continue;
+        blobs[file] = {
+          before: await git(bareRoot!, ['show', `${expectedBase}:${file}`]),
+          after: await git(bareRoot!, ['show', `${proposal.commit!}:${file}`]),
+        };
+      }
+      validatePublishableBundle(proposal, blobs, {
+        author: identityFields[0]!, authorEmail: identityFields[1]!, committer: identityFields[2]!,
+        committerEmail: identityFields[3]!, subject: identityFields[4]!,
+      });
+    }
     const publisher: ProposalPublisher = {
       isDismissed: async (item) => await hasDismissedPullRequest(item) || await hasDismissedIssue(item),
       findPullRequest,

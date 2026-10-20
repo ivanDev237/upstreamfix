@@ -1,6 +1,7 @@
 import { sanitizeTerminalText } from '../core/report.js';
 import { migrations } from '../migrations/index.js';
 import type { ActionConfig } from './config.js';
+import { isDeepStrictEqual } from 'node:util';
 
 export interface Proposal {
   schema: 1;
@@ -150,6 +151,102 @@ export function validateProposal(proposal: Proposal, expectedBase: string, paren
   } else if (proposal.commit || proposal.files.length || changedFiles.length || parents.length) {
     throw new Error('A manual or empty proposal cannot carry a commit or changed files.');
   }
+}
+
+interface BundleBlob { before?: string; after: string }
+interface CommitIdentity { author: string; authorEmail: string; committer: string; committerEmail: string; subject: string }
+
+/** Recheck client-controlled commit contents in the permissioned publication job. */
+export function validatePublishableBundle(proposal: Proposal, blobs: Record<string, BundleBlob>, identity: CommitIdentity): void {
+  const bot = 'upstreamfix[bot]';
+  const email = '41898282+github-actions[bot]@users.noreply.github.com';
+  if (identity.author !== bot || identity.committer !== bot || identity.authorEmail !== email || identity.committerEmail !== email
+    || identity.subject !== `Apply ${proposal.migration} migration with UpstreamFix`) {
+    throw new Error('Bundle commit identity or message is not the reviewed UpstreamFix bot identity.');
+  }
+  const migration = migrations.find((item) => item.id === proposal.migration);
+  if (!migration) throw new Error('Unknown bundle migration.');
+  for (const file of proposal.files) {
+    if (!/(?:^|\/)package\.json$/.test(file) && !/(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock)$/.test(file)) continue;
+    const blob = blobs[file];
+    if (!blob?.before) throw new Error('Bundle package.json or lockfile has no reviewed base version.');
+    if (/(?:^|\/)package\.json$/.test(file)) validateManifestDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
+    else if (/(?:^|\/)package-lock\.json$/.test(file)) validateNpmLockDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
+    else throw new Error('Bundle lockfile format cannot be independently validated for publication; keep this migration manual.');
+  }
+}
+
+function parseJsonObject(contents: string, label: string): Record<string, unknown> {
+  if (contents.length > 8 * 1024 * 1024) throw new Error(`Bundle ${label} exceeds the validation size limit.`);
+  try {
+    const value: unknown = JSON.parse(contents);
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  } catch { /* fixed error below */ }
+  throw new Error(`Bundle ${label} is invalid JSON.`);
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function validateManifestDelta(beforeText: string, afterText: string, packageName: string, targetMajor: number): void {
+  const before = parseJsonObject(beforeText, 'package.json');
+  const after = parseJsonObject(afterText, 'package.json');
+  const normalized = structuredClone(after);
+  for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+    const oldValue = record(before[section])?.[packageName];
+    const nextValue = record(after[section])?.[packageName];
+    if (oldValue !== nextValue) {
+      if (typeof oldValue !== 'string' || nextValue !== `^${targetMajor}.0.0`) throw new Error('Bundle package.json changes an unexpected SDK dependency.');
+      record(normalized[section])![packageName] = oldValue;
+    }
+  }
+  const beforeEngines = record(before.engines);
+  const afterEngines = record(after.engines);
+  if (beforeEngines?.node === undefined && typeof afterEngines?.node === 'string') {
+    const required = packageName === 'firebase-admin' ? 22 : packageName === 'openai' ? 20 : undefined;
+    if (!required || afterEngines.node !== `>=${required}`) throw new Error('Bundle package.json adds an unexpected Node.js requirement.');
+    if (beforeEngines) delete record(normalized.engines)!.node;
+    else delete normalized.engines;
+  }
+  if (!isDeepStrictEqual(normalized, before)) throw new Error('Bundle package.json changes fields beyond the SDK version or approved Node.js requirement.');
+}
+
+function validateNpmLockDelta(beforeText: string, afterText: string, packageName: string, targetMajor: number): void {
+  const before = parseJsonObject(beforeText, 'package-lock.json');
+  const after = parseJsonObject(afterText, 'package-lock.json');
+  const oldPackages = record(before.packages);
+  const newPackages = record(after.packages);
+  if (before.lockfileVersion !== 3 || after.lockfileVersion !== 3 || !oldPackages || !newPackages) throw new Error('Bundle lockfile format is unsupported.');
+  const targetPath = `node_modules/${packageName}`;
+  const target = record(newPackages[targetPath]);
+  const version = typeof target?.version === 'string' ? target.version : '';
+  const resolved = typeof target?.resolved === 'string' ? target.resolved : '';
+  let url: URL;
+  try { url = new URL(resolved); } catch { throw new Error('Bundle lockfile has an invalid registry URL.'); }
+  const packageBasename = packageName.split('/').at(-1)!;
+  if (!new RegExp(`^${targetMajor}\\.\\d+\\.\\d+$`).test(version)
+    || url.protocol !== 'https:' || url.hostname !== 'registry.npmjs.org' || url.username || url.password || url.port || url.search || url.hash
+    || !url.pathname.endsWith(`/-/${packageBasename}-${version}.tgz`)
+    || target?.hasInstallScript === true || typeof target?.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/=]+$/.test(target.integrity)) {
+    throw new Error('Bundle lockfile target package is not a verified npm registry artifact.');
+  }
+  const normalized = structuredClone(after);
+  const normalizedPackages = record(normalized.packages)!;
+  if (Object.hasOwn(oldPackages, targetPath)) normalizedPackages[targetPath] = oldPackages[targetPath];
+  else delete normalizedPackages[targetPath];
+  const oldRoot = record(oldPackages['']);
+  const newRoot = record(normalizedPackages['']);
+  if (!oldRoot || !newRoot) throw new Error('Bundle lockfile root package is missing.');
+  for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+    const oldValue = record(oldRoot[section])?.[packageName];
+    const newValue = record(newRoot[section])?.[packageName];
+    if (oldValue !== newValue) {
+      if (typeof oldValue !== 'string' || newValue !== `^${targetMajor}.0.0`) throw new Error('Bundle lockfile changes an unexpected SDK dependency.');
+      record(newRoot[section])![packageName] = oldValue;
+    }
+  }
+  if (!isDeepStrictEqual(normalized, before)) throw new Error('Bundle lockfile changes packages or fields beyond the approved SDK upgrade.');
 }
 
 function sameList(left: string[], right: string[]): boolean {

