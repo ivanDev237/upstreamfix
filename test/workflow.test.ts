@@ -28,5 +28,6 @@ describe('GitHub Actions CI workflow', () => {
     expect(workflow).toContain('npm run typecheck');
     expect(workflow).toContain('npm run build');
     expect(workflow).toContain('npm test');
+    expect(workflow).toContain('npx vitest run test/openai-real-sdk.test.ts');
   });
 });
