@@ -597,6 +597,24 @@ function reportUnsupportedReferences(sourceFile: SourceFile, manual: ManualItem[
   }
 }
 
+const declaredNamesCache = new WeakMap<SourceFile, Set<string>>();
+
+function declaredNames(sourceFile: SourceFile): Set<string> {
+  const cached = declaredNamesCache.get(sourceFile);
+  if (cached) return cached;
+  const names = new Set<string>();
+  for (const identifier of sourceFile.getDescendantsOfKind(SyntaxKind.Identifier)) {
+    const parent = identifier.getParent();
+    if ((Node.isVariableDeclaration(parent) || Node.isParameterDeclaration(parent) || Node.isBindingElement(parent)
+      || Node.isFunctionDeclaration(parent) || Node.isFunctionExpression(parent) || Node.isClassDeclaration(parent)
+      || Node.isClassExpression(parent) || Node.isInterfaceDeclaration(parent) || Node.isTypeAliasDeclaration(parent)
+      || Node.isEnumDeclaration(parent) || Node.isImportEqualsDeclaration(parent) || Node.isTypeParameterDeclaration(parent))
+      && parent.getNameNode() === identifier) names.add(identifier.getText());
+  }
+  declaredNamesCache.set(sourceFile, names);
+  return names;
+}
+
 function hasImportCollision(sourceFile: SourceFile, needed: NeededImport): boolean {
   for (const declaration of sourceFile.getImportDeclarations()) {
     const module = declaration.getModuleSpecifierValue();
@@ -613,23 +631,7 @@ function hasImportCollision(sourceFile: SourceFile, needed: NeededImport): boole
       if (!needed.typeOnly && (declaration.isTypeOnly() || specifier.isTypeOnly())) return true;
     }
   }
-  return sourceFile.getDescendantsOfKind(SyntaxKind.Identifier).some((identifier) => {
-    if (identifier.getText() !== needed.name) return false;
-    const parent = identifier.getParent();
-    if (Node.isImportClause(parent) || Node.isNamespaceImport(parent) || Node.isImportSpecifier(parent)) return false;
-    if (Node.isVariableDeclaration(parent)) return parent.getNameNode() === identifier;
-    if (Node.isParameterDeclaration(parent)) return parent.getNameNode() === identifier;
-    if (Node.isFunctionDeclaration(parent) || Node.isFunctionExpression(parent)) return parent.getNameNode() === identifier;
-    if (Node.isClassDeclaration(parent) || Node.isInterfaceDeclaration(parent) || Node.isTypeAliasDeclaration(parent) || Node.isEnumDeclaration(parent)) {
-      return parent.getNameNode() === identifier;
-    }
-    if (Node.isImportClause(parent)) return parent.getDefaultImport() === identifier;
-    if (Node.isNamespaceImport(parent)) return parent.getNameNode() === identifier;
-    if (Node.isImportSpecifier(parent)) return (parent.getAliasNode() ?? parent.getNameNode()) === identifier;
-    if (Node.isBindingElement(parent)) return parent.getNameNode() === identifier;
-    if (Node.isTypeParameterDeclaration(parent)) return parent.getNameNode() === identifier;
-    return false;
-  });
+  return declaredNames(sourceFile).has(needed.name);
 }
 
 function applyTextEdits(source: string, edits: TextEdit[]): string {

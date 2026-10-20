@@ -31,6 +31,13 @@ afterEach(async () => {
 });
 
 describe('firebase-admin v14 migration', () => {
+  it('W9 withholds a source file above the analysis limit', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'large.ts'), "import * as admin from 'firebase-admin';\n" + ' '.repeat(2 * 1024 * 1024) + '\nadmin.firestore();\n');
+    const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.file.endsWith('large.ts') && /size|large/i.test(item.reason))).toBe(true);
+    expect(result.proposedFiles.some((file) => file.relativePath === 'large.ts')).toBe(false);
+  });
   it('omits configured excluded folders from source analysis and manifest changes', async () => {
     const cwd = await makeProject();
     await mkdir(path.join(cwd, 'examples'));

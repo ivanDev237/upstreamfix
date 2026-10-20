@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { execFile as execFileCallback } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { registerTemporaryCleanup } from './process-cleanup.js';
@@ -18,6 +18,7 @@ const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx',
 const MAX_DIFF_INPUT_BYTES = 1024 * 1024;
 const MAX_DIFF_OUTPUT_CHARS = 64 * 1024;
 const MAX_REPORT_DIFF_CHARS = 256 * 1024;
+const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const LOCKFILE_NAMES = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock']);
 
 export function loadProject(cwd: string, packageName = 'firebase-admin'): Project {
@@ -25,7 +26,9 @@ export function loadProject(cwd: string, packageName = 'firebase-admin'): Projec
     skipAddingFilesFromTsConfig: true,
     compilerOptions: { allowJs: true },
   });
-  for (const sourcePath of findSourceFiles(cwd, packageName)) project.addSourceFileAtPath(sourcePath);
+  for (const sourcePath of findSourceFiles(cwd, packageName)) {
+    if (statSync(sourcePath).size <= MAX_SOURCE_BYTES) project.addSourceFileAtPath(sourcePath);
+  }
   return project;
 }
 
@@ -54,6 +57,10 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
   const manifestBySource = new Map<string, string>();
 
   for (const sourcePath of findSourceFiles(root, migration.packageName, excludedDirectories)) {
+    if (statSync(sourcePath).size > MAX_SOURCE_BYTES) {
+      manual.push({ file: sourcePath, line: 1, reason: 'Source file exceeds the 2 MiB analysis size limit; review this SDK usage manually.', snippet: '' });
+      continue;
+    }
     const containingManifests = manifests
       .filter(({ file }) => {
         const directory = path.dirname(file);
@@ -180,7 +187,7 @@ function findSourceFiles(root: string, packageName: string, excludedDirectories:
       }
       if (!entry.isFile() || entry.name.endsWith('.d.ts')) continue;
       if (!SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
-      if (readFileSync(absolutePath, 'utf8').includes(packageName)) found.push(absolutePath);
+      if (statSync(absolutePath).size > MAX_SOURCE_BYTES || readFileSync(absolutePath, 'utf8').includes(packageName)) found.push(absolutePath);
     }
   };
   visit(root);
