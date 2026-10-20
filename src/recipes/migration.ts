@@ -117,6 +117,30 @@ function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationR
     }
     const findRule = (kind: RecipeRule['kind'], name: string): RecipeRule | undefined =>
       recipe.rules.find((rule) => rule.kind === kind && rule.name === name);
+    for (const declaration of sourceFile.getImportDeclarations()) {
+      if (declaration.getModuleSpecifierValue() !== recipe.package) continue;
+      if (!declaration.getDefaultImport() && !declaration.getNamespaceImport() && declaration.getNamedImports().length === 0) {
+        addManual(result, sourceFile, declaration, 'A side-effect SDK import needs manual review.');
+      }
+      for (const specifier of declaration.getNamedImports()) {
+        if (!findRule('export-rename', specifier.getName()) && !findRule('import-move', specifier.getName())) {
+          addManual(result, sourceFile, specifier, `The ${specifier.getName()} SDK import has no safe recipe mapping.`);
+        }
+      }
+    }
+    for (const declaration of sourceFile.getDescendantsOfKind(SyntaxKind.ImportEqualsDeclaration)) {
+      if (declaration.getText().includes(`'${recipe.package}'`) || declaration.getText().includes(`"${recipe.package}"`)) {
+        addManual(result, sourceFile, declaration, 'An import-equals SDK binding needs manual review.');
+      }
+    }
+    for (const call of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      const argument = call.getArguments()[0];
+      if (!Node.isStringLiteral(argument) || argument.getLiteralValue() !== recipe.package) continue;
+      const isRequire = call.getExpression().getText() === 'require';
+      const variable = call.getParent();
+      const recognized = isRequire && Node.isVariableDeclaration(variable) && variable.getInitializer() === call && Node.isIdentifier(variable.getNameNode());
+      if (!recognized) addManual(result, sourceFile, call, 'This SDK import or require form needs manual review.');
+    }
     const neededImport = (module: string, name: string): void => {
       const names = imports.get(module) ?? new Set<string>();
       names.add(name);
