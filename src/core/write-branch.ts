@@ -337,10 +337,22 @@ async function assertSafeLocalGitConfig(repositoryRoot: string): Promise<void> {
       const value = record.slice(separator + 1).trim();
       if (/^include(?:if\..*)?\.path$/.test(key)) dangerous.push(`${origin}: ${key}`);
       else if (key === 'core.fsmonitor' && value && !/^false$/i.test(value)) dangerous.push(`${origin}: ${key}`);
-      else if (/^(?:filter\..*\.(?:clean|smudge|process|required)|diff\.external|diff\..*\.command|gpg\..*|remote\..*\.pushurl|url\..*\.insteadof)$/.test(key) && value) dangerous.push(`${origin}: ${key}`);
+      else if (/^(?:filter\..*\.(?:clean|smudge|process|required)|diff\.external|diff\..*\.command|gpg\..*)$/.test(key) && value) dangerous.push(`${origin}: ${key}`);
+      else if (/^remote\..*\.pushurl$/.test(key) && value && !safeGitRemoteUrl(value)) dangerous.push(`${origin}: ${key}`);
+      else if (/^url\..*\.(?:insteadof|pushinsteadof)$/.test(key) && value) {
+        const rewriteBase = key.slice(4, key.lastIndexOf('.'));
+        if (!safeGitRemoteUrl(rewriteBase)) dangerous.push(`${origin}: ${key}`);
+      }
     }
   }
   if (dangerous.length > 0) {
     throw new Error('The repository has configured Git filters, diff commands, or fsmonitor hooks. Remove them before using --write.');
   }
+}
+
+function safeGitRemoteUrl(value: string): boolean {
+  if (/^https?:\/\/[^/\s]*@/.test(value)) return false;
+  return /^https:\/\/[A-Za-z0-9.-]+(?:\/|$)/.test(value)
+    || /^ssh:\/\/(?:git@)?[A-Za-z0-9.-]+(?:\/|$)/.test(value)
+    || /^git@[A-Za-z0-9.-]+:[A-Za-z0-9._/-]+$/.test(value);
 }

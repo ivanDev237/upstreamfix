@@ -280,4 +280,17 @@ describe('verified Git branch writes', () => {
     const result = await writeMigrationOnBranch(firebaseAdminV14, { cwd: link, verificationOptions });
     expect(result.branch).toBe('upstreamfix/firebase-admin-14');
   });
+  it('X8 allows a credential-free local pushurl and insteadOf setting', async () => {
+    const cwd = await makeRepository();
+    await git(cwd, 'config', 'remote.origin.pushurl', 'https://github.com/example/repo.git');
+    await git(cwd, 'config', 'url.https://github.com/.insteadOf', 'gh:');
+    const result = await writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions });
+    expect(result.branch).toBe('upstreamfix/firebase-admin-14');
+  });
+  it('X8 refuses a pushInsteadOf rewrite to a command transport', async () => {
+    const cwd = await makeRepository();
+    await git(cwd, 'config', 'url.ext::sh -c true;.pushInsteadOf', 'gh:');
+    await expect(writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions }))
+      .rejects.toThrow(/configured Git|hooks|filter/i);
+  });
 });

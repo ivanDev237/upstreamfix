@@ -30,6 +30,24 @@ it('P3.4 keeps OpenAI disabled in the Action until the reviewed config opts in',
 });
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
+it.each(['remote.origin.pushurl', 'url.https://token@evil.invalid/.pushinsteadof'])('X8 rejects checkout credentials hidden in %s', async (key) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-credentials-'));
+  roots.push(root);
+  await execFile('git', ['init', '-q', root]);
+  await writeFile(path.join(root, 'package.json'), '{"name":"safe"}\n');
+  await execFile('git', ['add', '.'], { cwd: root });
+  await execFile('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base'], { cwd: root });
+  await execFile('git', ['config', '--local', key, key.startsWith('remote') ? 'https://token@evil.invalid/repo.git' : 'https://github.com/'], { cwd: root });
+  const base = (await execFile('git', ['rev-parse', 'HEAD'], { cwd: root })).stdout.trim();
+  await expect(prepareProposals(root, path.join(root, '..', 'output-' + path.basename(root)), base, 'workflow_dispatch'))
+    .rejects.toThrow(/credentials/i);
+});
+
+it('X8 signal cleanup owns both the Docker container and its host-only HOME', async () => {
+  const source = await readFile(new URL('../src/action/docker-execute.ts', import.meta.url), 'utf8');
+  expect(source).toMatch(/registerTemporaryCleanup\(async \(\) => \{[\s\S]*?removeContainer\(\)[\s\S]*?rm\(hostHome/);
+});
+
 it('bounds a 120k report without splitting a Unicode character and keeps the full artifact', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-long-report-'));
   roots.push(root);

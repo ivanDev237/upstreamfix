@@ -112,8 +112,10 @@ async function assertNoCheckoutCredentials(project: string): Promise<void> {
       if (index < 0) continue;
       const key = record.slice(0, index).toLowerCase();
       const value = record.slice(index + 1);
+      const urlRewriteBase = /^url\.(.*)\.(?:insteadof|pushinsteadof)$/.exec(key)?.[1];
       if (/^credential(?:\.|$)/.test(key) || /^http(?:\.|$).*\.extraheader$/.test(key)
-        || (/^remote\..*\.url$/.test(key) && /^https?:\/\/[^/]*@/.test(value))) {
+        || (/^remote\..*\.(?:url|pushurl)$/.test(key) && /^https?:\/\/[^/]*@/.test(value))
+        || (urlRewriteBase && /^https?:\/\/[^/]*@/.test(urlRewriteBase))) {
         throw new Error('Git credentials are stored in the client checkout; use checkout with persist-credentials: false.');
       }
     }

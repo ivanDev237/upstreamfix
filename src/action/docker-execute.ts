@@ -51,7 +51,10 @@ export async function executeClientCommand(command: string, args: string[], cwd:
   const removeContainer = async (): Promise<void> => {
     await execFile('docker', ['rm', '-f', name], { timeout: 10_000, env: hostEnv }).catch(() => undefined);
   };
-  const unregisterCleanup = registerTemporaryCleanup(removeContainer);
+  const unregisterCleanup = registerTemporaryCleanup(async () => {
+    await removeContainer();
+    await rm(hostHome, { recursive: true, force: true });
+  });
   try {
     await mkdir(hostEnv.DOCKER_CONFIG);
     return await executeWithProcessGroup('docker', dockerArgs, temporaryRoot, hostEnv, timeoutMs);

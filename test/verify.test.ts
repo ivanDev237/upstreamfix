@@ -253,6 +253,15 @@ describe('migration verification', () => {
     await symlink(outside, path.join(project, 'linked'));
     await expect(readRegularFile(path.join(project, 'linked', 'package.json'))).rejects.toThrow('symbolic link');
   });
+  it('X8 accepts a trusted project root reached through a symlink', async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-trusted-project-'));
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-trusted-link-'));
+    temporaryDirectories.push(project, parent);
+    await writeFile(path.join(project, 'package.json'), '{"name":"fixture"}\n');
+    const alias = path.join(parent, 'project');
+    await symlink(project, alias);
+    await expect(readRegularFile(path.join(alias, 'package.json'), alias)).resolves.toContain('fixture');
+  });
 
   it('T35 never echoes invalid package contents in a verification error', async () => {
     const cwd = await makeProject();

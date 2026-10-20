@@ -1,5 +1,5 @@
 import { execFile as execFileCallback, spawn } from 'node:child_process';
-import { copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -329,9 +329,15 @@ async function readPackageJson(directory: string): Promise<PackageJson> {
   }
 }
 
-export async function readRegularFile(file: string): Promise<string> {
+export async function readRegularFile(file: string, trustedRoot?: string): Promise<string> {
+  const boundary = trustedRoot ? path.resolve(trustedRoot) : path.parse(path.resolve(file)).root;
+  if (trustedRoot) {
+    const relative = path.relative(boundary, path.resolve(file));
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('Verification metadata is outside its trusted root.');
+    if (!(await lstat(await realpath(boundary))).isDirectory()) throw new Error('Verification root must be a directory.');
+  }
   let parent = path.dirname(path.resolve(file));
-  while (true) {
+  while (parent !== boundary) {
     const info = await lstat(parent);
     if (info.isSymbolicLink()) throw new Error('Verification metadata has a symbolic link in its parent path.');
     if (!info.isDirectory()) throw new Error('Verification metadata parent must be a directory.');

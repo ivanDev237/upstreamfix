@@ -633,7 +633,7 @@ function declaredNames(sourceFile: SourceFile): Set<string> {
     if ((Node.isVariableDeclaration(parent) || Node.isParameterDeclaration(parent) || Node.isBindingElement(parent)
       || Node.isFunctionDeclaration(parent) || Node.isFunctionExpression(parent) || Node.isClassDeclaration(parent)
       || Node.isClassExpression(parent) || Node.isInterfaceDeclaration(parent) || Node.isTypeAliasDeclaration(parent)
-      || Node.isEnumDeclaration(parent) || Node.isImportEqualsDeclaration(parent) || Node.isTypeParameterDeclaration(parent))
+      || Node.isEnumDeclaration(parent) || Node.isModuleDeclaration(parent) || Node.isImportEqualsDeclaration(parent) || Node.isTypeParameterDeclaration(parent))
       && parent.getNameNode() === identifier) names.add(identifier.getText());
   }
   declaredNamesCache.set(sourceFile, names);

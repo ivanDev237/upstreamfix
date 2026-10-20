@@ -53,7 +53,7 @@ describe('firebase-admin v14 migration', () => {
     firebaseAdminV14.transform(project);
     expect(declarations.mock.calls.length).toBeLessThan(20);
   });
-  it.each(["class getAuth {}", "import getAuth = require('./other');"])('W12 reports a Firebase import collision: %s', async (declaration) => {
+  it.each(["class getAuth {}", "import getAuth = require('./other');", 'namespace getAuth {}'])('W12/X8 reports a Firebase import collision: %s', async (declaration) => {
     const cwd = await makeProject();
     await writeFile(path.join(cwd, 'server.ts'), `import * as admin from 'firebase-admin';\n${declaration}\nadmin.auth();\n`);
     const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
