@@ -48,9 +48,10 @@ describe('public repository benchmark helpers', () => {
   });
   it('T34 commits a measured OpenAI report instead of the obsolete zero-percent snapshot', async () => {
     const report = await readFile(new URL('../benchmark/openai-5-results.md', import.meta.url), 'utf8');
-    expect(report).toContain('Automatic migration rate: **33.3%** (4 of 12 detected migration items).');
-    expect(report).toContain('Run ID: `39316982622`');
-    expect(report).toContain('Tool SHA: `88273221cdc51cdf9e228c15266cb9e319cdb6a6`');
+    expect(report).toContain('Automatic migration rate: **29.2%** (14 of 48 detected migration items).');
+    expect(report).toContain('Run ID: `39513280362`');
+    expect(report).toContain('Tool SHA: `0bd97667a6a3b870b41fc7e58d174ee35d58c842`');
+    expect(report).toContain('Run status: **complete** (20 of 20 repositories recorded).');
     expect(report).toContain('| lumen | `87ad11870352` | manual review required |');
     expect(report).toContain('| is-even-ai | `9839c1e2018f` | manual review required |');
   });
