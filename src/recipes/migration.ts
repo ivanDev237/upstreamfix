@@ -102,6 +102,14 @@ function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationR
     const aliases = aliasDeclarations(sourceFile, recipe.package);
     const aliasesByName = new Map(aliases.map((alias) => [alias.name.getText(), alias]));
     const initialManual = result.manual.length;
+    for (const alias of aliases) {
+      if (alias.kind !== 'cjs') continue;
+      const declaration = alias.name.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
+      const statement = declaration?.getVariableStatement();
+      if (!statement || statement.getDeclarationList().getDeclarations().length !== 1 || statement.isExported()) {
+        addManual(result, sourceFile, alias.name, 'The SDK binding is exported or shares its declaration with another value; review it manually.');
+      }
+    }
     for (const declaration of sourceFile.getExportDeclarations()) {
       if (declaration.getModuleSpecifierValue() === recipe.package) {
         addManual(result, sourceFile, declaration, 'Re-exports from the SDK root need manual review before upgrading.');
