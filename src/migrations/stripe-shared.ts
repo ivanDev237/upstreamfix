@@ -39,7 +39,8 @@ export function migrateStripeV22(project: Project): MigrationResult {
     const manualBefore = result.manual.length;
     const changesBefore = result.changes.length;
     migrateV22File(sourceFile, result);
-    if (manualBefore === result.manual.length && changesBefore === result.changes.length && hasStripePackageReference(sourceFile)) {
+    if (manualBefore === result.manual.length && changesBefore === result.changes.length
+      && hasStripePackageReference(sourceFile) && findStripeBindings(sourceFile).constructors.size === 0) {
       addManual(sourceFile, result.manual, sourceFile, 'This file mentions Stripe without a recognized migration binding; inspect its SDK usage manually.', 'stripe');
     }
   }
@@ -52,7 +53,8 @@ export function migrateStripeV23(project: Project): MigrationResult {
     const manualBefore = result.manual.length;
     const changesBefore = result.changes.length;
     migrateV23File(sourceFile, result);
-    if (manualBefore === result.manual.length && changesBefore === result.changes.length && hasStripePackageReference(sourceFile)) {
+    if (manualBefore === result.manual.length && changesBefore === result.changes.length
+      && hasStripePackageReference(sourceFile) && findStripeBindings(sourceFile).constructors.size === 0) {
       addManual(sourceFile, result.manual, sourceFile, 'This file mentions Stripe without a recognized migration binding; inspect its SDK usage manually.', 'stripe');
     }
   }

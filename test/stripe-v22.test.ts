@@ -195,6 +195,11 @@ type Error = StripeCtor.errors.StripeError;
     expect(result.manual.length).toBeGreaterThan(0);
     expect(result.fileUpdates).toHaveLength(0);
   });
+  it('W10 accepts a recognized Stripe import already using the target constructor form', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('client.ts', "import Stripe from 'stripe';\nexport const stripe = new Stripe('sk_test_fixture');\n");
+    expect(stripeV22.transform(project).manual).toEqual([]);
+  });
 
   it('reports callback migration for review without inventing async control flow', () => {
     const project = new Project({ useInMemoryFileSystem: true });
