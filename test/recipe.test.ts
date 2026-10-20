@@ -31,6 +31,16 @@ afterEach(async () => {
 
 describe('declarative recipes', () => {
   it.each([
+    "const admin = require('firebase-admin');\nmodule.exports = { admin };\nadmin.firestore();\n",
+    "import * as admin from 'firebase-admin';\nexport { admin };\nadmin.firestore();\n",
+    "import * as admin from 'firebase-admin';\nexport const deps = { admin };\nadmin.firestore();\n",
+  ])('V1 preserves an SDK alias used as a value %#', async (source) => {
+    const cwd = await fixture(source);
+    const result = await runMigration(await loadRecipe(recipePath), { cwd, dryRun: true });
+    expect(result.manual.length).toBeGreaterThan(0);
+    expect(result.proposedFiles).toHaveLength(0);
+  });
+  it.each([
     "import * as admin from 'firebase-admin';\nadmin.initializeApp();\nconst db = admin.firestore();\n",
     "import * as admin from 'firebase-admin';\nconst app = admin.app();\nconst apps = admin.apps;\nconst auth = admin.auth();\n",
     "const admin = require('firebase-admin');\nadmin.initializeApp();\nconst db = admin.firestore();\n",

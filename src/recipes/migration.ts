@@ -123,7 +123,9 @@ function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationR
       if (!alias || reference === alias.name) continue;
       // A same-name local binding is not the SDK alias. Avoid rewriting it.
       const declaredSymbol = alias.name.getSymbol();
-      if (declaredSymbol && reference.getSymbol() !== declaredSymbol) continue;
+      const parent = reference.getParent();
+      if (declaredSymbol && reference.getSymbol() && reference.getSymbol() !== declaredSymbol &&
+          !Node.isShorthandPropertyAssignment(parent) && !Node.isExportSpecifier(parent)) continue;
       const access = reference.getParent();
       if (!Node.isPropertyAccessExpression(access) || access.getExpression() !== reference) {
         addManual(result, sourceFile, reference, `The ${alias.name.getText()} SDK namespace is used in an unsupported form.`);
