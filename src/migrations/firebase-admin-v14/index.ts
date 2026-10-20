@@ -171,11 +171,34 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
     const symbol = declaration.getSymbol();
     if (!symbol) return declaration.findReferencesAsNodes().filter(Node.isIdentifier)
       .filter((reference) => reference.getSourceFile() === sourceFile);
-    return (localIdentifiers.get(declaration.getText()) ?? [])
-      .filter((candidate) => candidate.getSymbol() === symbol);
+    const sameName = localIdentifiers.get(declaration.getText()) ?? [];
+    // In shorthand properties and export specifiers ts-morph exposes a property/
+    // alias symbol instead of the local variable's symbol. Ask the language
+    // service for references only for these uncommon shapes; keep the fast local
+    // symbol index for ordinary (including large generated) source files.
+    if (sameName.some((candidate) => Node.isShorthandPropertyAssignment(candidate.getParent())
+      || Node.isExportSpecifier(candidate.getParent()))) {
+      return declaration.findReferencesAsNodes().filter(Node.isIdentifier)
+        .filter((reference) => reference.getSourceFile() === sourceFile);
+    }
+    return sameName.filter((candidate) => candidate.getSymbol() === symbol);
   };
 
   const aliasNames = new Set(aliases.map((alias) => alias.name));
+  for (const alias of aliases) {
+    for (const reference of localReferences(alias.nameNode)) {
+      if (reference === alias.nameNode) continue;
+      const parent = reference.getParent();
+      if (!Node.isShorthandPropertyAssignment(parent) && !Node.isExportSpecifier(parent)) continue;
+      result.manual.push({ file, line: reference.getStartLineNumber(),
+        reason: 'The firebase-admin namespace is still exported or used as a shorthand value; migrate its consumers before removing the import.',
+        snippet: snippetOf(reference) });
+    }
+  }
+  if (result.manual.length > manualBefore) {
+    sortManual(result.manual, manualBefore);
+    return false;
+  }
   for (const declaration of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const initializer = declaration.getInitializer();
     const nameNode = declaration.getNameNode();

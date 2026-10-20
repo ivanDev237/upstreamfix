@@ -32,6 +32,17 @@ afterEach(async () => {
 });
 
 describe('firebase-admin v14 migration', () => {
+  it.each([
+    "const admin = require('firebase-admin');\nadmin.initializeApp();\nmodule.exports = { admin };\n",
+    "import * as admin from 'firebase-admin';\nadmin.initializeApp();\nexport { admin };\n",
+    "import * as admin from 'firebase-admin';\nadmin.initializeApp();\nconst o = { admin };\n",
+  ])('Z1 keeps a Firebase alias referenced by a shorthand property or export: %s', async (source) => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'server.ts'), source);
+    const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.file.endsWith('server.ts') && /admin/.test(item.snippet))).toBe(true);
+    expect(result.proposedFiles.some((file) => file.relativePath === 'server.ts')).toBe(false);
+  });
   it('W9 withholds a source file above the analysis limit', async () => {
     const cwd = await makeProject();
     await writeFile(path.join(cwd, 'large.ts'), "import * as admin from 'firebase-admin';\n" + ' '.repeat(2 * 1024 * 1024) + '\nadmin.firestore();\n');
