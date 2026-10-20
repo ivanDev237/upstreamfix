@@ -233,6 +233,13 @@ function send(client) { client['customers'].retrieve('cus_1', { stripeAccount: '
     expect(result.manual.some((item) => item.file === 'consumer.ts' && /untracked/i.test(item.reason))).toBe(true);
     expect(result.filesChanged).not.toContain('package.json');
   });
+  it('X5 includes a sibling module with a default local client and no Stripe name', async () => {
+    const cwd = await makeProject("import Stripe from 'stripe';\nexport default new Stripe('key');\n");
+    await writeFile(path.join(cwd, 'consumer.ts'), "import billing from './client';\nbilling.customers.retrieve('cus_1', {stripeAccount: 'acct_1'});\n");
+    const result = await runMigration(stripeV22, { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.file === 'consumer.ts' && /untracked|indirect/i.test(item.reason))).toBe(true);
+    expect(result.filesChanged).not.toContain('package.json');
+  });
 
   it('reports callback migration for review without inventing async control flow', () => {
     const project = new Project({ useInMemoryFileSystem: true });

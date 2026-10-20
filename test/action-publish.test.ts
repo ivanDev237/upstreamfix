@@ -111,13 +111,13 @@ describe('Action publication boundary', () => {
       await runRealSdkNpm(cwd, ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], 180_000);
       const after = await readFile(path.join(cwd, 'package-lock.json'), 'utf8');
       const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
-      expect(() => validatePublishableBundle({ ...proposal, files: ['package-lock.json'] }, { 'package-lock.json': { before, after } }, identity)).not.toThrow();
       const fixtureRoot = process.env.UPSTREAMFIX_LOCK_FIXTURE_OUTPUT;
       if (fixtureRoot) {
         await mkdir(fixtureRoot, { recursive: true });
         await writeFile(path.join(fixtureRoot, 'before.json'), before);
         await writeFile(path.join(fixtureRoot, 'after.json'), after);
       }
+      expect(() => validatePublishableBundle({ ...proposal, files: ['package-lock.json'] }, { 'package-lock.json': { before, after } }, identity)).not.toThrow();
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
