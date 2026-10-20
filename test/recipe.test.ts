@@ -10,6 +10,7 @@ import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js'
 import { loadRecipe, parseRecipe } from '../src/recipes/index.js';
 import { recipeSchema } from '../src/recipes/schema.js';
 import { verifyProposedMigration } from '../src/core/verify.js';
+import { renderMarkdownReport } from '../src/core/report.js';
 
 const directories: string[] = [];
 const recipePath = path.resolve('docs/recipes/firebase-admin-v14.yml');
@@ -66,6 +67,14 @@ describe('declarative recipes', () => {
   it.each(['default', 'eval', 'arguments', 'require'])('V4 rejects unsafe generated identifier %s', async (target) => {
     const template = await readFile(recipePath, 'utf8');
     expect(() => parseRecipe(template.replace('to: getFirestore', `to: ${target}`))).toThrow(/identifier|reserved|unsafe/i);
+  });
+  it('V5 escapes an untrusted official guide URL in Markdown', async () => {
+    const template = await readFile(recipePath, 'utf8');
+    const recipe = parseRecipe(template.replace('https://firebase.google.com/docs/admin/migrate-node-v10', 'https://example.org/guide?x=[click](https://attacker.test)'));
+    const cwd = await fixture('');
+    const report = renderMarkdownReport(recipe, await runMigration(recipe, { cwd, dryRun: true }), true);
+    expect(report).not.toContain('[click](https://attacker.test)');
+    expect(report).toContain('Official guide: https');
   });
   it.each([
     "import * as admin from 'firebase-admin';\nadmin.initializeApp();\nconst db = admin.firestore();\n",

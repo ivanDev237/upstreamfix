@@ -108,6 +108,7 @@ function validateRecipe(value: unknown): RecipeDefinition {
   try {
     const url = new URL(record.guideUrl as string);
     if (url.protocol !== 'https:' || url.username || url.password) fail('$.guideUrl', 'must be an HTTPS URL without credentials.');
+    record.guideUrl = url.href;
   } catch { fail('$.guideUrl', 'must be an HTTPS URL without credentials.'); }
   const rules = record.rules as unknown[];
   if (rules.length < 1 || rules.length > 256) fail('$.rules', 'must contain 1–256 rules.');
