@@ -396,13 +396,6 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
       if (!config.error && config.config && typeof config.config.compilerOptions === 'object')
         compilerOptions = config.config.compilerOptions as Record<string, unknown>;
     } catch { /* A missing tsconfig cannot establish the active compiler environment. */ }
-    const target = typeof compilerOptions?.target === 'string' ? compilerOptions.target.toUpperCase() : '';
-    if (/^(?:ES3|ES5|ES6|ES201[567])$/.test(target)) {
-      findings.push({ file: tsconfigPath, line: 1,
-        reason: `OpenAI v5's Web type guidance starts at TypeScript target ES2018; this project declares ${target}. Review the runtime target before raising it and typecheck.`,
-        snippet: `compilerOptions.target: ${compilerOptions?.target}` });
-    }
-
     const nodeTypes = manifest.devDependencies?.['@types/node'] ?? manifest.dependencies?.['@types/node'];
     const nodeTypesMajor = /^\s*[~^]?(\d+)/.exec(nodeTypes ?? '');
     const workersTypes = manifest.devDependencies?.['@cloudflare/workers-types'] ?? manifest.dependencies?.['@cloudflare/workers-types'];

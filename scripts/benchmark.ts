@@ -583,6 +583,12 @@ export async function benchmarkOne(
     const after = await runPhaseChecks(repo, checkout, packageDirs, repo.typecheckScript, repo.testScript, home, memoryMb);
     result.typecheck.after = after.typecheck;
     result.tests.after = after.tests;
+    if (migration.id === 'openai@5') {
+      const newCompilerFindings = compilerRegressionFindings(before.typecheck, after.typecheck);
+      result.manualFindings = [...(result.manualFindings ?? []), ...newCompilerFindings];
+      result.manual += newCompilerFindings.length;
+      result.usages = result.migrated + result.manual;
+    }
     // This is an impact hint, not a migration rule. A compiler message may be
     // caused by another dependency; keep it out of the automatic migration rate.
     if (!before.typecheck.includes('…') && !after.typecheck.includes('…')) {
@@ -617,6 +623,20 @@ export function hasVerificationRegression(before: string, after: string): boolea
   return before === 'pass' && after.startsWith('fail:');
 }
 
+/** Compiler errors seen only after a previously green check are impact evidence, not proof of an SDK cause. */
+export function compilerRegressionFindings(before: string, after: string): Array<{ file: string; line: number; reason: string }> {
+  if (!hasVerificationRegression(before, after)) return [];
+  const seen = new Set<string>();
+  return parseTypeScriptDiagnostics(after).flatMap((diagnostic) => {
+    const file = diagnostic.file.replace(/^fail:\s*(?:Command failed \([^)]*\)\.\s*)?(?:…\s*)?/, '');
+    const key = `${file}\0${diagnostic.code}\0${diagnostic.message}`;
+    if (seen.has(key) || seen.size >= 5) return [];
+    seen.add(key);
+    return [{ file, line: diagnostic.line,
+      reason: `New compiler diagnostic TS${diagnostic.code} after installing the exact target SDK: ${diagnostic.message}. The cause is not attributed automatically; review this line before accepting the migration.` }];
+  });
+}
+
 export function renderBenchmarkReport(
   results: BenchResult[],
   completion: 'in progress' | 'complete' = 'complete',
@@ -634,7 +654,7 @@ export function renderBenchmarkReport(
     ...((process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA) && /^[0-9a-f]{40}$/.test(process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA ?? '') ? [`Tool SHA: \`${process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA}\``, ''] : []),
     `Run status: **${completion}** (${results.length} of ${expectedCount} repositories recorded).`, '',
     `Automatic migration rate: **${rate}** (${migrated} of ${detected} detected migration items).`,
-    'The denominator counts migration change groups plus manual API findings, including potential edits withheld in files with manual findings; it does not count individual API callsites. The OpenAI benchmark confirms Node.js 20 for its disposable Node 24 container only; it does not establish any repository’s production runtime.', '',
+    'The denominator counts migration change groups plus manual findings, including potential edits withheld in files with manual findings and up to five new compiler diagnostics per previously passing project; it does not count individual API callsites. The OpenAI benchmark confirms Node.js 20 for its disposable Node 24 container only; it does not establish any repository’s production runtime.', '',
     '| Repository | Pinned commit | Status | Detected items | Migrated | Manual | Types before | Types after | Tests before | Tests after | Details |',
     '|---|---|---:|---:|---:|---:|---|---|---|---|---|',
     ...results.map((row) => `| ${cell(row.name)} | \`${row.commit.slice(0, 12)}\` | ${cell(row.status)} | ${row.usages} | ${row.migrated} | ${row.manual} | ${cell(row.typecheck.before)} | ${cell(row.typecheck.after)} | ${cell(row.tests.before)} | ${cell(row.tests.after)} | ${cell(row.details)} |`),

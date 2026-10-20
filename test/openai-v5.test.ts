@@ -153,14 +153,14 @@ describe('openai v4 to v5', () => {
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
-  it('reports a TypeScript target below the Web type guidance for v5', async () => {
+  it('does not block a lower TypeScript target without a proven typecheck error', async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-old-target-'));
     try {
       await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.29.1' }, devDependencies: { '@types/node': '^22.0.0' }, engines: { node: '>=20' } }));
       await writeFile(path.join(cwd, 'tsconfig.json'), JSON.stringify({ compilerOptions: { target: 'ES2017', lib: ['DOM', 'ES2017'] } }));
       await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
       const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
-      expect(outcome.manual.some((item) => item.file === 'tsconfig.json' && item.reason.includes('ES2018'))).toBe(true);
+      expect(outcome.manual.some((item) => item.file === 'tsconfig.json' && item.reason.includes('ES2018'))).toBe(false);
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 

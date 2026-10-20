@@ -4,11 +4,20 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, confirmBenchmarkNodeRuntime, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkManifest, readBenchmarkRepos, renderBenchmarkReport, requiresRuntimeReviewFromNotes, hasVerificationRegression, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
+import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, compilerRegressionFindings, confirmBenchmarkNodeRuntime, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkManifest, readBenchmarkRepos, renderBenchmarkReport, requiresRuntimeReviewFromNotes, hasVerificationRegression, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
 
 it('P3.4 marks the LUMEN pass-to-fail typecheck as needing review', () => {
   expect(hasVerificationRegression('pass', 'fail: src/components/ErrorBoundary.tsx TS2580')).toBe(true);
   expect(hasVerificationRegression('fail: existing', 'fail: existing')).toBe(false);
+});
+it('records a newly failing typecheck at its source line without claiming the SDK caused it', () => {
+  const findings = compilerRegressionFindings('pass', "fail: src/conversation.ts(49,32): error TS2339: Property 'chat' does not exist on type 'Beta'.");
+  expect(findings).toEqual([{ file: 'src/conversation.ts', line: 49,
+    reason: expect.stringContaining('TS2339') }]);
+  expect(findings[0]?.reason).toContain('cause is not attributed automatically');
+  expect(compilerRegressionFindings('fail: existing', 'fail: other')).toEqual([]);
+  expect(compilerRegressionFindings('pass', "fail: Command failed (exit code 2). … src/run.ts(7,3): error TS2580: Cannot find name 'process'.")[0]?.file)
+    .toBe('src/run.ts');
 });
 it('P3.4 marks experimental status in benchmark reports', () => {
   expect(renderBenchmarkReport([], 'complete', 0, openaiV5)).toContain('**Experimental migration:**');
