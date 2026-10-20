@@ -5,6 +5,12 @@ series are experimental; review proposed migrations before applying them.
 
 ## Unreleased
 
+## 0.3.0
+
+- Added experimental declarative YAML migration recipes for SDK publishers. Preview one with `upstreamfix migrate --recipe <file.yml> --experimental`.
+- Published a strict [JSON schema](docs/recipe.schema.json) and an [English format guide](docs/recipe-format.md). Recipes are data only: they cannot execute code or provide arbitrary regular expressions.
+- Made recipe migrations conservative: unsupported or ambiguous usages become manual review items; files with syntax errors, overlapping edits, or unsafe generated code are not rewritten. The ordinary verification and guarded Git branch workflow still applies.
+
 ## 0.2.0
 
 - Added a two-job GitHub Action: migration and verification run without a write token in isolated Docker containers; a separate, permissioned job validates the artifact before opening a PR or a manual-work issue. The Action never merges changes.
