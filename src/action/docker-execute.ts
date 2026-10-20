@@ -6,6 +6,7 @@ import os from 'node:os';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { executeWithProcessGroup } from '../core/verify.js';
 import { dockerBindArgs } from '../core/docker-mount.js';
+import { registerTemporaryCleanup } from '../core/process-cleanup.js';
 
 const execFile = promisify(execFileCallback);
 const image = 'node:24.22.0-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5';
@@ -47,11 +48,16 @@ export async function executeClientCommand(command: string, args: string[], cwd:
   const dockerArgs = buildClientDockerArgs(command, args, cwd, env, allowInstallNetwork, name);
   const hostHome = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-docker-host-'));
   const hostEnv = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: hostHome, DOCKER_CONFIG: path.join(hostHome, '.docker') };
+  const removeContainer = async (): Promise<void> => {
+    await execFile('docker', ['rm', '-f', name], { timeout: 10_000, env: hostEnv }).catch(() => undefined);
+  };
+  const unregisterCleanup = registerTemporaryCleanup(removeContainer);
   try {
     await mkdir(hostEnv.DOCKER_CONFIG);
     return await executeWithProcessGroup('docker', dockerArgs, temporaryRoot, hostEnv, timeoutMs);
   } finally {
-    await execFile('docker', ['rm', '-f', name], { timeout: 10_000, env: hostEnv }).catch(() => undefined);
+    await removeContainer();
+    unregisterCleanup();
     await rm(hostHome, { recursive: true, force: true });
   }
 }

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { expect, it } from 'vitest';
 import { buildClientDockerArgs } from '../src/action/docker-execute.js';
 
@@ -25,4 +26,11 @@ it('W1 mounts only the project and isolated client home, never the host Docker c
   expect(text).toContain(`${root}/home`);
   expect(text).not.toContain(`source=${root},target=${root}`);
   expect(text).not.toContain(`${root}:${root}`);
+});
+
+it('W11 registers Docker removal for signals and pre-pulls the pinned Action image', () => {
+  const executor = readFileSync(new URL('../src/action/docker-execute.ts', import.meta.url), 'utf8');
+  const action = readFileSync(new URL('../action.yml', import.meta.url), 'utf8');
+  expect(executor).toContain('registerTemporaryCleanup');
+  expect(action).toContain('docker pull --quiet node:24.22.0-bookworm-slim@sha256:');
 });
