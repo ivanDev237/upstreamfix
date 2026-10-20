@@ -69,7 +69,8 @@
     "commit": "55d2ddf998b989b0a8ff1467f8b543af9a6560d3",
     "packageManager": "npm",
     "reviewed": true,
-    "reviewNote": "At this SHA, chapter11/stable-coder/package.json declares OpenAI ^4.29.1 beside a package-lock; the repository root has no package.json. src/extension.ts calls beta.chat.completions.stream. VS Code is the only declared engine, so production Node runtime remains unverified. No project-defined test command is selected."
+    "reviewNote": "At this SHA, chapter11/stable-coder/package.json declares OpenAI ^4.29.1 beside a package-lock; the repository root has no package.json. src/extension.ts calls beta.chat.completions.stream. VS Code is the only declared engine, so production Node runtime remains unverified. No project-defined test command is selected.",
+    "invalidReason": "The pinned package-lock cannot be installed with npm ci without changing its recorded dependency graph (GitHub benchmark run 39506284925)."
   },
   {
     "name": "app-agent",
@@ -79,7 +80,8 @@
     "packageManager": "yarn",
     "yarnMode": "classic",
     "reviewed": true,
-    "reviewNote": "Root package.json declares OpenAI ^4.70.2 and yarn.lock is Yarn v1. src/lib/llm/utils/filter-apps.ts calls beta.chat.completions.parse. Installation lifecycle scripts are disabled; no project-defined test command is selected."
+    "reviewNote": "Root package.json declares OpenAI ^4.70.2 and yarn.lock is Yarn v1. src/lib/llm/utils/filter-apps.ts calls beta.chat.completions.parse. Installation lifecycle scripts are disabled; no project-defined test command is selected.",
+    "invalidReason": "The pinned yarn.lock needs an update and Yarn Classic refuses --frozen-lockfile (GitHub benchmark run 39506284925)."
   },
   {
     "name": "qspeak",
@@ -106,7 +108,8 @@
     "commit": "680901f217c373f6f3de175d97e0b76791f96d91",
     "packageManager": "npm",
     "reviewed": true,
-    "reviewNote": "Root package.json declares OpenAI ^4.70.3 beside package-lock.json. src/llm.ts calls beta.chat.completions.parse. No project-defined test command is selected."
+    "reviewNote": "Root package.json declares OpenAI ^4.70.3 beside package-lock.json. src/llm.ts calls beta.chat.completions.parse. No project-defined test command is selected.",
+    "invalidReason": "The pinned package-lock cannot be installed with npm ci without changing its recorded dependency graph (GitHub benchmark run 39506284925)."
   },
   {
     "name": "pii-detective",
@@ -134,5 +137,50 @@
     "packageManager": "npm",
     "reviewed": true,
     "reviewNote": "Root package.json declares OpenAI ^4.20.1 beside package-lock.json. app/api/stacks/use-openai-assistant/route.ts calls beta.threads.runs.retrieve(threadId, run.id), exercising named path parameters. No project-defined test command is selected."
+  },
+  {
+    "name": "convex-title-generator",
+    "url": "https://github.com/webdevcody/convex-title-generator",
+    "branch": "main",
+    "commit": "f77f2d452bc74049958f184e7726b40c151955cd",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Root package.json declares OpenAI ^4.91.1 with package-lock.json and tsconfig.json. convex/agents.ts calls beta.chat.completions.parse. Development and seed scripts are not selected; inferred tsc runs without network."
+  },
+  {
+    "name": "codenames-ai",
+    "url": "https://github.com/SuveenE/codenames-ai",
+    "branch": "main",
+    "commit": "a9db74608bf1b885d761a9d35bedd16619373745",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Root package.json declares OpenAI ^4.77.0 with package-lock.json and tsconfig.json. app/api/gpt/route.ts calls beta.chat.completions.parse. No project-defined test command is selected."
+  },
+  {
+    "name": "customizable-ai-chatbot",
+    "url": "https://github.com/hoangsonww/Customizable-AI-Chatbot",
+    "branch": "master",
+    "commit": "712825011e6f1aca3b3b6bb87861e5fc0c48d852",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Root package.json declares OpenAI ^4.67.3 with package-lock.json and tsconfig.json. modules/intention.ts calls beta.chat.completions.parse. The build and placeholder test scripts are not selected; inferred tsc runs without network."
+  },
+  {
+    "name": "ai-ui-demo",
+    "url": "https://github.com/kenzic/ai-ui-demo",
+    "branch": "main",
+    "commit": "092aaaaec604ab06b6839531229ee70976c8d41a",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Root package.json declares OpenAI ^4.56.0 with package-lock.json and tsconfig.json. app/api/ui/route.ts calls beta.chat.completions.parse. No project-defined test command is selected."
+  },
+  {
+    "name": "vector-sets-browser",
+    "url": "https://github.com/redis/vector-sets-browser",
+    "branch": "main",
+    "commit": "1147b7b561ebafe1ed3bd25bb96967fb0081077e",
+    "packageManager": "npm",
+    "reviewed": true,
+    "reviewNote": "Root package.json declares OpenAI ^4.88.0 with package-lock.json and tsconfig.json. app/api/openai/generatetemplate/route.ts calls beta.chat.completions.parse. No project-defined test command is selected."
   }
 ]
