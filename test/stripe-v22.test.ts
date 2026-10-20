@@ -226,6 +226,21 @@ function send(client) { client['customers'].retrieve('cus_1', { stripeAccount: '
     const result = stripeV22.transform(project);
     expect(result.manual.filter((item) => /untracked|indirect|alias/i.test(item.reason)).length).toBeGreaterThanOrEqual(8);
   });
+  it('Y5 ignores database methods but flags untracked Stripe resource calls', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('mixed.ts', `import Stripe from 'stripe';
+const stripe = new Stripe('key');
+db.customers.findOne();
+prisma.invoices.findMany();
+db.charges.insert();
+c.products.retrieve('prod_1', { stripeAccount: 'acct_1' });
+this.client.accounts.del('acct_1', { stripeAccount: 'acct_1' });
+`);
+    const result = stripeV22.transform(project);
+    expect(result.manual.some((item) => /db\.customers|prisma\.invoices|db\.charges/.test(item.snippet))).toBe(false);
+    expect(result.manual.some((item) => item.snippet.includes('c.products.retrieve'))).toBe(true);
+    expect(result.manual.some((item) => item.snippet.includes('this.client.accounts.del'))).toBe(true);
+  });
   it('W10 includes a sibling module using a locally imported Stripe client in project analysis', async () => {
     const cwd = await makeProject("import Stripe from 'stripe';\nexport const stripe = new Stripe('sk_test_fixture');\n");
     await writeFile(path.join(cwd, 'consumer.ts'), "import { stripe } from './client';\nstripe.customers.create({});\n");

@@ -14,6 +14,8 @@ const REMOVED_RESOURCE_METHODS = new Set([
 // can have ID-less methods with the same name, so keep them manual until checked.
 const ID_FIRST_REQUEST_METHODS = new Set(['customers.retrieve', 'customers.update']);
 const PARAMS_FIRST_REQUEST_METHODS = new Set(['create', 'list', 'search']);
+const STRIPE_RESOURCE_NAMES = new Set(['customers', 'products', 'accounts', 'paymentIntents', 'setupIntents', 'balance', 'invoices', 'charges', 'subscriptions', 'refunds', 'payouts', 'transfers', 'prices', 'checkout', 'webhooks']);
+const STRIPE_RESOURCE_METHODS = new Set(['create', 'retrieve', 'update', 'del', 'list', 'search', 'capture', 'confirm', 'cancel', 'pay', 'refund', 'send', 'verifyHeader', 'verifyHeaderAsync']);
 // Removed from these parameter types in the published Stripe declarations.
 // The destination SDK rejects the old field; replacing it can change payment behavior.
 const REMOVED_PAYMENT_METHOD_TYPES_PARAMS = new Map([
@@ -345,21 +347,23 @@ function reportIndirectStripeClients(sourceFile: SourceFile, result: MigrationRe
     .map((parameter) => parameter.getName()));
   const locallyImported = new Set(sourceFile.getImportDeclarations()
     .filter((declaration) => declaration.getModuleSpecifierValue().startsWith('.'))
-    .flatMap((declaration) => declaration.getNamedImports()
-      .filter((specifier) => specifier.getName().toLowerCase() === 'stripe')
-      .map((specifier) => specifier.getAliasNode()?.getText() ?? specifier.getName())));
+    .flatMap((declaration) => [
+      ...(declaration.getDefaultImport() ? [declaration.getDefaultImport()!.getText()] : []),
+      ...declaration.getNamedImports().map((specifier) => specifier.getAliasNode()?.getText() ?? specifier.getName()),
+    ]));
   for (const call of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
     const expression = call.getExpression();
     const path = propertyPath(expression);
     const text = expression.getText();
-    const indirect = text.startsWith('this.stripe.') && text.split('.').length >= 4
-      || path.length >= 3 && (typedParameters.has(path[0]!) || locallyImported.has(path[0]!))
+    const normalized = text.replace(/\[['"]([A-Za-z][A-Za-z0-9]*)['"]\]/g, '.$1');
+    const parts = normalized.split('.');
+    const resourceUse = parts.length >= 3 && STRIPE_RESOURCE_NAMES.has(parts.at(-2)!) && STRIPE_RESOURCE_METHODS.has(parts.at(-1)!);
+    const indirect = resourceUse && (
+      text.startsWith('this.stripe.') || text.startsWith('this.client.')
+      || typedParameters.has(parts[0]!) || locallyImported.has(parts[0]!)
       || indirectAliases.has(path[0] ?? '')
-      || (!trackedClients.has(path[0] ?? '') && !bindings.constructors.has(path[0] ?? '')
-        && /(?:\.|\[['"])(?:customers|paymentIntents|setupIntents|balance|invoices|charges|subscriptions)(?:\.|['"]\])/.test(text))
-      || (!trackedClients.has(path[0] ?? '') && call.getArguments().some((argument) =>
-        Node.isObjectLiteralExpression(argument) && argument.getProperties().some((property) =>
-          Node.isPropertyAssignment(property) && ['stripeAccount', 'idempotencyKey'].includes(property.getName()))));
+      || (!trackedClients.has(parts[0]!) && !bindings.constructors.has(parts[0]!))
+    ) || indirectAliases.has(path[0] ?? '') && parts.length <= 2;
     if (!indirect || result.manual.some((item) => item.file === sourceFile.getFilePath() && item.line === call.getStartLineNumber())) continue;
     addManual(sourceFile, result.manual, call, 'This indirectly held Stripe client is untracked; review its v22/v23 request behavior manually.', call.getText());
   }
