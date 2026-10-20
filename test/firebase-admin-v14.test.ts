@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Project } from 'ts-morph';
 import { loadProject, runMigration } from '../src/core/runner.js';
 import { verifyProposedMigration } from '../src/core/verify.js';
 import { firebaseAdminV14, hasOverlappingEdits } from '../src/migrations/firebase-admin-v14/index.js';
@@ -31,6 +32,45 @@ afterEach(async () => {
 });
 
 describe('firebase-admin v14 migration', () => {
+  it.each([
+    "const admin = require('firebase-admin');\nadmin.initializeApp();\nmodule.exports = { admin };\n",
+    "import * as admin from 'firebase-admin';\nadmin.initializeApp();\nexport { admin };\n",
+    "import * as admin from 'firebase-admin';\nadmin.initializeApp();\nconst o = { admin };\n",
+  ])('Z1 keeps a Firebase alias referenced by a shorthand property or export: %s', async (source) => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'server.ts'), source);
+    const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.file.endsWith('server.ts') && /admin/.test(item.snippet))).toBe(true);
+    expect(result.proposedFiles.some((file) => file.relativePath === 'server.ts')).toBe(false);
+  });
+  it('W9 withholds a source file above the analysis limit', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'large.ts'), "import * as admin from 'firebase-admin';\n" + ' '.repeat(2 * 1024 * 1024) + '\nadmin.firestore();\n');
+    const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.file.endsWith('large.ts') && /size|large/i.test(item.reason))).toBe(true);
+    expect(result.proposedFiles.some((file) => file.relativePath === 'large.ts')).toBe(false);
+  });
+  it('X7 skips a huge unrelated source without blocking an SDK upgrade', async () => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'vendor.min.js'), 'const unrelated = 1;\n' + 'x'.repeat(2 * 1024 * 1024));
+    const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.file.endsWith('vendor.min.js'))).toBe(false);
+    expect(result.proposedFiles.some((file) => file.relativePath === 'package.json')).toBe(true);
+  });
+  it('X7 reads Firebase import declarations a bounded number of times', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    const file = project.createSourceFile('server.ts', "import * as admin from 'firebase-admin';\n" + 'admin.firestore();\n'.repeat(100));
+    const declarations = vi.spyOn(file, 'getImportDeclarations');
+    firebaseAdminV14.transform(project);
+    expect(declarations.mock.calls.length).toBeLessThan(20);
+  });
+  it.each(["class getAuth {}", "import getAuth = require('./other');", 'namespace getAuth {}'])('W12/X8 reports a Firebase import collision: %s', async (declaration) => {
+    const cwd = await makeProject();
+    await writeFile(path.join(cwd, 'server.ts'), `import * as admin from 'firebase-admin';\n${declaration}\nadmin.auth();\n`);
+    const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(result.manual.some((item) => /already declared|collision/i.test(item.reason))).toBe(true);
+    expect(result.proposedFiles.some((file) => file.relativePath === 'server.ts')).toBe(false);
+  });
   it('omits configured excluded folders from source analysis and manifest changes', async () => {
     const cwd = await makeProject();
     await mkdir(path.join(cwd, 'examples'));
@@ -358,6 +398,15 @@ describe('firebase-admin v14 migration', () => {
 
     expect(outcome.manual.length).toBeGreaterThan(0);
     expect(outcome.manual.map((item) => item.reason).join('\n')).toMatch(/already declared|no longer exported/);
+    expect(outcome.filesChanged).not.toContain('package.json');
+  });
+  it('Y6 leaves mutations of the removed admin.apps property for manual review', async () => {
+    const cwd = await makeProject();
+    const source = "import * as admin from 'firebase-admin';\ndelete admin.apps;\nadmin.apps = [];\n";
+    await writeFile(path.join(cwd, 'server.ts'), source);
+    const outcome = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    expect(outcome.manual.some((item) => /mutat|apps/i.test(item.reason))).toBe(true);
+    expect(outcome.filesChanged).not.toContain('server.ts');
     expect(outcome.filesChanged).not.toContain('package.json');
   });
 

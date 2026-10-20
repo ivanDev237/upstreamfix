@@ -59,6 +59,35 @@ afterEach(async () => {
 });
 
 describe('migration verification', () => {
+  it('W3 excludes pnpm workspace code hooks and disables pnpmfile loading during installation', async () => {
+    const cwd = await makeProject({ test: 'node -e "process.exit(0)"' }, 'pnpm@10.0.0');
+    await writeFile(path.join(cwd, 'pnpm-workspace.yaml'), 'packages:\n  - .\npnpmfile: ./evil.cjs\nconfigDependencies:\n  evil: ./evil.cjs\n');
+    await execFile('git', ['add', 'pnpm-workspace.yaml'], { cwd });
+    const installs: string[][] = [];
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (command, args, directory) => {
+        if (command === 'pnpm' && args[0] === 'install') {
+          installs.push(args);
+          await expect(readFile(path.join(path.dirname(directory), 'project', 'pnpm-workspace.yaml'), 'utf8')).rejects.toThrow();
+        }
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('passed');
+    expect(installs).toHaveLength(1);
+    expect(installs[0]).toContain('--config.pnpmfile=/dev/null');
+    expect(installs[0]).toContain('--config.global-pnpmfile=/dev/null');
+  });
+  it('W6 rejects a FIFO and oversized metadata without blocking', async () => {
+    const cwd = await makeProject();
+    const fifo = path.join(cwd, 'metadata.fifo');
+    const created = spawnSync('mkfifo', [fifo], { timeout: 3_000 });
+    if (created.status !== 0) throw new Error('mkfifo is required for this Linux security test.');
+    await expect(readRegularFile(fifo)).rejects.toThrow(/regular file/i);
+    const large = path.join(cwd, 'large.json');
+    await writeFile(large, 'x'.repeat(8 * 1024 * 1024 + 1));
+    await expect(readRegularFile(large)).rejects.toThrow(/size limit/i);
+  });
   it('runs configured custom checks only in the isolated verification copy', async () => {
     const cwd = await makeProject();
     const observed: Array<{ command: string; args: string[]; directory: string; token?: string }> = [];
@@ -223,6 +252,15 @@ describe('migration verification', () => {
     await writeFile(path.join(outside, 'package.json'), '{"name":"secret"}');
     await symlink(outside, path.join(project, 'linked'));
     await expect(readRegularFile(path.join(project, 'linked', 'package.json'))).rejects.toThrow('symbolic link');
+  });
+  it('X8 accepts a trusted project root reached through a symlink', async () => {
+    const project = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-trusted-project-'));
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-trusted-link-'));
+    temporaryDirectories.push(project, parent);
+    await writeFile(path.join(project, 'package.json'), '{"name":"fixture"}\n');
+    const alias = path.join(parent, 'project');
+    await symlink(project, alias);
+    await expect(readRegularFile(path.join(alias, 'package.json'), alias)).resolves.toContain('fixture');
   });
 
   it('T35 never echoes invalid package contents in a verification error', async () => {

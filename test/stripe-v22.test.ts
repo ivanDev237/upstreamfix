@@ -120,6 +120,18 @@ stripe.customers.update('cus_123', {stripeAccount: 'acct_123'});
     expect(migrated).toContain("list({limit: 10}, {stripeAccount: 'acct_123'})");
     expect(migrated).toContain("update('cus_123', undefined, {stripeAccount: 'acct_123'})");
   });
+  it.each([
+    "stripe.balance.retrieve(params, { stripeAccount: 'acct_123' });",
+    "stripe.tax.settings.retrieve(params, { stripeAccount: 'acct_123' });",
+    "stripe.customers.retrieve(undefined, { stripeAccount: 'acct_123' });",
+  ])('W2 leaves non-ID-first or undefined-ID calls for manual review: %s', (call) => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('connect.ts', `import Stripe from 'stripe';\nconst stripe = new Stripe('sk_test_fixture');\nconst params = { expand: ['available'] };\n${call}\n`);
+    const result = stripeV22.transform(project);
+    expect(result.changes.map((change) => change.rule)).not.toContain('request-options-position');
+    expect(result.manual.length).toBeGreaterThan(0);
+    expect(result.fileUpdates).toEqual([]);
+  });
 
   it('flags ambiguous ID-first request options for manual review without changing them', () => {
     const project = new Project({ useInMemoryFileSystem: true });
@@ -167,6 +179,136 @@ type Error = StripeCtor.errors.StripeError;
     expect(migrated).toContain('new StripeCtor(');
     expect(migrated).toContain('StripeCtor.StripeContextType');
     expect(migrated).toContain('InstanceType<typeof StripeCtor.errors.StripeError>');
+  });
+  it('W7 leaves a parameter shadowing the imported Stripe constructor untouched', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('shadow.ts', "import Stripe from 'stripe';\nfunction make(Stripe: (key: string) => unknown) { return Stripe('key'); }\nconst client = Stripe('key');\n");
+    const result = stripeV22.transform(project);
+    const migrated = result.fileUpdates?.[0]?.contents ?? '';
+    expect(migrated).toContain("return Stripe('key')");
+    expect(migrated).toContain("const client = new Stripe('key')");
+  });
+  it('W10 reports unrecognized Stripe bindings instead of silently upgrading the SDK', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('client.ts', "const Stripe = require(`stripe`);\nfunction send(client: Stripe) { return client.customers.create({}); }\n");
+    const result = stripeV22.transform(project);
+    expect(result.manual.length).toBeGreaterThan(0);
+    expect(result.fileUpdates).toHaveLength(0);
+  });
+  it('W10 accepts a recognized Stripe import already using the target constructor form', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('client.ts', "import Stripe from 'stripe';\nexport const stripe = new Stripe('sk_test_fixture');\n");
+    expect(stripeV22.transform(project).manual).toEqual([]);
+  });
+  it('W10 reports clients passed as parameters, stored on this, or imported from a local module', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('delegated.ts', "import Stripe from 'stripe';\nimport { stripe } from './client';\nfunction use(client: Stripe) { client.customers.retrieve('cus_1', { stripeAccount: 'acct_1' }); }\nclass Service { constructor(private stripe: Stripe) {} send() { return this.stripe.customers.retrieve('cus_1', { stripeAccount: 'acct_1' }); } }\nstripe.customers.retrieve('cus_1', { stripeAccount: 'acct_1' });\n");
+    const result = stripeV22.transform(project);
+    expect(result.manual.filter((item) => /untracked|locally imported|indirect/i.test(item.reason))).toHaveLength(3);
+  });
+  it('X5 reports every indirect Connect client even beside a recognized constructor', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('indirect.ts', `import Stripe from 'stripe';
+import billing from './client';
+import { stripe as other } from './another';
+const stripe = new Stripe('key');
+const t2 = stripe;
+const { customers } = stripe;
+const S2 = Stripe;
+S2('key');
+t2.customers.retrieve('cus_1', { stripeAccount: 'acct_1' });
+customers.retrieve('cus_1', { stripeAccount: 'acct_1' });
+billing.customers.retrieve('cus_1', { stripeAccount: 'acct_1' });
+other.customers.retrieve('cus_1', { stripeAccount: 'acct_1' });
+this.client.customers.retrieve('cus_1', { stripeAccount: 'acct_1' });
+function send(client) { client['customers'].retrieve('cus_1', { stripeAccount: 'acct_1' }); }
+`);
+    const result = stripeV22.transform(project);
+    expect(result.manual.filter((item) => /untracked|indirect|alias/i.test(item.reason)).length).toBeGreaterThanOrEqual(8);
+  });
+  it('Y5 ignores database methods but flags untracked Stripe resource calls', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('mixed.ts', `import Stripe from 'stripe';
+const stripe = new Stripe('key');
+db.customers.findOne();
+prisma.invoices.findMany();
+db.charges.insert();
+c.products.retrieve('prod_1', { stripeAccount: 'acct_1' });
+this.client.accounts.del('acct_1', { stripeAccount: 'acct_1' });
+`);
+    const result = stripeV22.transform(project);
+    expect(result.manual.some((item) => /db\.customers|prisma\.invoices|db\.charges/.test(item.snippet))).toBe(false);
+    expect(result.manual.some((item) => item.snippet.includes('c.products.retrieve'))).toBe(true);
+    expect(result.manual.some((item) => item.snippet.includes('this.client.accounts.del'))).toBe(true);
+  });
+  it('Z3 ignores unrelated database methods even when their names match Stripe methods', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('mixed.ts', `import Stripe from 'stripe';
+const stripe = new Stripe('key');
+db.customers.retrieve('row');
+prisma.invoices.create({});
+this.client.subscriptions.list();
+`);
+    expect(stripeV22.transform(project).manual).toEqual([]);
+  });
+  it('Z3 does not classify another SDK as Stripe in a file with no Stripe binding', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('other.ts', `import { client } from './database';
+client.customers.retrieve('row', { apiKey: 'database-only' });
+this.client.products.retrieve('row', { apiKey: 'database-only' });
+`);
+    expect(stripeV22.transform(project).manual).toEqual([]);
+  });
+  it('Z3 ignores Stripe text in another package while retaining real SDK imports', async () => {
+    const cwd = await makeProject("import Stripe from 'stripe';\nnew Stripe('key');\n");
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ name: 'monorepo' }));
+    await mkdir(path.join(cwd, 'backend'));
+    await writeFile(path.join(cwd, 'backend', 'package.json'), JSON.stringify({ dependencies: { stripe: '^21.0.0' } }));
+    await writeFile(path.join(cwd, 'backend', 'client.ts'), "import Stripe from 'stripe';\nnew Stripe('key');\n");
+    await mkdir(path.join(cwd, 'frontend'));
+    await writeFile(path.join(cwd, 'frontend', 'package.json'), JSON.stringify({ dependencies: { react: '^19.0.0' } }));
+    await writeFile(path.join(cwd, 'frontend', 'api.ts'), "export const url = '/api/stripe/checkout';\n");
+    await writeFile(path.join(cwd, 'frontend', 'real.ts'), "import Stripe from 'stripe';\nconst stripe = new Stripe('key');\n");
+    const result = await runMigration(stripeV22, { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.file === 'frontend/api.ts')).toBe(false);
+    expect(result.manual.some((item) => item.file === 'frontend/real.ts')).toBe(true);
+  });
+  it('Z3 flags nested and newly covered resources on untracked clients', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('client.ts', `import Stripe from 'stripe';
+const opts = { stripeAccount: 'acct_1' };
+c.checkout.sessions.retrieve('cs_1', opts);
+c.paymentMethods.attach('pm_1', { customer: 'cus_1', ...opts });
+c.subscriptionItems.retrieve('si_1', opts);
+c.billingPortal.sessions.create({ customer: 'cus_1' });
+`);
+    const snippets = stripeV22.transform(project).manual.map((item) => item.snippet);
+    for (const resource of ['checkout.sessions', 'paymentMethods', 'subscriptionItems', 'billingPortal.sessions']) {
+      expect(snippets.some((snippet) => snippet.includes(resource))).toBe(true);
+    }
+  });
+  it('Z3 flags variable request options on an ID-first Stripe method', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('client.ts', `import Stripe from 'stripe';
+const stripe = new Stripe('key');
+const opts = { stripeAccount: 'acct_1' };
+stripe.customers.retrieve('cus_1', opts);
+`);
+    expect(stripeV22.transform(project).manual.some((item) => item.snippet.includes('stripe.customers.retrieve'))).toBe(true);
+  });
+  it('W10 includes a sibling module using a locally imported Stripe client in project analysis', async () => {
+    const cwd = await makeProject("import Stripe from 'stripe';\nexport const stripe = new Stripe('sk_test_fixture');\n");
+    await writeFile(path.join(cwd, 'consumer.ts'), "import { stripe } from './client';\nstripe.customers.retrieve('cus_1', { stripeAccount: 'acct_1' });\n");
+    const result = await runMigration(stripeV22, { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.file === 'consumer.ts' && /untracked/i.test(item.reason))).toBe(true);
+    expect(result.filesChanged).not.toContain('package.json');
+  });
+  it('X5 includes a sibling module with a default local client and no Stripe name', async () => {
+    const cwd = await makeProject("import Stripe from 'stripe';\nexport default new Stripe('key');\n");
+    await writeFile(path.join(cwd, 'consumer.ts'), "import billing from './client';\nbilling.customers.retrieve('cus_1', {stripeAccount: 'acct_1'});\n");
+    const result = await runMigration(stripeV22, { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.file === 'consumer.ts' && /untracked|indirect/i.test(item.reason))).toBe(true);
+    expect(result.filesChanged).not.toContain('package.json');
   });
 
   it('reports callback migration for review without inventing async control flow', () => {

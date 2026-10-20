@@ -50,6 +50,19 @@ jobs:
         run: npx vitest run test/firebase-admin-v14.test.ts -t "regenerates a v3 npm package lock"
         env:
           UPSTREAMFIX_RUN_LOCKFILE_NETWORK_TESTS: '1'
+      - name: Validate a real Firebase npm lockfile at the publication boundary
+        run: npx vitest run test/action-publish.test.ts -t "validates a real firebase-admin 13 to 14 npm lockfile upgrade"
+        env:
+          UPSTREAMFIX_RUN_LOCKFILE_NETWORK_TESTS: '1'
+          UPSTREAMFIX_LOCK_FIXTURE_OUTPUT: ${{ runner.temp }}/firebase-lock-fixture
+      - name: Preserve exact npm-generated lockfile fixture
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: firebase-lock-fixture-node-${{ matrix.node-version }}
+          path: ${{ runner.temp }}/firebase-lock-fixture
+          if-no-files-found: error
+          retention-days: 7
       - name: Verify Firebase migration against published SDK releases
         run: npx vitest run test/firebase-admin-real-sdk.test.ts
         env:

@@ -32,6 +32,54 @@ afterEach(async () => {
 });
 
 describe('declarative recipes', () => {
+  it.each(["admin.apps = [];", "admin.apps++;"])('W8 reports an SDK namespace-property write: %s', async (statement) => {
+    const cwd = await fixture(`import * as admin from 'firebase-admin';\n${statement}\n`);
+    const result = await runMigration(await loadRecipe(recipePath), { cwd, dryRun: true });
+    expect(result.manual.some((item) => /write|assign|mutat/i.test(item.reason))).toBe(true);
+    expect(result.proposedFiles).toHaveLength(0);
+  });
+  it.each([
+    'delete admin.apps;',
+    '[admin.apps] = [[]];',
+    '({x: admin.apps} = {x: []});',
+    'for (admin.apps of [[]]) {}',
+    '(admin.apps) = [];',
+    'admin.apps! = [];',
+  ])('X6 withholds recipe namespace-property mutations: %s', async (statement) => {
+    const cwd = await fixture(`import * as admin from 'firebase-admin';\n${statement}\n`);
+    const result = await runMigration(await loadRecipe(recipePath), { cwd, dryRun: true });
+    expect(result.manual.some((item) => /write|assign|mutat/i.test(item.reason))).toBe(true);
+    expect(result.proposedFiles).toHaveLength(0);
+  });
+  it('W10 reports a backtick require instead of upgrading without a binding', async () => {
+    const cwd = await fixture("const admin = require(`firebase-admin`);\nadmin.firestore();\n");
+    const result = await runMigration(await loadRecipe(recipePath), { cwd, dryRun: true });
+    expect(result.manual.length).toBeGreaterThan(0);
+    expect(result.proposedFiles).toHaveLength(0);
+  });
+  it('W12 preserves a type-only modifier on renamed imports and rejects prototype package names', async () => {
+    const template = `schemaVersion: 1
+id: acme-sdk@2
+package: acme-sdk
+fromMajor: 1
+toMajor: 2
+releasedAt: 2026-10-19
+title: Acme SDK v2
+guideUrl: https://example.org/upgrade
+nodeMajor: 22
+rules:
+  - kind: export-rename
+    id: rename-type
+    name: OldType
+    to: NewType
+`;
+    const recipe = parseRecipe(template);
+    const cwd = await fixture("import { type OldType } from 'acme-sdk';\nconst value: OldType | null = null;\n");
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { 'acme-sdk': '^1.0.0' }, engines: { node: '>=22' } }));
+    const result = await runMigration(recipe, { cwd, dryRun: true });
+    expect(result.proposedFiles.find((file) => file.relativePath === 'server.ts')?.after).toContain('type NewType as OldType');
+    expect(() => parseRecipe(template.replaceAll('acme-sdk', 'constructor'))).toThrow(/package/i);
+  });
   it.each([
     "const admin = require('firebase-admin');\nmodule.exports = { admin };\nadmin.firestore();\n",
     "import * as admin from 'firebase-admin';\nexport { admin };\nadmin.firestore();\n",
@@ -140,6 +188,14 @@ describe('declarative recipes', () => {
   it('V7 requires an explicit experimental opt-in for a recipe', async () => {
     const cwd = await fixture("import * as admin from 'firebase-admin';\nadmin.firestore();\n");
     await expect(createProgram().parseAsync(['node', 'upstreamfix', 'migrate', '--recipe', recipePath, '--cwd', cwd])).rejects.toThrow(/experimental/i);
+  });
+  it('distinguishes an experimental recipe from the validated catalog migration', async () => {
+    const cwd = await fixture("import * as admin from 'firebase-admin';\nadmin.firestore();\n");
+    const message = await createProgram().parseAsync(['node', 'upstreamfix', 'migrate', '--recipe', recipePath, '--cwd', cwd])
+      .then(() => '', (error: unknown) => error instanceof Error ? error.message : String(error));
+    expect(message).toContain('This recipe is experimental');
+    expect(message).not.toContain('firebase-admin@14 is experimental');
+    expect(message).toContain('--experimental');
   });
   it('V7 is never less cautious than the built-in Firebase migration across 65 cases', async () => {
     const recipe = await loadRecipe(recipePath);

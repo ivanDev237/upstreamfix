@@ -1,11 +1,12 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
-import { writeMigrationOnBranch } from '../src/core/write-branch.js';
+import { assertChangedSourcesUseTargetSdk, writeMigrationOnBranch } from '../src/core/write-branch.js';
+import type { RunOutcome } from '../src/core/runner.js';
 
 const execFile = promisify(execFileCallback);
 const roots: string[] = [];
@@ -50,14 +51,28 @@ afterEach(async () => {
 });
 
 describe('verified Git branch writes', () => {
-  it('commits a changed file larger than the former Git output buffer', async () => {
+  it('W4 refuses a symlinked package manifest without exposing its target contents', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-manifest-link-'));
+    roots.push(root);
+    const nested = path.join(root, 'src');
+    await mkdir(nested);
+    const secret = path.join(root, 'secret.txt');
+    await writeFile(secret, 'root:x:0:0:secret-data');
+    await symlink(secret, path.join(nested, 'package.json'));
+    const outcome: RunOutcome = {
+      changes: [], manual: [], filesChanged: ['src/index.js'], fileUpdates: [],
+      manifestNotes: [], proposedDiff: [], proposedFiles: [],
+    };
+    const message = await assertChangedSourcesUseTargetSdk(root, firebaseAdminV14, outcome)
+      .then(() => '', (error: unknown) => error instanceof Error ? error.message : String(error));
+    expect(message).toContain('Unsafe package.json');
+    expect(message).not.toContain('root:x:0:0');
+  });
+  it('W9 refuses to write a source file above the analysis limit', async () => {
     const source = `// ${'x'.repeat(2_200_000)}\nconst admin = require('firebase-admin');\nadmin.firestore();\n`;
     const cwd = await makeRepository(source);
-    const result = await writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions });
-
-    expect(result.verification.status).toBe('passed');
-    expect(await git(cwd, 'cat-file', '-s', `${result.branch}:index.js`)).toMatch(/^2[0-9]{6}$/);
-    expect(await git(cwd, 'show', `${result.branch}:package.json`)).toContain('^14.0.0');
+    await expect(writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions })).rejects.toThrow(/manual review/);
+    expect((await git(cwd, 'branch', '--list', 'upstreamfix/*')).trim()).toBe('');
     expect((await git(cwd, 'status', '--porcelain')).trim()).toBe('');
   });
 
@@ -264,5 +279,18 @@ describe('verified Git branch writes', () => {
     await symlink(cwd, link);
     const result = await writeMigrationOnBranch(firebaseAdminV14, { cwd: link, verificationOptions });
     expect(result.branch).toBe('upstreamfix/firebase-admin-14');
+  });
+  it('X8 allows a credential-free local pushurl and insteadOf setting', async () => {
+    const cwd = await makeRepository();
+    await git(cwd, 'config', 'remote.origin.pushurl', 'https://github.com/example/repo.git');
+    await git(cwd, 'config', 'url.https://github.com/.insteadOf', 'gh:');
+    const result = await writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions });
+    expect(result.branch).toBe('upstreamfix/firebase-admin-14');
+  });
+  it('X8 refuses a pushInsteadOf rewrite to a command transport', async () => {
+    const cwd = await makeRepository();
+    await git(cwd, 'config', 'url.ext::sh -c true;.pushInsteadOf', 'gh:');
+    await expect(writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions }))
+      .rejects.toThrow(/configured Git|hooks|filter/i);
   });
 });

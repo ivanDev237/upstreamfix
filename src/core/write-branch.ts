@@ -1,11 +1,11 @@
 import { execFile as execFileCallback } from 'node:child_process';
-import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { Migration, PackageManifest } from './types.js';
 import { runMigration, type RunOutcome } from './runner.js';
-import { applyProposedFiles, verifyProposedMigration, type VerificationOptions, type VerificationResult } from './verify.js';
+import { applyProposedFiles, readRegularFile, verifyProposedMigration, type VerificationOptions, type VerificationResult } from './verify.js';
 import { registerTemporaryCleanup } from './process-cleanup.js';
 import { parseManifest } from './manifest.js';
 
@@ -15,6 +15,7 @@ export interface WriteBranchOptions {
   cwd: string;
   allowDirty?: boolean;
   nodeRuntime?: number;
+  registryBefore?: string;
   allowYarnLockInstall?: boolean;
   timeoutMs?: number;
   excludedDirectories?: readonly string[];
@@ -78,7 +79,7 @@ export async function writeMigrationOnBranch(
     await git(repositoryRoot, ['worktree', 'add', '--detach', worktree, head]);
     worktreeAdded = true;
     const projectCopy = projectRelative ? path.join(worktree, projectRelative) : worktree;
-    const outcome = await runMigration(migration, { cwd: projectCopy, dryRun: true, nodeRuntime: options.nodeRuntime, allowYarnLockInstall: options.allowYarnLockInstall, excludedDirectories: options.excludedDirectories });
+    const outcome = await runMigration(migration, { cwd: projectCopy, dryRun: true, nodeRuntime: options.nodeRuntime, allowYarnLockInstall: options.allowYarnLockInstall, excludedDirectories: options.excludedDirectories, registryBefore: options.registryBefore });
     if (outcome.manual.length > 0) {
       throw new Error(`Migration has ${outcome.manual.length} manual review item(s); no branch or commit was created.`);
     }
@@ -152,7 +153,7 @@ async function removeUncommittedBranch(repositoryRoot: string, branch: string, o
 }
 
 /** Do not commit vNext source code while its containing manifest still installs vOld. */
-async function assertChangedSourcesUseTargetSdk(projectRoot: string, migration: Migration, outcome: RunOutcome): Promise<void> {
+export async function assertChangedSourcesUseTargetSdk(projectRoot: string, migration: Migration, outcome: RunOutcome): Promise<void> {
   const proposed = new Map(outcome.proposedFiles.map((file) => [path.resolve(projectRoot, file.relativePath), file.after]));
   const targetPattern = new RegExp(`^\\s*[~^]?${migration.toMajor}(?:\\.(?:\\d+|x|\\*)){0,2}\\s*$`, 'i');
   for (const relativeFile of outcome.filesChanged) {
@@ -166,9 +167,14 @@ async function assertChangedSourcesUseTargetSdk(projectRoot: string, migration: 
     let foundRange: string | undefined;
     while (directory === projectRoot || directory.startsWith(`${projectRoot}${path.sep}`)) {
       const manifestFile = path.join(directory, 'package.json');
-      const raw = proposed.get(manifestFile) ?? await readFile(manifestFile, 'utf8').catch(() => undefined);
+      const raw = proposed.get(manifestFile) ?? await readRegularFile(manifestFile, projectRoot).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return undefined;
+        throw new Error('Unsafe package.json: manifest is not a regular file or cannot be read safely.');
+      });
       if (raw) {
-        const manifest = parseManifest<PackageManifest>(raw);
+        let manifest: PackageManifest;
+        try { manifest = parseManifest<PackageManifest>(raw); }
+        catch { throw new Error('Unsafe package.json: manifest could not be parsed safely.'); }
         const ranges = (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
           .map((section) => manifest[section]?.[migration.packageName])
           .filter((range): range is string => typeof range === 'string');
@@ -233,6 +239,7 @@ async function gitEnvironment(cwd: string, settings: Map<string, string>): Promi
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: os.devNull,
     GIT_TERMINAL_PROMPT: '0',
+    GIT_LITERAL_PATHSPECS: '1',
   };
   for (const key of ['GNUPGHOME', 'GPG_TTY', 'SSH_AUTH_SOCK', 'XDG_CONFIG_HOME', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL']) {
     if (process.env[key]) env[key] = process.env[key];
@@ -332,9 +339,21 @@ async function assertSafeLocalGitConfig(repositoryRoot: string): Promise<void> {
       if (/^include(?:if\..*)?\.path$/.test(key)) dangerous.push(`${origin}: ${key}`);
       else if (key === 'core.fsmonitor' && value && !/^false$/i.test(value)) dangerous.push(`${origin}: ${key}`);
       else if (/^(?:filter\..*\.(?:clean|smudge|process|required)|diff\.external|diff\..*\.command|gpg\..*)$/.test(key) && value) dangerous.push(`${origin}: ${key}`);
+      else if (/^remote\..*\.pushurl$/.test(key) && value && !safeGitRemoteUrl(value)) dangerous.push(`${origin}: ${key}`);
+      else if (/^url\..*\.(?:insteadof|pushinsteadof)$/.test(key) && value) {
+        const rewriteBase = key.slice(4, key.lastIndexOf('.'));
+        if (!safeGitRemoteUrl(rewriteBase)) dangerous.push(`${origin}: ${key}`);
+      }
     }
   }
   if (dangerous.length > 0) {
     throw new Error('The repository has configured Git filters, diff commands, or fsmonitor hooks. Remove them before using --write.');
   }
+}
+
+function safeGitRemoteUrl(value: string): boolean {
+  if (/^https?:\/\/[^/\s]*@/.test(value)) return false;
+  return /^https:\/\/[A-Za-z0-9.-]+(?:\/|$)/.test(value)
+    || /^ssh:\/\/(?:git@)?[A-Za-z0-9.-]+(?:\/|$)/.test(value)
+    || /^git@[A-Za-z0-9.-]+:[A-Za-z0-9._/-]+$/.test(value);
 }

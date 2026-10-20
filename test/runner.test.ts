@@ -78,6 +78,11 @@ describe('migration report formatting', () => {
     expect(report).toContain('diff withheld');
     expect(report.length).toBeLessThan(1_000);
   });
+  it('Y6 avoids quadratic diff generation for a large line-oriented source', () => {
+    const before = 'const value = 1;\n'.repeat(8_000);
+    const after = before.replace('const value = 1;', 'const value = 2;');
+    expect(unifiedDiff('src/large.ts', before, after)).toContain('too many lines');
+  });
 
   it('escapes multiline and pipe characters in Markdown table cells', () => {
     const report = renderMarkdownReport(

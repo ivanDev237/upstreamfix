@@ -61,6 +61,7 @@ export function unpackDeclarationFiles(archive: Buffer, integrity?: string): Map
       if (!['0', '5'].includes(kind)) throw new Error(`Package archive contains an unsupported link or entry: ${name}`);
       const relative = name.startsWith('package/') ? name.slice('package/'.length) : name;
       if (kind === '0' && (/\.d\.(?:ts|mts|cts)$/.test(relative) || relative === 'package.json')) {
+        if (size > 2 * 1024 * 1024) throw new Error('Package declaration or manifest exceeds the 2 MiB analysis size limit.');
         files.set(relative, body.toString('utf8'));
       }
     }

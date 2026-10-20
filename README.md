@@ -59,6 +59,8 @@ The repository's `GITHUB_TOKEN` may leave `pull_request` checks for a bot-create
 
 Run `upstreamfix list` for the catalog included in the installed version. Run `upstreamfix scan --cwd <project>` to select stable migrations from package versions declared in root or nested `package.json` files. Use `--include-experimental` on `scan` or `--experimental` on `migrate openai@5` only after reviewing the current limits.
 
+SDK publishers can also describe supported changes in an experimental declarative YAML recipe. Preview one with `upstreamfix migrate --recipe ./upgrade.yml --experimental --cwd ./project`. Recipes are not discovered by `scan` or the GitHub Action. See the [recipe format and safety rules](docs/recipe-format.md).
+
 ## Detecting SDK changes
 
 These commands report evidence for review. They do not create migration rules or pull requests.

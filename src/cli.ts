@@ -123,7 +123,7 @@ export function createProgram(): Command {
     .action(async (migrationId: string | undefined, options: { cwd: string; recipe?: string; write?: boolean; allowDirty?: boolean; verify?: boolean; experimental?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: number; allowYarnLockInstall?: boolean }) => {
       if (Boolean(migrationId) === Boolean(options.recipe)) throw new Error('Choose exactly one catalog migration identifier or --recipe <file>.');
       const migration = options.recipe ? await loadRecipe(path.resolve(options.recipe)) : migrations.find((candidate) => candidate.id === migrationId)!;
-      if (migration.experimental && !options.experimental) throw new Error(`${migration.id} is experimental. Re-run with --experimental after reviewing its limits.`);
+      if (migration.experimental && !options.experimental) throw new Error(`${options.recipe ? 'This recipe' : migration.id} is experimental. Re-run with --experimental after reviewing its limits.`);
       if (options.nodeRuntime && !((!migration.declarativeRecipe && options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (!migration.declarativeRecipe && options.nodeRuntime === 20 && migration.id === 'openai@5') || options.nodeRuntime === migration.requiredNodeMajor)) throw new Error('--node-runtime 22 applies to firebase-admin@14; --node-runtime 20 applies to openai@5; recipes require their declared nodeMajor.');
       const cwd = path.resolve(options.cwd);
       if (options.allowYarnLockInstall) console.log('Yarn Classic lockfile regeneration may download about 50–400 MB without a warm cache.');

@@ -25,6 +25,22 @@ async function sourcegraphHits(query) {
   }
   return hits;
 }
+async function githubHits(query) {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) throw new Error('GitHub Code Search requires a read-only workflow token');
+  const search = await fetch(`https://api.github.com/search/code?q=${encodeURIComponent(`${query} in:file`) }&per_page=50`, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'upstreamfix-corpus-discovery',
+    },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!search.ok) throw new Error(`GitHub Code Search HTTP ${search.status}`);
+  const result = await search.json();
+  return (result.items ?? []).map((item) => ({ repo: item.repository?.full_name, path: item.path }));
+}
 for (const query of queries) {
   let hits;
   try {
@@ -36,15 +52,24 @@ for (const query of queries) {
   } catch (error) {
     console.warn(`Primary discovery query ${query} unavailable: ${String(error)}`);
     try {
-      hits = await sourcegraphHits(query);
+      hits = await githubHits(query);
       successfulQueries++;
-    } catch (fallbackError) {
-      console.warn(`Fallback discovery query ${query} unavailable: ${String(fallbackError)}`);
-      continue;
+    } catch (githubError) {
+      console.warn(`GitHub discovery query ${query} unavailable: ${String(githubError)}`);
+      try {
+        hits = await sourcegraphHits(query);
+        successfulQueries++;
+      } catch (fallbackError) {
+        console.warn(`Fallback discovery query ${query} unavailable: ${String(fallbackError)}`);
+        continue;
+      }
     }
   }
   for (const hit of hits) {
-      if (!/\.(?:[cm]?[jt]sx?)$/i.test(hit.path ?? '') || !/^[\w.-]+\/[\w.-]+$/.test(hit.repo ?? '')) continue;
+    if (!/\.(?:[cm]?[jt]sx?)$/i.test(hit.path ?? '') || !/^[\w.-]+\/[\w.-]+$/.test(hit.repo ?? '')) continue;
+    const sourceSegments = hit.path.split('/');
+    if (sourceSegments.some((segment) => !segment || segment === '.' || segment === '..' || !/^[A-Za-z0-9_.@()+ -]+$/.test(segment))) continue;
+    const encodedSourcePath = sourceSegments.map(encodeURIComponent).join('/');
       const key = `${hit.repo}:${hit.path}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -62,12 +87,12 @@ for (const query of queries) {
         const pkg = await manifest.json();
         const range = pkg.dependencies?.openai ?? pkg.devDependencies?.openai;
         if (!/^\s*[~^]?4(?:\.|$)/.test(range ?? '')) continue;
-        const source = await fetch(`https://raw.githubusercontent.com/${hit.repo}/${sha}/${hit.path}`, { signal: AbortSignal.timeout(10000) });
+        const source = await fetch(`https://raw.githubusercontent.com/${hit.repo}/${sha}/${encodedSourcePath}`, { signal: AbortSignal.timeout(10000) });
         if (!source.ok) continue;
         const body = await source.text();
         if (!body.includes(query)) continue;
         candidates.push({ repository: hit.repo, commit: sha, branch: metadata.default_branch, path: hit.path,
-          sdkRange: range, matched: query, url: `https://github.com/${hit.repo}/blob/${sha}/${hit.path}` });
+          sdkRange: range, matched: query, url: `https://github.com/${hit.repo}/blob/${sha}/${encodedSourcePath}` });
       } catch (error) { console.warn(`Skipped ${key}: ${String(error)}`); }
       if (candidates.length >= 20) break;
   }

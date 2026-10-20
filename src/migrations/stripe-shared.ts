@@ -1,4 +1,4 @@
-import { Node, SyntaxKind, type Project, type SourceFile } from 'ts-morph';
+import { Node, SyntaxKind, type Project, type SourceFile, type Symbol as MorphSymbol } from 'ts-morph';
 import type { Change, ManualItem, MigrationResult } from '../core/types.js';
 
 const PACKAGE = 'stripe';
@@ -8,12 +8,14 @@ const REQUEST_OPTION_KEYS = new Set([
 const REMOVED_RESOURCE_METHODS = new Set([
   'createFullPath', 'createResourcePathWithSymbols', 'extend', 'method', '_joinUrlParts',
 ]);
-const ID_FIRST_REQUEST_METHODS = new Set([
-  'retrieve', 'update', 'del', 'delete', 'cancel', 'close', 'finalize', 'pay', 'send', 'void',
-  'capture', 'confirm', 'resume', 'pause', 'release', 'reverse', 'expire', 'submit', 'reject',
-  'accept', 'attach', 'detach', 'increment', 'decrement', 'markUncollectible',
-]);
+// These exact signatures have an ID followed by optional params and options in
+// stripe-node v22. The published v22 migration guide documents customers.retrieve;
+// CustomersResource.update uses the same first three arguments. Other resources
+// can have ID-less methods with the same name, so keep them manual until checked.
+const ID_FIRST_REQUEST_METHODS = new Set(['customers.retrieve', 'customers.update']);
 const PARAMS_FIRST_REQUEST_METHODS = new Set(['create', 'list', 'search']);
+const STRIPE_RESOURCE_NAMES = new Set(['customers', 'products', 'accounts', 'paymentIntents', 'setupIntents', 'balance', 'invoices', 'charges', 'subscriptions', 'refunds', 'payouts', 'transfers', 'prices', 'checkout.sessions', 'billingPortal.sessions', 'paymentMethods', 'subscriptionItems', 'webhooks']);
+const STRIPE_RESOURCE_METHODS = new Set(['create', 'retrieve', 'update', 'attach', 'detach', 'del', 'list', 'search', 'capture', 'confirm', 'cancel', 'pay', 'refund', 'send', 'verifyHeader', 'verifyHeaderAsync']);
 // Removed from these parameter types in the published Stripe declarations.
 // The destination SDK rejects the old field; replacing it can change payment behavior.
 const REMOVED_PAYMENT_METHOD_TYPES_PARAMS = new Map([
@@ -35,13 +37,29 @@ interface TextEdit {
 
 export function migrateStripeV22(project: Project): MigrationResult {
   const result = emptyResult();
-  for (const sourceFile of project.getSourceFiles()) migrateV22File(sourceFile, result);
+  for (const sourceFile of project.getSourceFiles()) {
+    const manualBefore = result.manual.length;
+    const changesBefore = result.changes.length;
+    migrateV22File(sourceFile, result);
+    if (manualBefore === result.manual.length && changesBefore === result.changes.length
+      && hasStripePackageReference(sourceFile) && findStripeBindings(sourceFile).constructors.size === 0) {
+      addManual(sourceFile, result.manual, sourceFile, 'This file mentions Stripe without a recognized migration binding; inspect its SDK usage manually.', 'stripe');
+    }
+  }
   return result;
 }
 
 export function migrateStripeV23(project: Project): MigrationResult {
   const result = emptyResult();
-  for (const sourceFile of project.getSourceFiles()) migrateV23File(sourceFile, result);
+  for (const sourceFile of project.getSourceFiles()) {
+    const manualBefore = result.manual.length;
+    const changesBefore = result.changes.length;
+    migrateV23File(sourceFile, result);
+    if (manualBefore === result.manual.length && changesBefore === result.changes.length
+      && hasStripePackageReference(sourceFile) && findStripeBindings(sourceFile).constructors.size === 0) {
+      addManual(sourceFile, result.manual, sourceFile, 'This file mentions Stripe without a recognized migration binding; inspect its SDK usage manually.', 'stripe');
+    }
+  }
   return result;
 }
 
@@ -52,6 +70,7 @@ function emptyResult(): MigrationResult {
 function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
   if (withholdInvalidSource(sourceFile, result)) return;
   reportUnsupportedStripeImports(sourceFile, result);
+  reportIndirectStripeClients(sourceFile, result, 22);
   const edits: TextEdit[] = [];
   const before = sourceFile.getFullText();
   const stripeBindings = findStripeBindings(sourceFile);
@@ -74,6 +93,8 @@ function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
     }
     const alias = binding.getNameNode().getText();
     constructorNames.add(alias);
+    const symbol = binding.getNameNode().getSymbol();
+    if (symbol) stripeBindings.constructorSymbols.add(symbol);
     stripeBindings.typeNames.add(alias);
     edits.push(edit(sourceFile, name, alias, 'cjs-default-export', name.getText()));
   }
@@ -145,14 +166,19 @@ function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
       // only for known ID-first methods called as `(id, options)`. In particular,
       // create/list take `(params?, options?)` and must never gain an `undefined`.
       const method = path.at(-1);
+      const resourceMethod = path.join('.');
       const optionCandidate = args.length === 2 ? args[1] : undefined;
-      if (!hostArgument && method && ID_FIRST_REQUEST_METHODS.has(method) && args.length === 2
+      if (!hostArgument && optionCandidate && Node.isIdentifier(optionCandidate)
+        && ID_FIRST_REQUEST_METHODS.has(resourceMethod)) {
+        addManual(sourceFile, result.manual, call, 'Variable request options may need a different v22 argument position; inspect the referenced value and method signature manually.', redactedSnippet(call.getText()));
+      }
+      if (!hostArgument && method && ID_FIRST_REQUEST_METHODS.has(resourceMethod) && args.length === 2
         && isResourceIdArgument(args[0]!) && optionCandidate && isRequestOptionsObject(optionCandidate)) {
         edits.push(edit(sourceFile, optionCandidate, `undefined, ${optionCandidate.getText()}`, 'request-options-position', optionCandidate.getText()));
       } else if (!hostArgument && method && args.length === 2
         && ((optionCandidate && containsRequestOptionKey(optionCandidate)
           && !PARAMS_FIRST_REQUEST_METHODS.has(method)
-          && (!ID_FIRST_REQUEST_METHODS.has(method) || !isResourceIdArgument(args[0]!) || !isRequestOptionsObject(optionCandidate)))
+          && (!ID_FIRST_REQUEST_METHODS.has(resourceMethod) || !isResourceIdArgument(args[0]!) || !isRequestOptionsObject(optionCandidate)))
           || (PARAMS_FIRST_REQUEST_METHODS.has(method) && containsRequestOptionKey(args[0]!)))) {
         addManual(sourceFile, result.manual, call, 'The Stripe request arguments resemble RequestOptions, but their v22 parameter position is ambiguous. Verify this method’s `(id, params?, options?)` or `(params?, options?)` signature and move options manually; no arguments were changed.', redactedSnippet(call.getText()));
       } else if (!hostArgument && method && args.length === 1 && containsRequestOptionKey(args[0]!)) {
@@ -168,7 +194,8 @@ function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
 
   for (const call of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
     const expression = call.getExpression();
-    if (Node.isIdentifier(expression) && constructorNames.has(expression.getText())) {
+    if (Node.isIdentifier(expression) && constructorNames.has(expression.getText())
+      && stripeBindings.constructorSymbols.has(expression.getSymbol()!)) {
       const parent = call.getParent();
       if (Node.isNewExpression(parent) && parent.getExpression() === expression) continue;
       edits.push(edit(sourceFile, expression, `new ${expression.getText()}`, 'stripe-constructor', expression.getText()));
@@ -191,6 +218,7 @@ function migrateV22File(sourceFile: SourceFile, result: MigrationResult): void {
 function migrateV23File(sourceFile: SourceFile, result: MigrationResult): void {
   if (withholdInvalidSource(sourceFile, result)) return;
   reportUnsupportedStripeImports(sourceFile, result);
+  reportIndirectStripeClients(sourceFile, result, 23);
   const edits: TextEdit[] = [];
   const before = sourceFile.getFullText();
   const stripeBindings = findStripeBindings(sourceFile);
@@ -276,6 +304,13 @@ function migrateV23File(sourceFile: SourceFile, result: MigrationResult): void {
 }
 
 function reportUnsupportedStripeImports(sourceFile: SourceFile, result: MigrationResult): void {
+  for (const call of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+    if (call.getExpression().getText() !== 'require') continue;
+    const argument = call.getArguments()[0];
+    if (Node.isNoSubstitutionTemplateLiteral(argument) && argument.getLiteralValue() === PACKAGE) {
+      addManual(sourceFile, result.manual, call, 'A backtick Stripe require needs manual review before upgrading.', 'require(`stripe`)');
+    }
+  }
   for (const declaration of sourceFile.getImportDeclarations()) {
     if (declaration.getModuleSpecifierValue() !== PACKAGE) continue;
     if (declaration.getNamespaceImport()) {
@@ -287,21 +322,106 @@ function reportUnsupportedStripeImports(sourceFile: SourceFile, result: Migratio
   }
 }
 
-function findStripeBindings(sourceFile: SourceFile): { constructors: Set<string>; typeNames: Set<string> } {
+function hasStripePackageReference(sourceFile: SourceFile): boolean {
+  if (sourceFile.getImportDeclarations().some((declaration) => declaration.getModuleSpecifierValue() === PACKAGE)) return true;
+  if (sourceFile.getDescendantsOfKind(SyntaxKind.ImportEqualsDeclaration).some((declaration) => declaration.getText().includes("'stripe'") || declaration.getText().includes('"stripe"'))) return true;
+  return sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) => {
+    const argument = call.getArguments()[0];
+    return ['require', 'import'].includes(call.getExpression().getText())
+      && (Node.isStringLiteral(argument) || Node.isNoSubstitutionTemplateLiteral(argument))
+      && argument.getLiteralValue() === PACKAGE;
+  });
+}
+
+function reportIndirectStripeClients(sourceFile: SourceFile, result: MigrationResult, targetMajor: 22 | 23): void {
+  const bindings = findStripeBindings(sourceFile);
+  const trackedClients = findStripeClients(sourceFile, bindings.constructors);
+  const indirectAliases = new Set<string>();
+  for (const declaration of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    const initializer = declaration.getInitializer();
+    if (!initializer || !Node.isIdentifier(initializer)
+      || (!trackedClients.has(initializer.getText()) && !bindings.constructors.has(initializer.getText()))) continue;
+    const name = declaration.getNameNode();
+    if (Node.isIdentifier(name)) indirectAliases.add(name.getText());
+    else if (Node.isObjectBindingPattern(name)) for (const element of name.getElements()) indirectAliases.add(element.getNameNode().getText());
+    addManual(sourceFile, result.manual, declaration, 'A Stripe client or constructor alias is untracked; review all uses before upgrading.', declaration.getText());
+  }
+  const typedParameters = new Set(sourceFile.getDescendantsOfKind(SyntaxKind.Parameter)
+    .filter((parameter) => /\bStripe\b/.test(parameter.getTypeNode()?.getText() ?? ''))
+    .map((parameter) => parameter.getName()));
+  const locallyImported = new Set(sourceFile.getImportDeclarations()
+    .filter((declaration) => declaration.getModuleSpecifierValue().startsWith('.'))
+    .flatMap((declaration) => [
+      ...(declaration.getDefaultImport() ? [declaration.getDefaultImport()!.getText()] : []),
+      ...declaration.getNamedImports().map((specifier) => specifier.getAliasNode()?.getText() ?? specifier.getName()),
+    ]));
+  // A resource-shaped call in an unrelated file (database, CRM, etc.) is not
+  // evidence of Stripe. Local imports named stripe still cover the common
+  // separate-client-module pattern without requiring that module to import
+  // the SDK in this same file.
+  const importedStripeModule = sourceFile.getImportDeclarations().some((declaration) =>
+    declaration.getModuleSpecifierValue().startsWith('.')
+    && Boolean(declaration.getModuleSpecifierSourceFile()
+      && hasStripePackageReference(declaration.getModuleSpecifierSourceFile()!)));
+  if (!hasStripePackageReference(sourceFile) && ![...locallyImported].some((name) => /stripe/i.test(name))
+    && !importedStripeModule) return;
+  for (const call of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+    const expression = call.getExpression();
+    const path = propertyPath(expression);
+    const text = expression.getText();
+    const normalized = text.replace(/\[['"]([A-Za-z][A-Za-z0-9]*)['"]\]/g, '.$1');
+    const parts = normalized.split('.');
+    const resourceUse = parts.length >= 3 && STRIPE_RESOURCE_METHODS.has(parts.at(-1)!)
+      && (STRIPE_RESOURCE_NAMES.has(parts.at(-2)!)
+        || STRIPE_RESOURCE_NAMES.has(`${parts.at(-3)}.${parts.at(-2)}`));
+    const root = parts[0] ?? '';
+    const requestOptions = call.getArguments().some((argument) => hasRequestOptionEvidence(sourceFile, argument));
+    const method = parts.at(-1) ?? '';
+    const affectedCall = requestOptions || call.getArguments().some((argument) =>
+      Node.isArrowFunction(argument) || Node.isFunctionExpression(argument) || isStripeSecretLiteral(argument))
+      || REMOVED_RESOURCE_METHODS.has(method)
+      || (targetMajor === 23 && ['constructEvent', 'constructEventAsync'].includes(method));
+    const indirect = resourceUse && (affectedCall || root === 'c' && bindings.constructors.size > 0) && (
+      text.startsWith('this.stripe.')
+      || (text.startsWith('this.client.') && requestOptions)
+      || typedParameters.has(root)
+      || (locallyImported.has(root) && (requestOptions || /stripe/i.test(root)))
+      || indirectAliases.has(path[0] ?? '')
+      || (root === 'c' && bindings.constructors.size > 0)
+    ) || indirectAliases.has(path[0] ?? '') && parts.length <= 2;
+    if (!indirect || result.manual.some((item) => item.file === sourceFile.getFilePath() && item.line === call.getStartLineNumber())) continue;
+    addManual(sourceFile, result.manual, call, 'This indirectly held Stripe client is untracked; review its v22/v23 request behavior manually.', call.getText());
+  }
+}
+
+function hasRequestOptionEvidence(sourceFile: SourceFile, argument: Node): boolean {
+  if (containsRequestOptionKey(argument)) return true;
+  if (!Node.isIdentifier(argument)) return false;
+  return sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration).some((declaration) =>
+    declaration.getName() === argument.getText()
+    && Boolean(declaration.getInitializer() && containsRequestOptionKey(declaration.getInitializer()!)));
+}
+
+function findStripeBindings(sourceFile: SourceFile): { constructors: Set<string>; typeNames: Set<string>; constructorSymbols: Set<MorphSymbol> } {
   const constructors = new Set<string>();
   const typeNames = new Set<string>();
+  const constructorSymbols = new Set<MorphSymbol>();
   for (const declaration of sourceFile.getImportDeclarations()) {
     if (declaration.getModuleSpecifierValue() !== PACKAGE) continue;
     const defaultImport = declaration.getDefaultImport();
     if (defaultImport) {
       constructors.add(defaultImport.getText());
       typeNames.add(defaultImport.getText());
+      const symbol = defaultImport.getSymbol();
+      if (symbol) constructorSymbols.add(symbol);
     }
     for (const specifier of declaration.getNamedImports()) {
       if (specifier.getName() !== 'Stripe') continue;
       const localName = specifier.getAliasNode()?.getText() ?? specifier.getName();
       constructors.add(localName);
       typeNames.add(localName);
+      const symbol = (specifier.getAliasNode() ?? specifier.getNameNode()).getSymbol();
+      if (symbol) constructorSymbols.add(symbol);
     }
   }
   for (const declaration of sourceFile.getDescendantsOfKind(SyntaxKind.ImportEqualsDeclaration)) {
@@ -310,6 +430,8 @@ function findStripeBindings(sourceFile: SourceFile): { constructors: Set<string>
     if (expression && Node.isStringLiteral(expression) && expression.getLiteralValue() === PACKAGE) {
       constructors.add(declaration.getName());
       typeNames.add(declaration.getName());
+      const symbol = declaration.getNameNode().getSymbol();
+      if (symbol) constructorSymbols.add(symbol);
     }
   }
   for (const declaration of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
@@ -320,9 +442,11 @@ function findStripeBindings(sourceFile: SourceFile): { constructors: Set<string>
       && ['default', 'Stripe'].includes(initializer.getName()) && isRequireStripe(initializer.getExpression()))) {
       constructors.add(name.getText());
       typeNames.add(name.getText());
+      const symbol = name.getSymbol();
+      if (symbol) constructorSymbols.add(symbol);
     }
   }
-  return { constructors, typeNames };
+  return { constructors, typeNames, constructorSymbols };
 }
 
 function findStripeClients(sourceFile: SourceFile, constructors: Set<string>): Set<string> {
@@ -377,7 +501,7 @@ function containsRequestOptionKey(node: Node): boolean {
 function isResourceIdArgument(node: Node): boolean {
   return Node.isStringLiteral(node)
     || Node.isNoSubstitutionTemplateLiteral(node)
-    || Node.isIdentifier(node)
+    || (Node.isIdentifier(node) && node.getText() !== 'undefined')
     || Node.isPropertyAccessExpression(node)
     || Node.isElementAccessExpression(node);
 }

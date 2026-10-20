@@ -4,9 +4,10 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { reconcileProposal, validateProposal, validateProposalEnvelope, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from './publish.js';
+import { reconcileProposal, validateProposal, validateProposalEnvelope, validatePublishableBundle, parseExactRemoteHead, parseSafeRawDiff, parseCommitParents, findManagedIssue, findManagedIssuePaginated, isDismissedClosure, isDismissedManualIssueForProposal, type Proposal, type ProposalPublisher } from './publish.js';
 import { parseActionConfig } from './config.js';
 import { sanitizeTerminalText } from '../core/report.js';
+import { regenerateNpmLockfile } from './regenerate-lock.js';
 
 const execFile = promisify(execFileCallback);
 const token = process.env.GITHUB_TOKEN;
@@ -55,7 +56,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFile('git', [
     '-c', `core.hooksPath=${os.devNull}`, '-c', 'core.fsmonitor=false',
     '-c', 'core.untrackedCache=false', ...args,
-  ], { cwd, env: gitEnv, timeout: 45_000, maxBuffer: 2 * 1024 * 1024 });
+  ], { cwd, env: gitEnv, timeout: 45_000, maxBuffer: 9 * 1024 * 1024 });
   return stdout;
 }
 
@@ -136,14 +137,43 @@ for (const proposal of proposals) {
       changedFiles = parseSafeRawDiff(await git(bareRoot, ['diff', '--raw', '--no-renames', '--no-abbrev', '-z', expectedBase, proposal.commit!]));
     }
     validateProposal(proposal, expectedBase, parents, changedFiles, reviewedConfig);
+    if (proposal.status === 'ready') {
+      const identityFields = (await git(bareRoot!, ['show', '-s', '--format=%an%x00%ae%x00%cn%x00%ce%x00%s', proposal.commit!])).trimEnd().split('\0');
+      if (identityFields.length !== 5) throw new Error('Bundle commit identity is malformed.');
+      const blobs: Record<string, { before?: string; after: string }> = Object.create(null);
+      for (const file of proposal.files) {
+        blobs[file] = {
+          before: await git(bareRoot!, ['show', `${expectedBase}:${file}`]),
+          after: await git(bareRoot!, ['show', `${proposal.commit!}:${file}`]),
+        };
+      }
+      const regeneratedLocks: Record<string, string> = Object.create(null);
+      for (const file of proposal.files) {
+        if (!/(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json)$/.test(file)) continue;
+        const manifestPath = path.posix.join(path.posix.dirname(file), 'package.json');
+        const manifest = blobs[manifestPath];
+        if (!manifest || typeof manifest.before !== 'string') {
+          throw new Error(`Bundle ${file} has no reviewed package.json update; lockfile regeneration requires one.`);
+        }
+        validatePublishableBundle({ ...proposal, files: [manifestPath] }, { [manifestPath]: manifest }, {
+          author: identityFields[0]!, authorEmail: identityFields[1]!, committer: identityFields[2]!,
+          committerEmail: identityFields[3]!, subject: identityFields[4]!,
+        });
+        regeneratedLocks[file] = await regenerateNpmLockfile(blobs[file]!.before!, manifest.after,
+          path.posix.basename(file) as 'package-lock.json' | 'npm-shrinkwrap.json', proposal.registryBefore);
+      }
+      validatePublishableBundle(proposal, blobs, {
+        author: identityFields[0]!, authorEmail: identityFields[1]!, committer: identityFields[2]!,
+        committerEmail: identityFields[3]!, subject: identityFields[4]!,
+      }, regeneratedLocks);
+    }
     const publisher: ProposalPublisher = {
       isDismissed: async (item) => await hasDismissedPullRequest(item) || await hasDismissedIssue(item),
       findPullRequest,
       pushBranch: async (item) => {
         if (!bareRoot || !item.commit) throw new Error('Verified bundle is required before pushing.');
-        const remote = await git(bareRoot, ['ls-remote', gitUrl, `refs/heads/${item.branch}`]);
-        const previous = remote.split('\t')[0]?.trim() ?? '';
-        if (previous && !/^[0-9a-f]{40}$/.test(previous)) throw new Error('Invalid existing branch SHA.');
+        const remote = await git(bareRoot, ['ls-remote', '--refs', gitUrl, `refs/heads/${item.branch}`]);
+        const previous = parseExactRemoteHead(remote, item.branch);
         if (previous) {
           await git(bareRoot, ['fetch', '--no-tags', gitUrl, previous]);
           const oldTree = (await git(bareRoot, ['rev-parse', `${previous}^{tree}`])).trim();

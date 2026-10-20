@@ -11,7 +11,7 @@ import type { Migration, PackageManifest } from '../src/core/types.js';
 import { escapeUntrustedMarkdownCell as cell, maskSecrets } from '../src/core/report.js';
 import { newTypeScriptDiagnostics, parseTypeScriptDiagnostics } from '../src/core/diagnostic-diff.js';
 import { runMigration, type RunOutcome } from '../src/core/runner.js';
-import { applyProposedFiles } from '../src/core/verify.js';
+import { applyProposedFiles, readRegularFile } from '../src/core/verify.js';
 import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from '../src/core/project-discovery.js';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 import { migrations } from '../src/migrations/index.js';
@@ -23,6 +23,17 @@ const reportPath = path.join(repoRoot, 'benchmark/results.md');
 const timeoutMs = 15 * 60 * 1000;
 const nodeImage = 'node:24.22.0-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5';
 const defaultCacheRoot = path.join(repoRoot, 'benchmark', '.cache');
+
+export async function readBenchmarkManifest(file: string): Promise<PackageManifest> {
+  let raw: string;
+  try { raw = await readRegularFile(file); }
+  catch { throw new Error('Unsafe package.json: benchmark manifest is not a regular file or cannot be read safely.'); }
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid manifest');
+    return value as PackageManifest;
+  } catch { throw new Error('Unsafe package.json: benchmark manifest could not be parsed safely.'); }
+}
 
 export interface DockerLimits {
   memoryMb: number;
@@ -96,6 +107,7 @@ export interface BenchResult {
   usages: number;
   migrated: number;
   manual: number;
+  manualFindings?: Array<{ file: string; line: number; reason: string }>;
   typecheck: CheckResult;
   tests: CheckResult;
   details: string;
@@ -243,7 +255,7 @@ async function findMigrationPackages(root: string, migration: Migration): Promis
   const manifests = await packageFilesBelow(root);
   const dirs: string[] = [];
   for (const file of manifests) {
-    const manifest = JSON.parse(await readFile(file, 'utf8')) as PackageManifest;
+    const manifest = await readBenchmarkManifest(file);
     validatePackageManagerField(manifest.packageManager, path.relative(root, file));
     const range = [manifest.dependencies, manifest.devDependencies, manifest.optionalDependencies, manifest.peerDependencies]
       .map((section) => section?.[migration.packageName])
@@ -257,18 +269,19 @@ async function installDirs(root: string, migrationDirs: string[], repo: BenchRep
   const rootPackage = path.join(root, 'package.json');
   const dirs = new Set<string>();
   try {
-    await readFile(rootPackage, 'utf8');
+    await readBenchmarkManifest(rootPackage);
     dirs.add(root);
-  } catch {
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes('Unsafe package.json')) throw error;
+    if (await lstat(rootPackage).then(() => true, () => false)) throw error;
     // Some projects keep the selected package in a nested directory.
   }
   for (const directory of migrationDirs) {
-    const packageJson = await readFile(path.join(directory, 'package.json'), 'utf8');
+    await readBenchmarkManifest(path.join(directory, 'package.json'));
     const lockExists = await Promise.all(['package-lock.json', 'pnpm-lock.yaml', 'yarn.lock'].map(async (name) => {
       try { await readFile(path.join(directory, name)); return true; } catch { return false; }
     }));
     if (lockExists.some(Boolean) || dirs.size === 0) dirs.add(directory);
-    void packageJson;
   }
   for (const relativeDirectory of Object.keys(repo.packageManagerPaths ?? {})) dirs.add(path.resolve(root, relativeDirectory));
   return [...dirs];
@@ -389,8 +402,7 @@ async function ensureTargetMajorInBenchmarkCopy(root: string, packageDirs: strin
   const notes: string[] = [];
   for (const directory of packageDirs) {
     const file = path.join(directory, 'package.json');
-    const raw = await readFile(file, 'utf8');
-    const manifest = JSON.parse(raw) as PackageManifest;
+    const manifest = await readBenchmarkManifest(file);
     const beforeUpdate = JSON.stringify(manifest);
     const runtimeNote = confirmBenchmarkNodeRuntime(manifest, migration);
     if (runtimeNote) notes.push(runtimeNote);
@@ -422,7 +434,7 @@ async function runIsolatedDockerScript(
   env: Record<string, string> = {},
   memoryMb?: number,
 ): Promise<string> {
-  const manifest = JSON.parse(await readFile(path.join(packageDir, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
+  const manifest = await readBenchmarkManifest(path.join(packageDir, 'package.json')) as { scripts?: Record<string, string> };
   const selectedScript = scriptName;
   const inferredTsc = checkKind === 'typecheck' && !selectedScript && await fileExists(path.join(packageDir, 'tsconfig.json'));
   if (!selectedScript && !inferredTsc) return 'not configured';
@@ -470,7 +482,7 @@ async function runPhaseChecks(
         results.push(await runIsolatedDockerScript(checkout, dir, undefined, kind, home, repo.env, memoryMb));
         continue;
       }
-      const packageJson = JSON.parse(await readFile(path.join(dir, 'package.json'), 'utf8')) as { scripts?: Record<string, string> };
+      const packageJson = await readBenchmarkManifest(path.join(dir, 'package.json')) as { scripts?: Record<string, string> };
       const actualText = packageJson.scripts?.[script];
       if (actualText !== expectedText) {
         results.push(actualText ? 'not run (script text differs from reviewed command)' : 'not configured');
@@ -543,6 +555,7 @@ export async function benchmarkOne(
     const outcome = await analyzeBenchmarkMigration(migration, checkout);
     result.migrated = outcome.changes.length;
     result.manual = outcome.manual.length;
+    result.manualFindings = outcome.manual.slice(0, 500).map(({ file, line, reason }) => ({ file, line, reason }));
     result.usages = result.migrated + result.manual;
     result.details = outcome.manifestNotes.join(' ');
 
@@ -623,6 +636,13 @@ export function renderBenchmarkReport(
     '| Repository | Pinned commit | Status | Detected items | Migrated | Manual | Types before | Types after | Tests before | Tests after | Details |',
     '|---|---|---:|---:|---:|---:|---|---|---|---|---|',
     ...results.map((row) => `| ${cell(row.name)} | \`${row.commit.slice(0, 12)}\` | ${cell(row.status)} | ${row.usages} | ${row.migrated} | ${row.manual} | ${cell(row.typecheck.before)} | ${cell(row.typecheck.after)} | ${cell(row.tests.before)} | ${cell(row.tests.after)} | ${cell(row.details)} |`),
+    ...(results.some((row) => row.manualFindings?.length) ? [
+      '', '## Manual findings', '',
+      '| Repository | File | Line | Reason |',
+      '|---|---|---:|---|',
+      ...results.flatMap((row) => (row.manualFindings ?? []).map((finding) =>
+        `| ${cell(row.name)} | ${cell(finding.file)} | ${finding.line} | ${cell(finding.reason)} |`)),
+    ] : []),
     '', `Project checks run only inside Docker image \`${nodeImage}\` with networking disabled. Dependency installation runs in Docker with no host credentials; lifecycle scripts are disabled.`, '',
   ];
   return lines.join('\n');

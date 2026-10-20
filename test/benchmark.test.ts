@@ -4,7 +4,7 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, confirmBenchmarkNodeRuntime, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkRepos, renderBenchmarkReport, requiresRuntimeReviewFromNotes, hasVerificationRegression, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
+import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, confirmBenchmarkNodeRuntime, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkManifest, readBenchmarkRepos, renderBenchmarkReport, requiresRuntimeReviewFromNotes, hasVerificationRegression, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
 
 it('P3.4 marks the LUMEN pass-to-fail typecheck as needing review', () => {
   expect(hasVerificationRegression('pass', 'fail: src/components/ErrorBoundary.tsx TS2580')).toBe(true);
@@ -19,6 +19,18 @@ import { openaiV5 } from '../src/migrations/openai-v5/index.js';
 const execFile = promisify(execFileCallback);
 
 describe('public repository benchmark helpers', () => {
+  it('W4 rejects a symlinked benchmark manifest without leaking the target', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-benchmark-link-'));
+    try {
+      const secret = path.join(root, 'secret.txt');
+      await writeFile(secret, 'root:x:0:0:secret-data');
+      await symlink(secret, path.join(root, 'package.json'));
+      const message = await readBenchmarkManifest(path.join(root, 'package.json'))
+        .then(() => '', (error: unknown) => error instanceof Error ? error.message : String(error));
+      expect(message).toContain('Unsafe package.json');
+      expect(message).not.toContain('root:x:0:0');
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
   it('T34 does not turn benchmark-only Node confirmation into manual review', () => {
     expect(requiresRuntimeReviewFromNotes([
       'Node.js >=20 was declared in the disposable benchmark copy after explicit benchmark-only confirmation of its Node 24 container; the repository production runtime remains unverified.',
@@ -77,6 +89,14 @@ describe('public repository benchmark helpers', () => {
     expect(report).toContain('66.7%');
     expect(report).toContain('2 of 3 detected migration items');
     expect(report).toContain('| sample | `aaaaaaaaaaaa` | completed | 3 | 2 | 1 | pass | fail: TS error | fail: existing test | pass |  |');
+  });
+  it('Z3 shows the file, line and reason for each benchmark manual finding', () => {
+    const report = renderBenchmarkReport([{
+      name: 'sample', commit: 'a'.repeat(40), status: 'manual review required', usages: 1, migrated: 0, manual: 1,
+      typecheck: { before: 'pass', after: 'pass' }, tests: { before: 'pass', after: 'pass' }, details: '',
+      manualFindings: [{ file: 'src/stripe.ts', line: 42, reason: 'Variable RequestOptions need review.' }],
+    }]);
+    expect(report).toContain('| sample | src/stripe.ts | 42 | Variable RequestOptions need review. |');
   });
 
   it('identifies the exact GitHub run and tool commit behind a benchmark report', () => {

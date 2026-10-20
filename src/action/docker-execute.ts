@@ -2,8 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
+import os from 'node:os';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { executeWithProcessGroup } from '../core/verify.js';
 import { dockerBindArgs } from '../core/docker-mount.js';
+import { registerTemporaryCleanup } from '../core/process-cleanup.js';
 
 const execFile = promisify(execFileCallback);
 const image = 'node:24.22.0-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5';
@@ -28,7 +31,8 @@ export function buildClientDockerArgs(command: string, args: string[], cwd: stri
     '--pids-limit=256', '--memory=2g', '--memory-swap=2g',
     '--tmpfs', '/tmp:rw,noexec,nosuid,nodev,size=64m',
     '--user', `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`,
-    ...dockerBindArgs(temporaryRoot, temporaryRoot),
+    ...dockerBindArgs(cwd, cwd),
+    ...dockerBindArgs(home, home),
     '--workdir', cwd,
     ...Object.entries(safeEnv).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
       .flatMap(([key, value]) => ['--env', `${key}=${value}`]),
@@ -42,11 +46,21 @@ export async function executeClientCommand(command: string, args: string[], cwd:
   const temporaryRoot = path.dirname(home);
   const name = `upstreamfix-client-${randomUUID()}`;
   const dockerArgs = buildClientDockerArgs(command, args, cwd, env, allowInstallNetwork, name);
+  const hostHome = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-docker-host-'));
+  const hostEnv = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: hostHome, DOCKER_CONFIG: path.join(hostHome, '.docker') };
+  const removeContainer = async (): Promise<void> => {
+    await execFile('docker', ['rm', '-f', name], { timeout: 10_000, env: hostEnv }).catch(() => undefined);
+  };
+  const unregisterCleanup = registerTemporaryCleanup(async () => {
+    await removeContainer();
+    await rm(hostHome, { recursive: true, force: true });
+  });
   try {
-    return await executeWithProcessGroup('docker', dockerArgs, temporaryRoot, {
-      PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: temporaryRoot,
-    }, timeoutMs);
+    await mkdir(hostEnv.DOCKER_CONFIG);
+    return await executeWithProcessGroup('docker', dockerArgs, temporaryRoot, hostEnv, timeoutMs);
   } finally {
-    await execFile('docker', ['rm', '-f', name], { timeout: 10_000 }).catch(() => undefined);
+    await removeContainer();
+    unregisterCleanup();
+    await rm(hostHome, { recursive: true, force: true });
   }
 }

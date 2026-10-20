@@ -96,9 +96,10 @@ function validateRecipe(value: unknown): RecipeDefinition {
     if (typeof field === 'string' && (field.length === 0 || field.length > 500)) fail(`$.${key}`, 'must contain 1–500 characters.');
     if (typeof field === 'string' && INVISIBLE_CONTROLS.test(field)) fail(`$.${key}`, 'control or invisible characters are not allowed.');
   }
-  for (const key of Object.keys(record)) if (!(key in fields)) fail(`$.${key}`, 'unknown field.');
+  for (const key of Object.keys(record)) if (!Object.hasOwn(fields, key)) fail(`$.${key}`, 'unknown field.');
   if (record.schemaVersion !== 1) fail('$.schemaVersion', 'only schema version 1 is supported.');
   if (!SAFE_PACKAGE.test(record.package as string)) fail('$.package', 'expected a valid npm package name without a path or URL.');
+  if (['constructor', 'prototype', '__proto__'].includes(record.package as string)) fail('$.package', 'prototype names are not valid recipe packages.');
   if (!/^[a-z0-9][a-z0-9._-]*@[1-9][0-9]*$/.test(record.id as string) &&
       !/^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*@[1-9][0-9]*$/.test(record.id as string)) fail('$.id', 'expected package@targetMajor.');
   if (record.id !== `${record.package}@${record.toMajor}`) fail('$.id', 'must match package and toMajor.');
@@ -120,7 +121,7 @@ function validateRecipe(value: unknown): RecipeDefinition {
     const location = `$.rules[${index}]`;
     const rule = objectAt(raw, location);
     for (const [key, value] of Object.entries(rule)) {
-      if (!(key in ruleFields)) fail(`${location}.${key}`, 'unknown field.');
+      if (!Object.hasOwn(ruleFields, key)) fail(`${location}.${key}`, 'unknown field.');
       if (typeof value !== ruleFields[key]) fail(`${location}.${key}`, `expected ${ruleFields[key]}.`);
       if (typeof value === 'string' && (value.length < 1 || value.length > 500)) fail(`${location}.${key}`, 'expected a string of 1–500 characters.');
       if (typeof value === 'string' && INVISIBLE_CONTROLS.test(value)) fail(`${location}.${key}`, 'control or invisible characters are not allowed.');

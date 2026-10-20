@@ -159,7 +159,46 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
   const aliases = findAliases(sourceFile);
   if (aliases.length === 0) return false;
 
+  // A whole-project language-service reference query for each alias scales poorly
+  // on large source files. Index local identifiers once and retain symbol identity.
+  const localIdentifiers = new Map<string, Identifier[]>();
+  for (const identifier of sourceFile.getDescendantsOfKind(SyntaxKind.Identifier)) {
+    const group = localIdentifiers.get(identifier.getText()) ?? [];
+    group.push(identifier);
+    localIdentifiers.set(identifier.getText(), group);
+  }
+  const localReferences = (declaration: Identifier): Identifier[] => {
+    const symbol = declaration.getSymbol();
+    if (!symbol) return declaration.findReferencesAsNodes().filter(Node.isIdentifier)
+      .filter((reference) => reference.getSourceFile() === sourceFile);
+    const sameName = localIdentifiers.get(declaration.getText()) ?? [];
+    // In shorthand properties and export specifiers ts-morph exposes a property/
+    // alias symbol instead of the local variable's symbol. Ask the language
+    // service for references only for these uncommon shapes; keep the fast local
+    // symbol index for ordinary (including large generated) source files.
+    if (sameName.some((candidate) => Node.isShorthandPropertyAssignment(candidate.getParent())
+      || Node.isExportSpecifier(candidate.getParent()))) {
+      return declaration.findReferencesAsNodes().filter(Node.isIdentifier)
+        .filter((reference) => reference.getSourceFile() === sourceFile);
+    }
+    return sameName.filter((candidate) => candidate.getSymbol() === symbol);
+  };
+
   const aliasNames = new Set(aliases.map((alias) => alias.name));
+  for (const alias of aliases) {
+    for (const reference of localReferences(alias.nameNode)) {
+      if (reference === alias.nameNode) continue;
+      const parent = reference.getParent();
+      if (!Node.isShorthandPropertyAssignment(parent) && !Node.isExportSpecifier(parent)) continue;
+      result.manual.push({ file, line: reference.getStartLineNumber(),
+        reason: 'The firebase-admin namespace is still exported or used as a shorthand value; migrate its consumers before removing the import.',
+        snippet: snippetOf(reference) });
+    }
+  }
+  if (result.manual.length > manualBefore) {
+    sortManual(result.manual, manualBefore);
+    return false;
+  }
   for (const declaration of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const initializer = declaration.getInitializer();
     const nameNode = declaration.getNameNode();
@@ -168,7 +207,7 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
     if (!Node.isPropertyAccessExpression(factory) || factory.getName() !== 'app') continue;
     const root = factory.getExpression();
     if (!Node.isIdentifier(root) || !aliasNames.has(root.getText())) continue;
-    for (const reference of nameNode.findReferencesAsNodes()) {
+    for (const reference of localReferences(nameNode)) {
       if (reference === nameNode || reference.getSourceFile() !== sourceFile) continue;
       const access = reference.getParent();
       if (!Node.isPropertyAccessExpression(access) || access.getExpression() !== reference) continue;
@@ -217,11 +256,7 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
       }
     }
 
-    const references = alias.nameNode
-      .findReferencesAsNodes()
-      .filter(Node.isIdentifier)
-      .filter((reference) => reference.getSourceFile() === sourceFile)
-      .filter((reference) => reference !== alias.nameNode);
+    const references = localReferences(alias.nameNode).filter((reference) => reference !== alias.nameNode);
 
     for (const ref of references) {
       const line = ref.getStartLineNumber();
@@ -425,6 +460,13 @@ function classifyAccess(access: PropertyAccessExpression): Classification {
     return { node: access, text: 'getApp', rule: 'app-lifecycle', imports: [appImport('getApp')] };
   }
   if (name === 'apps') {
+    const parent = access.getParent();
+    if ((Node.isBinaryExpression(parent) && parent.getLeft() === access)
+      || Node.isDeleteExpression(parent)
+      || Node.isPrefixUnaryExpression(parent)
+      || Node.isPostfixUnaryExpression(parent)) {
+      return { reason: 'Mutating admin.apps has no safe modular equivalent; review this operation manually.' };
+    }
     return { node: access, text: 'getApps()', rule: 'app-lifecycle', imports: [appImport('getApps')] };
   }
   return { reason: `\`${access.getText()}\` has no automatic mapping yet.` };
@@ -597,39 +639,54 @@ function reportUnsupportedReferences(sourceFile: SourceFile, manual: ManualItem[
   }
 }
 
-function hasImportCollision(sourceFile: SourceFile, needed: NeededImport): boolean {
+const declaredNamesCache = new WeakMap<SourceFile, Set<string>>();
+const importNamesCache = new WeakMap<SourceFile, Map<string, Array<{ module: string; typeOnly: boolean; defaultOrNamespace: boolean }>>>();
+
+function importNames(sourceFile: SourceFile): Map<string, Array<{ module: string; typeOnly: boolean; defaultOrNamespace: boolean }>> {
+  const cached = importNamesCache.get(sourceFile);
+  if (cached) return cached;
+  const names = new Map<string, Array<{ module: string; typeOnly: boolean; defaultOrNamespace: boolean }>>();
+  const add = (name: string, module: string, typeOnly: boolean, defaultOrNamespace: boolean): void => {
+    const entries = names.get(name) ?? [];
+    entries.push({ module, typeOnly, defaultOrNamespace });
+    names.set(name, entries);
+  };
   for (const declaration of sourceFile.getImportDeclarations()) {
     const module = declaration.getModuleSpecifierValue();
     const defaultImport = declaration.getDefaultImport();
     const namespaceImport = declaration.getNamespaceImport();
-    if (defaultImport?.getText() === needed.name || namespaceImport?.getText() === needed.name) {
-      if (module !== needed.module) return true;
-      return true;
-    }
+    if (defaultImport) add(defaultImport.getText(), module, declaration.isTypeOnly(), true);
+    if (namespaceImport) add(namespaceImport.getText(), module, declaration.isTypeOnly(), true);
     for (const specifier of declaration.getNamedImports()) {
       const localName = (specifier.getAliasNode() ?? specifier.getNameNode()).getText();
-      if (localName !== needed.name) continue;
-      if (module !== needed.module) return true;
-      if (!needed.typeOnly && (declaration.isTypeOnly() || specifier.isTypeOnly())) return true;
+      add(localName, module, declaration.isTypeOnly() || specifier.isTypeOnly(), false);
     }
   }
-  return sourceFile.getDescendantsOfKind(SyntaxKind.Identifier).some((identifier) => {
-    if (identifier.getText() !== needed.name) return false;
+  importNamesCache.set(sourceFile, names);
+  return names;
+}
+
+function declaredNames(sourceFile: SourceFile): Set<string> {
+  const cached = declaredNamesCache.get(sourceFile);
+  if (cached) return cached;
+  const names = new Set<string>();
+  for (const identifier of sourceFile.getDescendantsOfKind(SyntaxKind.Identifier)) {
     const parent = identifier.getParent();
-    if (Node.isImportClause(parent) || Node.isNamespaceImport(parent) || Node.isImportSpecifier(parent)) return false;
-    if (Node.isVariableDeclaration(parent)) return parent.getNameNode() === identifier;
-    if (Node.isParameterDeclaration(parent)) return parent.getNameNode() === identifier;
-    if (Node.isFunctionDeclaration(parent) || Node.isFunctionExpression(parent)) return parent.getNameNode() === identifier;
-    if (Node.isClassDeclaration(parent) || Node.isInterfaceDeclaration(parent) || Node.isTypeAliasDeclaration(parent) || Node.isEnumDeclaration(parent)) {
-      return parent.getNameNode() === identifier;
-    }
-    if (Node.isImportClause(parent)) return parent.getDefaultImport() === identifier;
-    if (Node.isNamespaceImport(parent)) return parent.getNameNode() === identifier;
-    if (Node.isImportSpecifier(parent)) return (parent.getAliasNode() ?? parent.getNameNode()) === identifier;
-    if (Node.isBindingElement(parent)) return parent.getNameNode() === identifier;
-    if (Node.isTypeParameterDeclaration(parent)) return parent.getNameNode() === identifier;
-    return false;
-  });
+    if ((Node.isVariableDeclaration(parent) || Node.isParameterDeclaration(parent) || Node.isBindingElement(parent)
+      || Node.isFunctionDeclaration(parent) || Node.isFunctionExpression(parent) || Node.isClassDeclaration(parent)
+      || Node.isClassExpression(parent) || Node.isInterfaceDeclaration(parent) || Node.isTypeAliasDeclaration(parent)
+      || Node.isEnumDeclaration(parent) || Node.isModuleDeclaration(parent) || Node.isImportEqualsDeclaration(parent) || Node.isTypeParameterDeclaration(parent))
+      && parent.getNameNode() === identifier) names.add(identifier.getText());
+  }
+  declaredNamesCache.set(sourceFile, names);
+  return names;
+}
+
+function hasImportCollision(sourceFile: SourceFile, needed: NeededImport): boolean {
+  for (const entry of importNames(sourceFile).get(needed.name) ?? []) {
+    if (entry.defaultOrNamespace || entry.module !== needed.module || (!needed.typeOnly && entry.typeOnly)) return true;
+  }
+  return declaredNames(sourceFile).has(needed.name);
 }
 
 function applyTextEdits(source: string, edits: TextEdit[]): string {

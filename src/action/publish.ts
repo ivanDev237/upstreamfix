@@ -1,6 +1,8 @@
-import { sanitizeTerminalText } from '../core/report.js';
+import { maskSecrets, sanitizeTerminalText } from '../core/report.js';
 import { migrations } from '../migrations/index.js';
 import type { ActionConfig } from './config.js';
+import { isDeepStrictEqual } from 'node:util';
+import { Project } from 'ts-morph';
 
 export interface Proposal {
   schema: 1;
@@ -14,6 +16,7 @@ export interface Proposal {
   report: string;
   reviewers: string[];
   labels: string[];
+  registryBefore?: string;
 }
 
 export interface ProposalPublisher {
@@ -81,6 +84,13 @@ export function isDismissedManualIssueForProposal(
 const sha = /^[0-9a-f]{40}$/;
 const safePath = /^(?:[A-Za-z0-9_.@()+ -]+\/)*[A-Za-z0-9_.@()+ -]+$/;
 
+export function parseExactRemoteHead(raw: string, branch: string): string {
+  if (raw === '') return '';
+  const match = /^([0-9a-f]{40})\t([^\r\n]+)\n$/.exec(raw);
+  if (!match || match[2] !== `refs/heads/${branch}`) throw new Error('Remote branch response did not match the exact expected ref.');
+  return match[1]!;
+}
+
 /** Accept only the single machine-readable line emitted by rev-list --parents. */
 export function parseCommitParents(raw: string, expectedCommit: string): string[] {
   const fields = raw.trim().split(' ');
@@ -117,6 +127,18 @@ export function parseSafeRawDiff(raw: string): string[] {
 export function validateProposalEnvelope(proposal: Proposal, expectedBase: string, config?: Pick<ActionConfig, 'reviewers' | 'labels'>): void {
   if (!proposal || typeof proposal !== 'object') throw new Error('Invalid proposal metadata.');
   if (proposal.schema !== 1 || !migrations.some((migration) => migration.id === proposal.migration)) throw new Error('Unknown proposal schema or migration.');
+  if (proposal.registryBefore !== undefined) {
+    const parsed = Date.parse(proposal.registryBefore);
+    const age = Date.now() - parsed;
+    if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(proposal.registryBefore)
+      || !Number.isFinite(parsed) || new Date(parsed).toISOString() !== proposal.registryBefore
+      || age < 0 || age > 2 * 60 * 60 * 1000) {
+      throw new Error('Proposal registry cutoff time is invalid, expired, or in the future; rerun the migration.');
+    }
+  }
+  if (proposal.status === 'ready' && !proposal.registryBefore && proposal.files.some((file) => /(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json)$/.test(file))) {
+    throw new Error('A ready npm lockfile proposal requires a registry cutoff time.');
+  }
   if (!sha.test(proposal.base) || proposal.base !== expectedBase) throw new Error('Proposal base does not match the reviewed default-branch commit.');
   const expectedBranch = `upstreamfix/${proposal.migration.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')}`;
   if (proposal.branch !== expectedBranch) throw new Error('Proposal branch is outside the approved upstreamfix namespace.');
@@ -152,17 +174,142 @@ export function validateProposal(proposal: Proposal, expectedBase: string, paren
   }
 }
 
+interface BundleBlob { before?: string; after: string }
+interface CommitIdentity { author: string; authorEmail: string; committer: string; committerEmail: string; subject: string }
+
+/** Recheck client-controlled commit contents in the permissioned publication job. */
+export function validatePublishableBundle(proposal: Proposal, blobs: Record<string, BundleBlob>, identity: CommitIdentity, regeneratedLocks: Record<string, string> = {}): void {
+  const bot = 'upstreamfix[bot]';
+  const email = '41898282+github-actions[bot]@users.noreply.github.com';
+  if (identity.author !== bot || identity.committer !== bot || identity.authorEmail !== email || identity.committerEmail !== email
+    || identity.subject !== `Apply ${proposal.migration} migration with UpstreamFix`) {
+    throw new Error('Bundle commit identity or message is not the reviewed UpstreamFix bot identity.');
+  }
+  const migration = migrations.find((item) => item.id === proposal.migration);
+  if (!migration) throw new Error('Unknown bundle migration.');
+  const project = new Project({ useInMemoryFileSystem: true, skipAddingFilesFromTsConfig: true, compilerOptions: { allowJs: true } });
+  const sources = new Map<string, BundleBlob>();
+  if (proposal.files.length > 100) throw new Error('Bundle contains too many changed files.');
+  for (const file of proposal.files) {
+    const blob = blobs[file];
+    if (!blob || typeof blob.before !== 'string' || blob.before.length > 8 * 1024 * 1024 || blob.after.length > 8 * 1024 * 1024) {
+      throw new Error('Bundle file has no bounded reviewed base version.');
+    }
+    if (/\.(?:[cm]?[jt]sx?)$/.test(file)) {
+      if (blob.before.length > 2 * 1024 * 1024) throw new Error('Bundle source exceeds the migration size limit.');
+      project.createSourceFile(`/proposal/${file}`, blob.before);
+      sources.set(file, blob);
+      continue;
+    }
+    if (/(?:^|\/)package\.json$/.test(file)) validateManifestDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
+    else if (/(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json)$/.test(file)) {
+      const lock = parseJsonObject(blob.after, file);
+      if (![2, 3].includes(lock.lockfileVersion as number) || !record(lock.packages)) throw new Error('Bundle npm lockfile format is unsupported.');
+      if (regeneratedLocks[file] === undefined || regeneratedLocks[file] !== blob.after) {
+        throw new Error('Bundle npm lockfile differs from the independently regenerated lockfile.');
+      }
+      rejectExecutableShadowing(parseJsonObject(blob.before, file), lock);
+    }
+    else if (/(?:^|\/)(?:pnpm-lock\.yaml|yarn\.lock)$/.test(file)) {
+      throw new Error('Bundle pnpm and Yarn lockfile changes require manual review until deterministic regeneration is available.');
+    }
+    else throw new Error('Bundle changes a file outside the deterministic migration output.');
+  }
+  if (sources.size) {
+    const result = migration.transform(project);
+    if (result.manual.length) throw new Error('Bundle migration still has manual source work.');
+    const generated = new Map(result.fileUpdates?.map((update) => [update.file, update.contents]));
+    for (const [file, blob] of sources) {
+      const produced = generated.get(`/proposal/${file}`);
+      const expected = blob.before?.startsWith('\uFEFF') && produced && !produced.startsWith('\uFEFF') ? `\uFEFF${produced}` : produced;
+      if (expected !== blob.after) {
+        throw new Error(`Bundle source ${file} differs from the deterministic migration output.`);
+      }
+    }
+    if (generated.size !== sources.size) throw new Error('Bundle omits a deterministic migration source change.');
+  }
+}
+
+function rejectExecutableShadowing(before: Record<string, unknown>, after: Record<string, unknown>): void {
+  const oldPackages = record(before.packages);
+  const newPackages = record(after.packages);
+  if (!oldPackages || !newPackages) throw new Error('Bundle npm lockfile has no package entries.');
+  const dangerous = new Set(['node', 'npm', 'npx', 'corepack', 'pnpm', 'yarn', 'sh', 'bash', 'dash', 'zsh', 'cmd', 'powershell', 'pwsh']);
+  const binaries = (entry: unknown, packagePath: string): string[] => {
+    const value = record(entry)?.bin;
+    if (typeof value === 'string') return [packagePath.split('/').at(-1)!];
+    return Object.keys(record(value) ?? {});
+  };
+  const topLevel = (packagePath: string): boolean => /^node_modules\/(?:@[^/]+\/)?[^/]+$/.test(packagePath);
+  const existing = new Set<string>();
+  for (const [packagePath, entry] of Object.entries(oldPackages)) {
+    if (topLevel(packagePath)) for (const name of binaries(entry, packagePath)) existing.add(name);
+  }
+  const added = new Set<string>();
+  for (const [packagePath, entry] of Object.entries(newPackages)) {
+    const oldEntry = oldPackages[packagePath];
+    if (oldEntry) {
+      const beforeNames = binaries(oldEntry, packagePath).sort();
+      const afterNames = binaries(entry, packagePath).sort();
+      if (!isDeepStrictEqual(beforeNames, afterNames)) throw new Error('Bundle npm lockfile changes an existing executable command name.');
+    }
+    if (oldEntry) continue;
+    for (const name of binaries(entry, packagePath)) {
+      if (dangerous.has(name.toLowerCase()) || (topLevel(packagePath) && (existing.has(name) || added.has(name)))) {
+        throw new Error('Bundle npm lockfile adds an executable that shadows an existing command.');
+      }
+      if (topLevel(packagePath)) added.add(name);
+    }
+  }
+}
+
+function parseJsonObject(contents: string, label: string): Record<string, unknown> {
+  if (contents.length > 8 * 1024 * 1024) throw new Error(`Bundle ${label} exceeds the validation size limit.`);
+  try {
+    const value: unknown = JSON.parse(contents);
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
+  } catch { /* fixed error below */ }
+  throw new Error(`Bundle ${label} is invalid JSON.`);
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function validateManifestDelta(beforeText: string, afterText: string, packageName: string, targetMajor: number): void {
+  const before = parseJsonObject(beforeText, 'package.json');
+  const after = parseJsonObject(afterText, 'package.json');
+  const normalized = structuredClone(after);
+  for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+    const oldValue = record(before[section])?.[packageName];
+    const nextValue = record(after[section])?.[packageName];
+    if (oldValue !== nextValue) {
+      if (typeof oldValue !== 'string' || nextValue !== `^${targetMajor}.0.0`) throw new Error('Bundle package.json changes an unexpected SDK dependency.');
+      record(normalized[section])![packageName] = oldValue;
+    }
+  }
+  const beforeEngines = record(before.engines);
+  const afterEngines = record(after.engines);
+  if (beforeEngines?.node === undefined && typeof afterEngines?.node === 'string') {
+    const required = packageName === 'firebase-admin' ? 22 : packageName === 'openai' ? 20 : undefined;
+    if (!required || afterEngines.node !== `>=${required}`) throw new Error('Bundle package.json adds an unexpected Node.js requirement.');
+    if (beforeEngines) delete record(normalized.engines)!.node;
+    else delete normalized.engines;
+  }
+  if (!isDeepStrictEqual(normalized, before)) throw new Error('Bundle package.json changes fields beyond the SDK version or approved Node.js requirement.');
+}
+
 function sameList(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-/** The report is Markdown already. Escape HTML once, then keep it inside a quote. */
+/** A fenced block prevents GitHub from parsing mentions, autolinks, HTML or client Markdown. */
 function quotedUntrustedReport(report: string): string {
-  return sanitizeTerminalText(report)
-    .replace(/&(?!(?:amp|lt|gt|quot|#(?:\d+|x[0-9a-f]+));)/gi, '&amp;')
-    .replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/@/g, '&#64;')
-    .split('\n').map((line) => `> ${line}`).join('\n');
+  const safe = maskSecrets(sanitizeTerminalText(report)).replace(/&#(91|93|124|96|33);/g, (_entity, code: string) => String.fromCharCode(Number(code)));
+  let longest = 0;
+  for (const [run] of safe.matchAll(/~+/g)) longest = Math.max(longest, run.length);
+  const fence = '~'.repeat(Math.max(4, longest + 1));
+  return `${fence}report\n${safe}\n${fence}`;
 }
 
 function completeExcerpt(report: string): string {

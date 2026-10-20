@@ -89,6 +89,21 @@ function addManual(result: MigrationResult, sourceFile: SourceFile, node: Node, 
   } satisfies ManualItem);
 }
 
+function writesNamespaceProperty(access: Node): boolean {
+  let nested: Node = access;
+  for (let parent = nested.getParent(); parent; nested = parent, parent = parent.getParent()) {
+    if (Node.isDeleteExpression(parent) && parent.getExpression() === nested) return true;
+    if ((Node.isPrefixUnaryExpression(parent) || Node.isPostfixUnaryExpression(parent))
+      && [SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken].includes(parent.getOperatorToken())) return true;
+    if (Node.isBinaryExpression(parent) && /^(?:=|(?:\+|-|\*|\/|%|<<|>>|>>>|&|\||\^|\*\*|&&|\|\||\?\?)=)$/.test(parent.getOperatorToken().getText())
+      && access.getStart() >= parent.getLeft().getStart() && access.getEnd() <= parent.getLeft().getEnd()) return true;
+    if ((Node.isForOfStatement(parent) || Node.isForInStatement(parent))
+      && access.getStart() >= parent.getInitializer().getStart() && access.getEnd() <= parent.getInitializer().getEnd()) return true;
+    if (Node.isStatement(parent) && !Node.isExpressionStatement(parent)) break;
+  }
+  return false;
+}
+
 function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationResult {
   const result: MigrationResult = { changes: [], manual: [], filesChanged: [], fileUpdates: [] };
   for (const sourceFile of project.getSourceFiles()) {
@@ -136,6 +151,10 @@ function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationR
     }
     for (const call of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
       const argument = call.getArguments()[0];
+      if (call.getExpression().getText() === 'require' && Node.isNoSubstitutionTemplateLiteral(argument) && argument.getLiteralValue() === recipe.package) {
+        addManual(result, sourceFile, call, 'A backtick SDK require needs manual review before upgrading.');
+        continue;
+      }
       if (!Node.isStringLiteral(argument) || argument.getLiteralValue() !== recipe.package) continue;
       const isRequire = call.getExpression().getText() === 'require';
       const variable = call.getParent();
@@ -208,6 +227,10 @@ function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationR
       }
       const propertyRule = findRule('namespace-property', member);
       if (!directCall && propertyRule) {
+        if (writesNamespaceProperty(access)) {
+          addManual(result, sourceFile, access, `The ${access.getText()} SDK property is written to; migrate this mutation manually.`);
+          continue;
+        }
         addEdit(access, propertyRule.to!, propertyRule.id);
         neededImport(propertyRule.from!, propertyRule.to!.replace(/\(\)$/, ''));
         continue;
@@ -231,7 +254,7 @@ function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationR
           continue;
         }
         const local = specifier.getAliasNode()?.getText() ?? name;
-        if (rename) addEdit(specifier, `${rename.to} as ${local}`, rename.id);
+        if (rename) addEdit(specifier, `${specifier.isTypeOnly() ? 'type ' : ''}${rename.to} as ${local}`, rename.id);
         if (move) {
           const q = quoteOf(sourceFile);
           const replacement = `import { ${name}${local === name ? '' : ` as ${local}`} } from ${q}${move.from}${q};`;
@@ -259,7 +282,18 @@ function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationR
       }
     }
 
-    if (result.manual.length > initialManual || edits.length === 0) continue;
+    if (result.manual.length > initialManual) continue;
+    if (edits.length === 0) {
+      const hasPackageReference = sourceFile.getImportDeclarations().some((declaration) => declaration.getModuleSpecifierValue() === recipe.package)
+        || sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) => {
+          const argument = call.getArguments()[0];
+          return ['require', 'import'].includes(call.getExpression().getText())
+            && (Node.isStringLiteral(argument) || Node.isNoSubstitutionTemplateLiteral(argument))
+            && argument.getLiteralValue() === recipe.package;
+        });
+      if (hasPackageReference) addManual(result, sourceFile, sourceFile, 'This file references the SDK without a recognized recipe binding; inspect its usage manually.');
+      continue;
+    }
     for (const [module, names] of imports) {
       for (const name of names) {
         const existing = sourceFile.getImportDeclarations().some((declaration) => declaration.getModuleSpecifierValue() === module && !declaration.isTypeOnly() && declaration.getNamedImports().some((specifier) => !specifier.isTypeOnly() && specifier.getName() === name && (specifier.getAliasNode()?.getText() ?? name) === name));

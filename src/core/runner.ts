@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { execFile as execFileCallback } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { registerTemporaryCleanup } from './process-cleanup.js';
@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { structuredPatch } from 'diff';
-import { Project } from 'ts-morph';
+import { Node, Project, SyntaxKind } from 'ts-morph';
 import type { ManualItem, Migration, MigrationResult, PackageManifest, ProposedFileChange } from './types.js';
 import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from './project-discovery.js';
 import { parseManifest } from './manifest.js';
@@ -18,6 +18,7 @@ const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx',
 const MAX_DIFF_INPUT_BYTES = 1024 * 1024;
 const MAX_DIFF_OUTPUT_CHARS = 64 * 1024;
 const MAX_REPORT_DIFF_CHARS = 256 * 1024;
+const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const LOCKFILE_NAMES = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock']);
 
 export function loadProject(cwd: string, packageName = 'firebase-admin'): Project {
@@ -25,7 +26,9 @@ export function loadProject(cwd: string, packageName = 'firebase-admin'): Projec
     skipAddingFilesFromTsConfig: true,
     compilerOptions: { allowJs: true },
   });
-  for (const sourcePath of findSourceFiles(cwd, packageName)) project.addSourceFileAtPath(sourcePath);
+  for (const sourcePath of findSourceFiles(cwd, packageName)) {
+    if (statSync(sourcePath).size <= MAX_SOURCE_BYTES) project.addSourceFileAtPath(sourcePath);
+  }
   return project;
 }
 
@@ -54,6 +57,10 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
   const manifestBySource = new Map<string, string>();
 
   for (const sourcePath of findSourceFiles(root, migration.packageName, excludedDirectories)) {
+    if (statSync(sourcePath).size > MAX_SOURCE_BYTES) {
+      manual.push({ file: sourcePath, line: 1, reason: 'Source file exceeds the 2 MiB analysis size limit; review this SDK usage manually.', snippet: '' });
+      continue;
+    }
     const containingManifests = manifests
       .filter(({ file }) => {
         const directory = path.dirname(file);
@@ -90,6 +97,7 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
       continue;
     }
     if (!declaration) {
+      if (migration.packageName === 'stripe' && !hasLikelyStripeSdkUsage(sourcePath)) continue;
       manual.push({
         file: sourcePath,
         line: 1,
@@ -122,6 +130,20 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
   }
 
   return { project, manual, manifestBySource };
+}
+
+function hasLikelyStripeSdkUsage(sourcePath: string): boolean {
+  const probe = new Project({ skipAddingFilesFromTsConfig: true, compilerOptions: { allowJs: true } });
+  const source = probe.addSourceFileAtPath(sourcePath);
+  if (source.getImportDeclarations().some((declaration) => declaration.getModuleSpecifierValue() === 'stripe')) return true;
+  if (source.getDescendantsOfKind(SyntaxKind.ImportEqualsDeclaration).some((declaration) =>
+    /^require\s*\(\s*['"]stripe['"]\s*\)$/.test(declaration.getModuleReference().getText()))) return true;
+  if (source.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) =>
+    ['require', 'import'].includes(call.getExpression().getText())
+    && Node.isStringLiteral(call.getArguments()[0]) && call.getArguments()[0]!.getText().slice(1, -1) === 'stripe')) return true;
+  const resources = new Set(['customers', 'products', 'accounts', 'checkout', 'billingPortal', 'paymentIntents', 'paymentMethods', 'subscriptions', 'subscriptionItems', 'invoices', 'charges', 'balance', 'prices', 'webhooks']);
+  return source.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression).some((access) =>
+    resources.has(access.getName()) && ['stripe', 'this.stripe'].includes(access.getExpression().getText()));
 }
 
 function isRegistryVersionSpec(spec: string): boolean {
@@ -180,11 +202,35 @@ function findSourceFiles(root: string, packageName: string, excludedDirectories:
       }
       if (!entry.isFile() || entry.name.endsWith('.d.ts')) continue;
       if (!SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
-      if (readFileSync(absolutePath, 'utf8').includes(packageName)) found.push(absolutePath);
+      if (statSync(absolutePath).size > MAX_SOURCE_BYTES) {
+        if (largeFileContainsPackage(absolutePath, packageName)) found.push(absolutePath);
+      }
+      else {
+        const source = readFileSync(absolutePath, 'utf8');
+        if (source.includes(packageName) || (packageName === 'stripe' && /\bstripe\b/i.test(source))) found.push(absolutePath);
+      }
     }
   };
   visit(root);
   return found;
+}
+
+function largeFileContainsPackage(file: string, packageName: string): boolean {
+  const needle = packageName === 'stripe' ? 'stripe' : packageName;
+  const descriptor = openSync(file, 'r');
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let tail = '';
+  try {
+    for (;;) {
+      const count = readSync(descriptor, buffer, 0, buffer.length, null);
+      if (count === 0) return false;
+      const chunk = tail + buffer.toString('utf8', 0, count);
+      if ((packageName === 'stripe' ? chunk.toLowerCase() : chunk).includes(needle)) return true;
+      tail = chunk.slice(-(needle.length - 1));
+    }
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 export interface RunOptions {
@@ -197,6 +243,8 @@ export interface RunOptions {
   allowYarnLockInstall?: boolean;
   /** Count source findings only; never regenerate lockfiles or prepare manifest writes. */
   analysisOnly?: boolean;
+  /** Registry snapshot cutoff shared with independent publication verification. */
+  registryBefore?: string;
 }
 
 export interface RunOutcome extends MigrationResult {
@@ -404,7 +452,7 @@ async function migrateManifests(
     let lockChange: ManifestFileChange | undefined;
     if (existingLocks.length > 0) {
       const lockResult = existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'package-lock.json'
-        ? await regeneratePackageLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd)
+        ? await regeneratePackageLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd, options.registryBefore)
         : existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'pnpm-lock.yaml'
           ? await regeneratePnpmLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd)
           : existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'yarn.lock'
@@ -462,6 +510,7 @@ async function regeneratePackageLock(
   lockPath: string,
   updatedManifest: string,
   projectRoot: string,
+  registryBefore?: string,
 ): Promise<LockfileRegenerationResult> {
   const directory = path.dirname(manifestPath);
   if (directory !== path.dirname(lockPath)) {
@@ -508,6 +557,7 @@ async function regeneratePackageLock(
     await writeFile(path.join(temporaryDirectory, 'package.json'), updatedManifest, 'utf8');
     await writeFile(path.join(temporaryDirectory, 'package-lock.json'), before, 'utf8');
     const args = ['install', '--package-lock-only', '--lockfile-version=3', '--ignore-scripts', '--no-audit', '--no-fund'];
+    if (registryBefore) args.push(`--before=${registryBefore}`);
     // npm_execpath may be pnpm or Yarn when launched through dlx; resolve npm from PATH instead.
     await execFile('npm', args, { cwd: temporaryDirectory, env: lockfileCommandEnvironment(temporaryDirectory), timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
     const contents = await readFile(path.join(temporaryDirectory, 'package-lock.json'), 'utf8');
@@ -922,6 +972,11 @@ export function unifiedDiff(file: string, before: string, after: string): string
   if (LOCKFILE_NAMES.has(path.basename(file))) return summarizeLockfile(file, before, after);
   if (Buffer.byteLength(before) + Buffer.byteLength(after) > MAX_DIFF_INPUT_BYTES) {
     return `${file}: diff withheld because the source exceeds ${MAX_DIFF_INPUT_BYTES} bytes.`;
+  }
+  const beforeLines = before.match(/\n/g)?.length ?? 0;
+  const afterLines = after.match(/\n/g)?.length ?? 0;
+  if (beforeLines + afterLines > 4_000) {
+    return `${file}: diff withheld because this file has too many lines for a bounded report.`;
   }
   const patch = structuredPatch(
     `a/${file}`,
