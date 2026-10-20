@@ -328,6 +328,18 @@ function hasStripePackageReference(sourceFile: SourceFile): boolean {
 }
 
 function reportIndirectStripeClients(sourceFile: SourceFile, result: MigrationResult): void {
+  const bindings = findStripeBindings(sourceFile);
+  const trackedClients = findStripeClients(sourceFile, bindings.constructors);
+  const indirectAliases = new Set<string>();
+  for (const declaration of sourceFile.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    const initializer = declaration.getInitializer();
+    if (!initializer || !Node.isIdentifier(initializer)
+      || (!trackedClients.has(initializer.getText()) && !bindings.constructors.has(initializer.getText()))) continue;
+    const name = declaration.getNameNode();
+    if (Node.isIdentifier(name)) indirectAliases.add(name.getText());
+    else if (Node.isObjectBindingPattern(name)) for (const element of name.getElements()) indirectAliases.add(element.getNameNode().getText());
+    addManual(sourceFile, result.manual, declaration, 'A Stripe client or constructor alias is untracked; review all uses before upgrading.', declaration.getText());
+  }
   const typedParameters = new Set(sourceFile.getDescendantsOfKind(SyntaxKind.Parameter)
     .filter((parameter) => /\bStripe\b/.test(parameter.getTypeNode()?.getText() ?? ''))
     .map((parameter) => parameter.getName()));
@@ -341,7 +353,13 @@ function reportIndirectStripeClients(sourceFile: SourceFile, result: MigrationRe
     const path = propertyPath(expression);
     const text = expression.getText();
     const indirect = text.startsWith('this.stripe.') && text.split('.').length >= 4
-      || path.length >= 3 && (typedParameters.has(path[0]!) || locallyImported.has(path[0]!));
+      || path.length >= 3 && (typedParameters.has(path[0]!) || locallyImported.has(path[0]!))
+      || indirectAliases.has(path[0] ?? '')
+      || (!trackedClients.has(path[0] ?? '') && !bindings.constructors.has(path[0] ?? '')
+        && /(?:\.|\[['"])(?:customers|paymentIntents|setupIntents|balance|invoices|charges|subscriptions)(?:\.|['"]\])/.test(text))
+      || (!trackedClients.has(path[0] ?? '') && call.getArguments().some((argument) =>
+        Node.isObjectLiteralExpression(argument) && argument.getProperties().some((property) =>
+          Node.isPropertyAssignment(property) && ['stripeAccount', 'idempotencyKey'].includes(property.getName()))));
     if (!indirect || result.manual.some((item) => item.file === sourceFile.getFilePath() && item.line === call.getStartLineNumber())) continue;
     addManual(sourceFile, result.manual, call, 'This indirectly held Stripe client is untracked; review its v22/v23 request behavior manually.', call.getText());
   }

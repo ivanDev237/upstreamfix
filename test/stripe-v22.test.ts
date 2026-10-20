@@ -206,6 +206,26 @@ type Error = StripeCtor.errors.StripeError;
     const result = stripeV22.transform(project);
     expect(result.manual.filter((item) => /untracked|locally imported|indirect/i.test(item.reason))).toHaveLength(3);
   });
+  it('X5 reports every indirect Connect client even beside a recognized constructor', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('indirect.ts', `import Stripe from 'stripe';
+import billing from './client';
+import { stripe as other } from './another';
+const stripe = new Stripe('key');
+const t2 = stripe;
+const { customers } = stripe;
+const S2 = Stripe;
+S2('key');
+t2.customers.retrieve('cus_1', { stripeAccount: 'acct_1' });
+customers.retrieve('cus_1', { stripeAccount: 'acct_1' });
+billing.customers.retrieve('cus_1', { stripeAccount: 'acct_1' });
+other.customers.retrieve('cus_1', { stripeAccount: 'acct_1' });
+this.client.customers.retrieve('cus_1', { stripeAccount: 'acct_1' });
+function send(client) { client['customers'].retrieve('cus_1', { stripeAccount: 'acct_1' }); }
+`);
+    const result = stripeV22.transform(project);
+    expect(result.manual.filter((item) => /untracked|indirect|alias/i.test(item.reason)).length).toBeGreaterThanOrEqual(8);
+  });
   it('W10 includes a sibling module using a locally imported Stripe client in project analysis', async () => {
     const cwd = await makeProject("import Stripe from 'stripe';\nexport const stripe = new Stripe('sk_test_fixture');\n");
     await writeFile(path.join(cwd, 'consumer.ts'), "import { stripe } from './client';\nstripe.customers.create({});\n");
