@@ -229,14 +229,19 @@ function validateNpmLockDelta(beforeText: string, afterText: string, packageName
   const target = record(newPackages[targetPath]);
   const version = typeof target?.version === 'string' ? target.version : '';
   const resolved = typeof target?.resolved === 'string' ? target.resolved : '';
-  let url: URL;
-  try { url = new URL(resolved); } catch { throw new Error('Bundle lockfile has an invalid registry URL.'); }
   const packageBasename = packageName.split('/').at(-1)!;
+  const exactUrl = `https://registry.npmjs.org/${packageName}/-/${packageBasename}-${version}.tgz`;
   if (!new RegExp(`^${targetMajor}\\.\\d+\\.\\d+$`).test(version)
-    || url.protocol !== 'https:' || url.hostname !== 'registry.npmjs.org' || url.username || url.password || url.port || url.search || url.hash
-    || !url.pathname.endsWith(`/-/${packageBasename}-${version}.tgz`)
+    || resolved !== exactUrl
     || target?.hasInstallScript === true || typeof target?.integrity !== 'string' || !/^sha512-[A-Za-z0-9+/=]+$/.test(target.integrity)) {
     throw new Error('Bundle lockfile target package is not a verified npm registry artifact.');
+  }
+  const oldTarget = record(oldPackages[targetPath]);
+  const allowedTargetKeys = new Set(['version', 'resolved', 'integrity', 'license', 'engines', 'funding', 'deprecated', 'dev', 'devOptional', 'optional', 'peer', 'peerDependencies', 'peerDependenciesMeta', 'optionalDependencies', 'dependencies', 'bin']);
+  for (const key of Object.keys(target!)) {
+    if (!allowedTargetKeys.has(key) || (['bin', 'dependencies', 'optionalDependencies'].includes(key) && !Object.hasOwn(oldTarget ?? {}, key))) {
+      throw new Error('Bundle lockfile target package adds an unexpected capability.');
+    }
   }
   const normalized = structuredClone(after);
   const normalizedPackages = record(normalized.packages)!;

@@ -39,6 +39,26 @@ describe('Action publication boundary', () => {
     expect(() => validatePublishableBundle({ ...proposal, files: [...proposal.files, 'package-lock.json'] }, { 'package.json': { before, after: validAfter }, 'package-lock.json': { before: lockBefore, after: lockAfter } }, identity)).toThrow(/registry|lockfile/i);
     expect(() => validatePublishableBundle(proposal, { 'package.json': { before, after: validAfter } }, { ...identity, author: 'attacker' })).toThrow(/identity/i);
   });
+  it('X1 rejects a scoped lookalike URL and extra lockfile capabilities', () => {
+    const before = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^13.0.0' } }, 'node_modules/firebase-admin': { version: '13.0.0' } } });
+    const entry = { version: '14.0.0', resolved: 'https://registry.npmjs.org/firebase-admin/-/firebase-admin-14.0.0.tgz', integrity: 'sha512-QUJDRA==' };
+    const valid = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^14.0.0' } }, 'node_modules/firebase-admin': entry } });
+    const candidate = { ...proposal, files: ['package-lock.json'] };
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
+    expect(() => validatePublishableBundle(candidate, { 'package-lock.json': { before, after: valid } }, identity)).not.toThrow();
+    for (const resolved of [
+      'https://registry.npmjs.org/@evil/firebase-admin/-/firebase-admin-14.0.0.tgz',
+      'https://registry.npmjs.org/evil-pkg/-/firebase-admin-14.0.0.tgz',
+      'https://registry.npmjs.org/evil/../firebase-admin/-/firebase-admin-14.0.0.tgz',
+    ]) {
+      const after = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^14.0.0' } }, 'node_modules/firebase-admin': { ...entry, resolved } } });
+      expect(() => validatePublishableBundle(candidate, { 'package-lock.json': { before, after } }, identity)).toThrow(/registry|lockfile/i);
+    }
+    for (const extras of [{ bin: { cli: 'x' } }, { dependencies: { 'evil-pkg': '1.0.0' } }, { scripts: { postinstall: 'node evil.js' } }]) {
+      const after = JSON.stringify({ lockfileVersion: 3, packages: { '': { dependencies: { 'firebase-admin': '^14.0.0' } }, 'node_modules/firebase-admin': { ...entry, ...extras } } });
+      expect(() => validatePublishableBundle(candidate, { 'package-lock.json': { before, after } }, identity)).toThrow(/lockfile|unexpected/i);
+    }
+  });
   it('T36 renders an already escaped migration report as Markdown exactly once', async () => {
     let body = '';
     const publisher: ProposalPublisher = {
