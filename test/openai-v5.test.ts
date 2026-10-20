@@ -25,9 +25,11 @@ describe('openai v4 to v5', () => {
       expect((await findApplicableMigrations(cwd, { includeExperimental: true })).map((item) => item.id)).toContain('openai@5');
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
-  it('has five pinned and reviewed public repositories for the real benchmark', () => {
+  it('has at least 15 pinned and reviewed public repositories with at least 10 relevant uses', () => {
     const repos = JSON.parse(readFileSync(new URL('../benchmark/openai-5-repos.json', import.meta.url), 'utf8')) as BenchRepo[];
-    expect(repos).toHaveLength(7);
+    expect(repos.length).toBeGreaterThanOrEqual(15);
+    expect(repos.filter((repo) => /beta\.chat|files\.del|moved import|named path/.test(repo.reviewNote)).length).toBeGreaterThanOrEqual(10);
+    expect(new Set(repos.map((repo) => repo.url)).size).toBe(repos.length);
     expect(repos.some((repo) => repo.name === 'lumen')).toBe(true);
     expect(repos.some((repo) => repo.name === 'ai-icon-generator')).toBe(true);
     for (const repo of repos) validateRepoEntry(repo);
@@ -92,6 +94,17 @@ describe('openai v4 to v5', () => {
       const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
       expect(outcome.manual.some((item) => item.reason.includes('TypeScript 4.9'))).toBe(true);
       expect(outcome.manual.some((item) => item.reason.includes('Jest 28'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('reports Node declarations older than v20 when the project excludes DOM types', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-old-node-types-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.29.1' }, devDependencies: { '@types/node': '16.x' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'tsconfig.json'), JSON.stringify({ compilerOptions: { lib: ['ES2022'], types: ['node'] } }));
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
+      expect(outcome.manual.some((item) => item.file === 'package.json' && item.reason.includes('@types/node >=20'))).toBe(true);
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 

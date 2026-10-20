@@ -395,6 +395,16 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
         compilerOptions = config.config.compilerOptions as Record<string, unknown>;
     } catch { /* A missing tsconfig cannot establish the active compiler environment. */ }
 
+    const nodeTypes = manifest.devDependencies?.['@types/node'] ?? manifest.dependencies?.['@types/node'];
+    const nodeTypesMajor = /^\s*[~^]?(\d+)/.exec(nodeTypes ?? '');
+    if (compilerOptions && Array.isArray(compilerOptions.lib)
+      && !compilerOptions.lib.some((lib) => typeof lib === 'string' && /^dom(?:\.iterable)?$/i.test(lib))
+      && nodeTypesMajor && Number(nodeTypesMajor[1]) < 20) {
+      findings.push({ file: manifestPath, line: 1,
+        reason: `OpenAI v5 needs Web fetch types, but this tsconfig excludes DOM and @types/node ${nodeTypes} predates Node 20. Upgrade @types/node >=20 and typecheck; review runtime compatibility first.`,
+        snippet: `@types/node: ${nodeTypes}` });
+    }
+
     if (compilerOptions && Array.isArray(compilerOptions.lib)
       && !compilerOptions.lib.some((lib) => typeof lib === 'string' && /^dom(?:\.iterable)?$/i.test(lib))
       && !manifest.dependencies?.['@types/node'] && !manifest.devDependencies?.['@types/node']) {
