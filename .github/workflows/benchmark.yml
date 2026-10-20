@@ -1,17 +1,6 @@
 name: Public repository benchmark
 
 on:
-  push:
-    branches: [develop]
-    paths:
-      - '.github/workflows/benchmark.yml'
-      - 'src/migrations/openai-v5/**'
-      - 'src/migrations/index.ts'
-      - 'src/core/runner.ts'
-      - 'scripts/benchmark.ts'
-      - 'benchmark/openai-5-repos.json'
-      - 'package.json'
-      - 'package-lock.json'
   pull_request:
     branches: [main]
     paths:

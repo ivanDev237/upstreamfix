@@ -11,9 +11,11 @@ describe('GitHub Actions CI workflow', () => {
     expect(workflow).toContain('ref: ${{ github.event.pull_request.head.sha || github.sha }}');
     expect(workflow).toContain('UPSTREAMFIX_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}');
   });
-  it('can measure develop on GitHub while pull request creation is pending', async () => {
+  it('runs expensive benchmarks only by explicit dispatch or on a pull request', async () => {
     const workflow = await readFile(path.join(projectRoot, '.github/workflows/benchmark.yml'), 'utf8');
-    expect(workflow).toMatch(/push:\s*\n\s*branches: \[develop\]/);
+    expect(workflow).not.toMatch(/push:\s*\n\s*branches: \[develop\]/);
+    expect(workflow).toContain('workflow_dispatch:');
+    expect(workflow).toContain('pull_request:');
   });
   it('runs install, typecheck, build, and tests on Node 22 and 24 for pushes and pull requests', async () => {
     const workflow = await readFile(path.join(projectRoot, '.github/workflows/ci.yml'), 'utf8');
