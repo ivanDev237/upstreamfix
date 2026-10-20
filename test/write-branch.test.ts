@@ -68,14 +68,11 @@ describe('verified Git branch writes', () => {
     expect(message).toContain('Unsafe package.json');
     expect(message).not.toContain('root:x:0:0');
   });
-  it('commits a changed file larger than the former Git output buffer', async () => {
+  it('W9 refuses to write a source file above the analysis limit', async () => {
     const source = `// ${'x'.repeat(2_200_000)}\nconst admin = require('firebase-admin');\nadmin.firestore();\n`;
     const cwd = await makeRepository(source);
-    const result = await writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions });
-
-    expect(result.verification.status).toBe('passed');
-    expect(await git(cwd, 'cat-file', '-s', `${result.branch}:index.js`)).toMatch(/^2[0-9]{6}$/);
-    expect(await git(cwd, 'show', `${result.branch}:package.json`)).toContain('^14.0.0');
+    await expect(writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions })).rejects.toThrow(/manual review/);
+    expect((await git(cwd, 'branch', '--list', 'upstreamfix/*')).trim()).toBe('');
     expect((await git(cwd, 'status', '--porcelain')).trim()).toBe('');
   });
 
