@@ -25,6 +25,22 @@ async function sourcegraphHits(query) {
   }
   return hits;
 }
+async function githubHits(query) {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) throw new Error('GitHub Code Search requires a read-only workflow token');
+  const search = await fetch(`https://api.github.com/search/code?q=${encodeURIComponent(`${query} in:file`) }&per_page=50`, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${token}`,
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'upstreamfix-corpus-discovery',
+    },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!search.ok) throw new Error(`GitHub Code Search HTTP ${search.status}`);
+  const result = await search.json();
+  return (result.items ?? []).map((item) => ({ repo: item.repository?.full_name, path: item.path }));
+}
 for (const query of queries) {
   let hits;
   try {
@@ -36,11 +52,17 @@ for (const query of queries) {
   } catch (error) {
     console.warn(`Primary discovery query ${query} unavailable: ${String(error)}`);
     try {
-      hits = await sourcegraphHits(query);
+      hits = await githubHits(query);
       successfulQueries++;
-    } catch (fallbackError) {
-      console.warn(`Fallback discovery query ${query} unavailable: ${String(fallbackError)}`);
-      continue;
+    } catch (githubError) {
+      console.warn(`GitHub discovery query ${query} unavailable: ${String(githubError)}`);
+      try {
+        hits = await sourcegraphHits(query);
+        successfulQueries++;
+      } catch (fallbackError) {
+        console.warn(`Fallback discovery query ${query} unavailable: ${String(fallbackError)}`);
+        continue;
+      }
     }
   }
   for (const hit of hits) {

@@ -31,6 +31,7 @@ jobs:
         id: discovery
         env:
           UPSTREAMFIX_CORPUS_CANDIDATES: ${{ runner.temp }}/openai-corpus-candidates.json
+          GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/discover-openai-corpus.mjs
       - name: Record unavailable discovery
         if: ${{ failure() && steps.discovery.outcome == 'failure' }}
