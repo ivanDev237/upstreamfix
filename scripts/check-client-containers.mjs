@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { executeClientCommand } from '../dist/action/docker-execute.js';
@@ -24,3 +24,26 @@ for (const [manager, version] of [['npm', ''], ['pnpm', '10.0.0'], ['yarn', '1.2
     console.log(`${manager}: install and network-disabled test passed`);
   } finally { await rm(root, { recursive: true, force: true }); }
 }
+
+// A client container must not be able to place a configuration file where the
+// host Docker CLI reads it on the next invocation.
+const trapRoot = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-docker-config-smoke-'));
+try {
+  const project = path.join(trapRoot, 'project');
+  const home = path.join(trapRoot, 'home');
+  await mkdir(project);
+  await mkdir(home);
+  const attempt = await executeClientCommand('node', ['-e', `
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const target = path.join(path.dirname(process.env.HOME), '.docker', 'config.json');
+    try { fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, '{invalid'); console.log('wrote'); }
+    catch { console.log('blocked'); }
+  `], project, sanitizedEnvironment(home), 30_000, false);
+  if (!attempt.stdout.includes('blocked')) throw new Error('Client container wrote to the host Docker configuration directory.');
+  if (await access(path.join(trapRoot, '.docker', 'config.json')).then(() => true, () => false)) {
+    throw new Error('Host Docker configuration was modified by client code.');
+  }
+  await executeClientCommand('node', ['-e', 'process.exit(0)'], project, sanitizedEnvironment(home), 30_000, false);
+  console.log('Host Docker configuration remains outside client mounts');
+} finally { await rm(trapRoot, { recursive: true, force: true }); }

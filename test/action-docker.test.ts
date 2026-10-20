@@ -16,3 +16,13 @@ it('grants network only through an explicit install flag for npm, pnpm and Yarn'
   const misleading = buildClientDockerArgs('npm', ['install'], cwd, env, false, 'test-container');
   expect(misleading[misleading.indexOf('--network') + 1]).toBe('none');
 });
+
+it('W1 mounts only the project and isolated client home, never the host Docker configuration root', () => {
+  const root = '/tmp/upstreamfix-verify-test';
+  const args = buildClientDockerArgs('node', ['-e', 'process.exit(0)'], `${root}/project`, { HOME: `${root}/home` }, false, 'test-container');
+  const text = args.join(' ');
+  expect(text).toContain(`${root}/project`);
+  expect(text).toContain(`${root}/home`);
+  expect(text).not.toContain(`source=${root},target=${root}`);
+  expect(text).not.toContain(`${root}:${root}`);
+});
