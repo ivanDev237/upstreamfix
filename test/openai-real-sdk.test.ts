@@ -22,6 +22,7 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
       ['chat.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const parse = () => client.beta.chat.completions.parse({model:'gpt-4o', messages:[]});\n"],
       ['stream.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const stream = () => client.beta.chat.completions.stream({model:'gpt-4o', messages:[]});\n"],
       ['tools.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const run = () => client.beta.chat.completions.runTools({model:'gpt-4o', messages:[], tools:[]});\n"],
+      ['class.ts', "import OpenAI from 'openai';\nclass Service { client: OpenAI; constructor() { this.client = new OpenAI({apiKey: 'sk-test-fixture'}); } run() { return this.client.beta.chat.completions.parse({model:'gpt-4o', messages:[]}); } }\nexport const service = new Service();\n"],
       ['moved.ts', "import type { OpenAIError } from 'openai/error';\nexport type MigrationError = OpenAIError;\n"],
     ]);
     for (const [name, source] of files) await writeFile(path.join(cwd, name), source);
@@ -33,13 +34,14 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
     for (const name of files.keys()) project.addSourceFileAtPath(path.join(cwd, name));
     const result = openaiV5.transform(project);
     expect(result.manual).toEqual([]);
-    expect(result.fileUpdates).toHaveLength(5);
+    expect(result.fileUpdates).toHaveLength(6);
     for (const update of result.fileUpdates ?? []) await writeFile(update.file, update.contents);
     await install('5.0.0');
     await check();
     expect(await readFile(path.join(cwd, 'chat.ts'), 'utf8')).toContain('client.chat.completions.parse');
     expect(await readFile(path.join(cwd, 'stream.ts'), 'utf8')).toContain('client.chat.completions.stream');
     expect(await readFile(path.join(cwd, 'tools.ts'), 'utf8')).toContain('client.chat.completions.runTools');
+    expect(await readFile(path.join(cwd, 'class.ts'), 'utf8')).toContain('this.client.chat.completions.parse');
     expect(await readFile(path.join(cwd, 'moved.ts'), 'utf8')).toContain("'openai/core/error'");
   }, 300_000);
 });
