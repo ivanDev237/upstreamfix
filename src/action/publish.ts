@@ -268,11 +268,13 @@ function sameList(left: string[], right: string[]): boolean {
 /** The report is Markdown already. Escape HTML once, then keep it inside a quote. */
 function quotedUntrustedReport(report: string): string {
   return sanitizeTerminalText(report)
-    .replace(/&(?!(?:amp|lt|gt|quot|#(?:\d+|x[0-9a-f]+));)/gi, '&amp;')
-    .replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/@/g, '&#64;')
-    .replace(/!/g, '&#33;').replace(/\[/g, '&#91;').replace(/\]/g, '&#93;')
-    .replace(/#(?=\d)/g, '&#35;').replace(/https?:\/\//gi, (url) => url.replace(':', '&#58;'))
+    .replace(/&(?:amp|lt|gt|quot|#(?:\d+|x[0-9a-f]+));|https?:\/\/|www\.|GH-\d+|[&<>@!\[\]]|#(?=\d)/gi, (token) => {
+      if (token.startsWith('&') && token.endsWith(';')) return token;
+      if (/^https?:\/\//i.test(token)) return token.replace(':', '&#58;');
+      if (/^www\./i.test(token)) return token.slice(0, -1) + '&#46;';
+      if (/^GH-\d+$/i.test(token)) return token.replace('-', '&#45;');
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '@': '&#64;', '!': '&#33;', '[': '&#91;', ']': '&#93;', '#': '&#35;' } as Record<string, string>)[token] ?? token;
+    })
     .split('\n').map((line) => `> ${line}`).join('\n');
 }
 

