@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { structuredPatch } from 'diff';
-import { Node, Project, SyntaxKind } from 'ts-morph';
+import { Node, Project, SyntaxKind, ts } from 'ts-morph';
 import type { ManualItem, Migration, MigrationResult, PackageManifest, ProposedFileChange } from './types.js';
 import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from './project-discovery.js';
 import { parseManifest } from './manifest.js';
@@ -38,7 +38,7 @@ interface ScopedProject {
   manifestBySource: Map<string, string>;
 }
 
-function loadScopedProject(root: string, migration: Migration, excludedDirectories: readonly string[] = [], nodeRuntime?: number): ScopedProject {
+function loadScopedProject(root: string, migration: Migration, excludedDirectories: readonly string[] = [], nodeRuntime?: number, analysisRuntimeOverride = false): ScopedProject {
   const project = new Project({
     skipAddingFilesFromTsConfig: true,
     compilerOptions: { allowJs: true },
@@ -123,7 +123,7 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
         reason: `OpenAI SDK v5 requires Node.js 20 or later. Declare a compatible engines.node range in ${path.relative(root, declaration.file)} and confirm the deployed runtime before migrating; this source file was left unchanged.`,
         snippet: `engines.node: ${declaration.manifest.engines?.node ?? 'not declared'}`,
       });
-      continue;
+      if (!analysisRuntimeOverride) continue;
     }
     project.addSourceFileAtPath(sourcePath);
     manifestBySource.set(sourcePath, declaration.file);
@@ -243,6 +243,8 @@ export interface RunOptions {
   allowYarnLockInstall?: boolean;
   /** Count source findings only; never regenerate lockfiles or prepare manifest writes. */
   analysisOnly?: boolean;
+  /** Benchmark-only source analysis under Node 20; retains a manual runtime finding. */
+  analysisRuntimeOverride?: boolean;
   /** Registry snapshot cutoff shared with independent publication verification. */
   registryBefore?: string;
 }
@@ -273,13 +275,19 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   if (options.nodeRuntime && !((!migration.declarativeRecipe && options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (!migration.declarativeRecipe && options.nodeRuntime === 20 && migration.id === 'openai@5') || options.nodeRuntime === migration.requiredNodeMajor)) {
     throw new Error('--node-runtime 22 applies to firebase-admin@14; --node-runtime 20 applies to openai@5; recipes require their declared nodeMajor.');
   }
-  const scoped = loadScopedProject(options.cwd, migration, options.excludedDirectories, options.nodeRuntime);
+  if (options.analysisRuntimeOverride && (!options.analysisOnly || migration.id !== 'openai@5' || options.nodeRuntime !== 20)) {
+    throw new Error('The OpenAI runtime override is restricted to source-only benchmark analysis under Node.js 20.');
+  }
+  const scoped = loadScopedProject(options.cwd, migration, options.excludedDirectories, options.nodeRuntime, options.analysisRuntimeOverride === true);
   const project = scoped.project;
   const originalSources = new Map<string, string>(await Promise.all(
     project.getSourceFiles().map(async (file): Promise<[string, string]> => [file.getFilePath(), await readFile(file.getFilePath(), 'utf8')]),
   ));
   const result = migration.transform(project);
   result.manual.unshift(...scoped.manual);
+  if (migration.id === 'openai@5' && !migration.declarativeRecipe) {
+    result.manual.push(...inspectOpenAiTypeEnvironment(options.cwd, options.excludedDirectories));
+  }
   const compatibilityNotes = migration.inspectManifest
     ? await inspectManifests(migration, options.cwd, options.excludedDirectories)
     : [];
@@ -352,6 +360,62 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     proposedDiff,
     proposedFiles,
   };
+}
+
+function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonly string[] = []): ManualItem[] {
+  const findings: ManualItem[] = [];
+  const sourceFiles = findSourceFiles(root, 'process', excludedDirectories);
+  for (const manifestPath of findPackageManifests(root, excludedDirectories)) {
+    let manifest: PackageManifest;
+    try { manifest = parseManifest<PackageManifest>(readFileSync(manifestPath, 'utf8')); }
+    catch { continue; }
+    if (!(['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+      .some((section) => isSupportedSourceMajor(manifest[section]?.openai ?? '', 4))) continue;
+
+    const directory = path.dirname(manifestPath);
+    const tooling = { ...manifest.dependencies, ...manifest.devDependencies };
+    const typescriptVersion = /^\s*[~^]?(\d+)\.(\d+)/.exec(tooling.typescript ?? '');
+    if (typescriptVersion && (Number(typescriptVersion[1]) < 4
+      || (Number(typescriptVersion[1]) === 4 && Number(typescriptVersion[2]) < 9))) {
+      findings.push({ file: manifestPath, line: 1,
+        reason: `OpenAI v5 requires TypeScript 4.9 or later; declared version ${tooling.typescript} can install an older compiler. Upgrade TypeScript and run typecheck.`,
+        snippet: `typescript: ${tooling.typescript}` });
+    }
+    const jestVersion = /^\s*[~^]?(\d+)/.exec(tooling.jest ?? '');
+    if (jestVersion && Number(jestVersion[1]) < 28) {
+      findings.push({ file: manifestPath, line: 1,
+        reason: `OpenAI v5 requires Jest 28 or later; declared version ${tooling.jest} can install an older runner. Upgrade Jest and rerun tests.`,
+        snippet: `jest: ${tooling.jest}` });
+    }
+    const tsconfigPath = path.join(directory, 'tsconfig.json');
+    let compilerOptions: Record<string, unknown> | undefined;
+    try {
+      const config = ts.parseConfigFileTextToJson(tsconfigPath, readFileSync(tsconfigPath, 'utf8'));
+      if (!config.error && config.config && typeof config.config.compilerOptions === 'object')
+        compilerOptions = config.config.compilerOptions as Record<string, unknown>;
+    } catch { /* A missing tsconfig cannot establish the active compiler environment. */ }
+
+    if (compilerOptions && Array.isArray(compilerOptions.lib)
+      && !compilerOptions.lib.some((lib) => typeof lib === 'string' && /^dom(?:\.iterable)?$/i.test(lib))
+      && !manifest.dependencies?.['@types/node'] && !manifest.devDependencies?.['@types/node']) {
+      findings.push({ file: tsconfigPath, line: 1,
+        reason: 'OpenAI v5 requires Web fetch types (RequestInit, Headers, Blob, File). This tsconfig excludes DOM and the package lacks @types/node; choose a compatible DOM lib or @types/node >=20, then typecheck. The correct runtime target cannot be inferred safely.',
+        snippet: `compilerOptions.lib: ${JSON.stringify(compilerOptions.lib)}` });
+    }
+    if (manifest.dependencies?.['@types/node'] || manifest.devDependencies?.['@types/node']) continue;
+    for (const sourcePath of sourceFiles) {
+      if (!(sourcePath === directory || sourcePath.startsWith(directory + path.sep))) continue;
+      const source = readFileSync(sourcePath, 'utf8');
+      const match = /\bprocess\s*[.[]/.exec(source);
+      if (!match) continue;
+      const line = source.slice(0, match.index).split('\n').length;
+      findings.push({ file: sourcePath, line,
+        reason: 'OpenAI v4 may have supplied @types/node transitively; v5 does not. This file uses process but @types/node is not declared. Add a Node >=20 @types/node devDependency and typecheck, or review this runtime-specific global manually.',
+        snippet: source.split('\n')[line - 1]?.trim().slice(0, 500) ?? 'process' });
+      break;
+    }
+  }
+  return findings;
 }
 
 async function inspectManifests(migration: Migration, cwd: string, excludedDirectories: readonly string[] = []): Promise<string[]> {

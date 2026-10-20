@@ -71,6 +71,30 @@ describe('openai v4 to v5', () => {
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
+  it('reports a missing Node type environment outside the OpenAI source file', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-node-types-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.28.0' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'tsconfig.json'), JSON.stringify({ compilerOptions: { lib: ['ES2022'] } }));
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'other.ts'), 'console.log(process.env.NODE_ENV);\n');
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
+      expect(outcome.manual.some((item) => item.file === 'other.ts' && item.reason.includes('@types/node'))).toBe(true);
+      expect(outcome.manual.some((item) => item.file === 'tsconfig.json' && item.reason.includes('Web'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('reports unsupported TypeScript and Jest versions from the v5 guide', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-tooling-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.28.0' }, devDependencies: { typescript: '4.8.4', jest: '^27.0.0' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
+      expect(outcome.manual.some((item) => item.reason.includes('TypeScript 4.9'))).toBe(true);
+      expect(outcome.manual.some((item) => item.reason.includes('Jest 28'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
   it('rewrites only bound client methods and beta chat paths', () => {
     const outcome = migrate(`import OpenAI from 'openai';
 const client = new OpenAI();
@@ -181,6 +205,31 @@ client.vectorStores.files.retrieve('store', 'file');
 `);
     expect(outcome.manual.map((item) => item.reason).join('\n')).toMatch(/httpAgent|runFunctions|named path/);
     expect(outcome.fileUpdates).toEqual([]);
+  });
+
+  it.each([
+    ["client.files.retrieve(encodeURIComponent(id));", 'URI'],
+    ["client.files.list({ headers: { 'X-Test': '1' } });", 'request options'],
+    ["client.files.list().then(page => page.nextPageParams());", 'pagination'],
+    ["client.files.retrieve('id').asResponse().then(response => response.body.pipe(out));", 'Web'],
+  ])('flags official guide behavior changes: %s', (usage, expected) => {
+    const outcome = migrate(`import OpenAI from 'openai'; const client = new OpenAI(); ${usage}`);
+    expect(outcome.manual.map((item) => item.reason).join(' ')).toContain(expected);
+    expect(outcome.fileUpdates).toEqual([]);
+  });
+
+  it('flags removed APIClient, root openai/src, runtime page classes, and Zod optionality', () => {
+    const cases = [
+      "import { APIClient } from 'openai/core';",
+      "import OpenAI from 'openai/src';",
+      "import { FineTuningJobsPage } from 'openai/resources/fine-tuning/jobs'; console.log(FineTuningJobsPage);",
+      "import { zodResponseFormat } from 'openai/helpers/zod'; const schema = zodResponseFormat(z.object({ name: z.string().optional() }), 'x');",
+    ];
+    for (const source of cases) {
+      const outcome = migrate(source);
+      expect(outcome.manual.length, source).toBeGreaterThan(0);
+      expect(outcome.fileUpdates, source).toEqual([]);
+    }
   });
 
   it('withholds multi-argument del calls whose v5 path parameters changed', () => {

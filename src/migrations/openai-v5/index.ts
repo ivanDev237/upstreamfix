@@ -33,6 +33,16 @@ const RUN_TOOLS_EVENTS = new Map([
   ['functionCall', 'functionToolCall'], ['functionCallResult', 'functionToolCallResult'],
   ['finalFunctionCall', 'finalFunctionToolCall'], ['finalFunctionCallResult', 'finalFunctionToolCallResult'],
 ]);
+const REQUEST_OPTION_OVERLOADS = new Set([
+  'chat.completions.list', 'chat.completions.messages.list', 'files.list',
+  'fineTuning.jobs.list', 'fineTuning.jobs.listEvents', 'fineTuning.jobs.checkpoints.list',
+  'fineTuning.checkpoints.permissions.retrieve', 'vectorStores.list', 'vectorStores.files.list',
+  'beta.assistants.list', 'beta.threads.create', 'beta.threads.runs.list',
+  'beta.threads.messages.list', 'batches.list', 'responses.retrieve',
+  'responses.inputItems.list', 'evals.list', 'evals.runs.list',
+  'containers.list', 'containers.files.list',
+]);
+const REQUEST_OPTION_KEYS = new Set(['headers', 'timeout', 'maxRetries', 'signal', 'idempotencyKey']);
 interface Edit { start: number; end: number; replacement: string; rule: string; before: string; line: number }
 
 function pathParts(node: Node): string[] {
@@ -197,8 +207,19 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     const specifier = declaration.getModuleSpecifierValue();
     const moved = MOVED_IMPORTS.get(specifier);
     if (moved) addEdit(edits, file, declaration.getModuleSpecifier(), `'${moved}'`, 'moved-import');
-    else if (specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
+    else if (specifier === 'openai/src' || specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
       addManual(result, file, declaration, 'OpenAI v5 removes this private or shim import; review the replacement and runtime configuration.');
+    if (specifier.startsWith('openai/resources/') && declaration.getNamedImports().some((entry) => /Page$/.test(entry.getName()) && !declaration.isTypeOnly() && !entry.isTypeOnly()))
+      addManual(result, file, declaration, 'OpenAI v5 converts resource-specific Page classes to type aliases; review runtime uses before upgrading.');
+    if (specifier.startsWith('openai/') && declaration.getNamedImports().some((entry) => entry.getName() === 'APIClient'))
+      addManual(result, file, declaration, 'OpenAI v5 removes APIClient; review replacement with the main OpenAI class.');
+  }
+  if (file.getFullText().includes('zodResponseFormat')) {
+    for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      const expression = call.getExpression();
+      if (Node.isPropertyAccessExpression(expression) && expression.getName() === 'optional')
+        addManual(result, file, call, 'OpenAI v5 rejects optional Zod response fields at runtime; review whether nullable is semantically correct.');
+    }
   }
   for (const declaration of file.getExportDeclarations()) {
     const specifier = declaration.getModuleSpecifierValue();
@@ -207,6 +228,11 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
   }
   for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
     const expression = call.getExpression();
+    if (Node.isPropertyAccessExpression(expression) && ['nextPageParams', 'nextPageInfo'].includes(expression.getName()))
+      addManual(result, file, call, 'OpenAI v5 pagination uses nextPageRequestOptions; review manual pagination logic.');
+    if (Node.isPropertyAccessExpression(expression) && expression.getName() === 'pipe'
+      && file.getFullText().includes('.asResponse()') && expression.getExpression().getText().endsWith('.body'))
+      addManual(result, file, call, 'OpenAI v5 Web response body is a ReadableStream; use a deliberate Web-to-Node stream conversion.');
     if (expression.getText() === 'require') {
       const argument = call.getArguments()[0];
       const specifier = argument?.getText().replace(/^['"]|['"]$/g, '');
@@ -232,6 +258,17 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       continue;
     }
     const method = parts.join('.');
+    if (call.getArguments().some((argument) => Node.isCallExpression(argument)
+      && argument.getExpression().getText() === 'encodeURIComponent'))
+      addManual(result, file, call, 'OpenAI v5 URI-encodes path parameters itself; remove only deliberate pre-encoding after reviewing the endpoint.');
+    if (REQUEST_OPTION_OVERLOADS.has(method) && call.getArguments().length === 1) {
+      const argument = call.getArguments()[0];
+      if (argument && Node.isObjectLiteralExpression(argument)
+        && argument.getProperties().some((property) =>
+          (Node.isPropertyAssignment(property) || Node.isShorthandPropertyAssignment(property))
+          && REQUEST_OPTION_KEYS.has(property.getName())))
+        addManual(result, file, call, 'OpenAI v5 removed this request options overload; separate params from request options manually.');
+    }
     if (method.endsWith('.runFunctions')) {
       addManual(result, file, call, 'OpenAI v5 removes runFunctions; migrate function definitions and handling to runTools manually.');
     } else if (method === 'beta.threads.runs.poll' || method === 'beta.threads.runs.submitToolOutputsAndPoll') {

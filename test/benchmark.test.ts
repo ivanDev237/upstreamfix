@@ -62,6 +62,17 @@ describe('public repository benchmark helpers', () => {
       expect(outcome.manifestNotes.join(' ')).not.toContain('engines.node (not declared)');
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
+  it('measures beta chat rewrites with an incompatible declared runtime while retaining a runtime finding', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-benchmark-openai-runtime-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.28.0"},"engines":{"node":">=18"}}\n');
+      await writeFile(path.join(cwd, 'index.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.beta.chat.completions.stream({model:'gpt-4o',messages:[]});\n");
+      const outcome = await analyzeBenchmarkMigration(openaiV5, cwd);
+      expect(outcome.changes.some((change) => change.rule === 'beta-chat')).toBe(true);
+      expect(outcome.manual.some((item) => item.reason.includes('Node.js 20'))).toBe(true);
+      expect((await readFile(path.join(cwd, 'index.ts'), 'utf8'))).toContain('client.beta.chat');
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
   it('analyzes source changes without invoking host lockfile regeneration', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-benchmark-analysis-'));
     const originalPath = process.env.PATH;

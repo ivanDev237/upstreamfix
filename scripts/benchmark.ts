@@ -500,7 +500,9 @@ async function runPhaseChecks(
 export async function analyzeBenchmarkMigration(migration: Migration, checkout: string): Promise<RunOutcome> {
   // The reviewed OpenAI corpus is tested in Node 24 containers. This confirms
   // the benchmark runtime; it does not assert the repositories' deployment runtimes.
-  return runMigration(migration, { cwd: checkout, dryRun: true, analysisOnly: true, nodeRuntime: migration.id === 'openai@5' ? 20 : undefined });
+  return runMigration(migration, { cwd: checkout, dryRun: true, analysisOnly: true,
+    nodeRuntime: migration.id === 'openai@5' ? 20 : undefined,
+    analysisRuntimeOverride: migration.id === 'openai@5' });
 }
 
 export async function benchmarkOne(
