@@ -76,6 +76,10 @@ describe('declarative recipes', () => {
     expect(report).not.toContain('[click](https://attacker.test)');
     expect(report).toContain('Official guide: https');
   });
+  it.each(['\u202e', '\u0085', '\u2067'])('V6 rejects invisible control characters %#', async (invisible) => {
+    const template = await readFile(recipePath, 'utf8');
+    expect(() => parseRecipe(template.replace('Instance ID was removed', `Instance ID ${invisible}was removed`))).toThrow(/control|invisible/i);
+  });
   it.each([
     "import * as admin from 'firebase-admin';\nadmin.initializeApp();\nconst db = admin.firestore();\n",
     "import * as admin from 'firebase-admin';\nconst app = admin.app();\nconst apps = admin.apps;\nconst auth = admin.auth();\n",

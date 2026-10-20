@@ -6,6 +6,7 @@ const MAX_RECIPE_BYTES = 64 * 1024;
 const SAFE_PACKAGE = /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$/;
 const SAFE_EXPORT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const FORBIDDEN_TARGET = new Set(['arguments', 'eval', 'require', 'default', 'import', 'export', 'class', 'function', 'const', 'let', 'var', 'return', 'new', 'await', 'yield', 'this', 'super', 'null', 'true', 'false', 'switch', 'case', 'if', 'else', 'while', 'for', 'do', 'try', 'catch', 'finally', 'throw', 'delete', 'void', 'typeof', 'instanceof', 'in', 'of', 'extends', 'interface', 'enum', 'type', 'namespace', 'package', 'private', 'protected', 'public', 'static', 'implements']);
+const INVISIBLE_CONTROLS = /[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/;
 const SAFE_MODULE = /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)(?:\/[a-z0-9][a-z0-9._-]*)*$/;
 const RULE_KINDS = new Set(['export-rename', 'import-move', 'namespace-call', 'chained-namespace-call', 'namespace-property', 'method-rename', 'manual-namespace-call']);
 
@@ -91,7 +92,7 @@ function validateRecipe(value: unknown): RecipeDefinition {
     if (field === undefined) fail(`$.${key}`, 'is required by the JSON schema.');
     if (kind === 'array' ? !Array.isArray(field) : typeof field !== kind) fail(`$.${key}`, `expected ${kind}.`);
     if (typeof field === 'string' && (field.length === 0 || field.length > 500)) fail(`$.${key}`, 'must contain 1–500 characters.');
-    if (typeof field === 'string' && /[\x00-\x1f\x7f]/.test(field)) fail(`$.${key}`, 'control characters are not allowed.');
+    if (typeof field === 'string' && INVISIBLE_CONTROLS.test(field)) fail(`$.${key}`, 'control or invisible characters are not allowed.');
   }
   for (const key of Object.keys(record)) if (!(key in fields)) fail(`$.${key}`, 'unknown field.');
   if (record.schemaVersion !== 1) fail('$.schemaVersion', 'only schema version 1 is supported.');
@@ -119,7 +120,7 @@ function validateRecipe(value: unknown): RecipeDefinition {
     for (const [key, value] of Object.entries(rule)) {
       if (!(key in ruleFields)) fail(`${location}.${key}`, 'unknown field.');
       if (typeof value !== 'string' || value.length < 1 || value.length > 500) fail(`${location}.${key}`, 'expected a string of 1–500 characters.');
-      if (/[\x00-\x1f\x7f]/.test(value)) fail(`${location}.${key}`, 'control characters are not allowed.');
+      if (INVISIBLE_CONTROLS.test(value)) fail(`${location}.${key}`, 'control or invisible characters are not allowed.');
     }
     if (!RULE_KINDS.has(String(rule.kind))) fail(`${location}.kind`, 'unknown rule kind.');
     if (!rule.id || !/^[a-z][a-z0-9-]{0,63}$/.test(String(rule.id))) fail(`${location}.id`, 'expected a short lowercase rule identifier.');
@@ -152,7 +153,7 @@ function scalar(value: string, line: number): string | number | boolean {
   }
   if (/^(true|false|null)$/i.test(value)) return value === 'true' ? true : value === 'false' ? false : fail(`line ${line}`, 'null is unsupported.');
   if (/^-?\d+$/.test(value)) return Number(value);
-  if (/[\x00-\x1f\x7f]/.test(value)) fail(`line ${line}`, 'control character.');
+  if (INVISIBLE_CONTROLS.test(value)) fail(`line ${line}`, 'control or invisible character.');
   return value;
 }
 
