@@ -56,6 +56,8 @@ export interface MigrationInfo {
   rules: string[];
   /** Requires an explicit opt-in because real-project verification remains incomplete. */
   experimental?: boolean;
+  /** Loaded from a data-only recipe, not a catalog migration with special behavior. */
+  declarativeRecipe?: boolean;
   /** Minimum Node.js major declared by a validated external recipe. */
   requiredNodeMajor?: number;
 }

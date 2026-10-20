@@ -51,6 +51,7 @@ rules:
     name: app
     to: getApp
     from: firebase-admin/app
+    noArguments: true
   - kind: namespace-property
     id: app-lifecycle
     name: apps

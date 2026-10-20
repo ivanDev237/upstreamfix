@@ -17,9 +17,9 @@ const fields: Record<string, 'string' | 'number' | 'array'> = {
   toMajor: 'number', releasedAt: 'string', title: 'string', guideUrl: 'string',
   nodeMajor: 'number', rules: 'array',
 };
-const ruleFields: Record<string, 'string'> = {
+const ruleFields: Record<string, 'string' | 'boolean'> = {
   kind: 'string', id: 'string', name: 'string', to: 'string', from: 'string',
-  message: 'string', receiver: 'string', via: 'string',
+  message: 'string', receiver: 'string', via: 'string', noArguments: 'boolean',
 };
 const requiredByKind: Record<string, string[]> = {
   'export-rename': ['name', 'to'],
@@ -41,7 +41,7 @@ function objectAt(value: unknown, location: string): Record<string, unknown> {
 }
 
 interface SchemaNode {
-  type?: 'object' | 'array' | 'string' | 'integer';
+  type?: 'object' | 'array' | 'string' | 'integer' | 'boolean';
   const?: unknown;
   enum?: readonly unknown[];
   required?: readonly string[];
@@ -81,6 +81,8 @@ function validateJsonSchema(value: unknown, schema: SchemaNode, location: string
     if (!Number.isSafeInteger(value)) fail(location, 'expected an integer.');
     if (schema.minimum !== undefined && (value as number) < schema.minimum) fail(location, `must be at least ${schema.minimum}.`);
     if (schema.maximum !== undefined && (value as number) > schema.maximum) fail(location, `must be at most ${schema.maximum}.`);
+  } else if (schema.type === 'boolean') {
+    if (typeof value !== 'boolean') fail(location, 'expected a boolean.');
   }
 }
 
@@ -119,8 +121,9 @@ function validateRecipe(value: unknown): RecipeDefinition {
     const rule = objectAt(raw, location);
     for (const [key, value] of Object.entries(rule)) {
       if (!(key in ruleFields)) fail(`${location}.${key}`, 'unknown field.');
-      if (typeof value !== 'string' || value.length < 1 || value.length > 500) fail(`${location}.${key}`, 'expected a string of 1–500 characters.');
-      if (INVISIBLE_CONTROLS.test(value)) fail(`${location}.${key}`, 'control or invisible characters are not allowed.');
+      if (typeof value !== ruleFields[key]) fail(`${location}.${key}`, `expected ${ruleFields[key]}.`);
+      if (typeof value === 'string' && (value.length < 1 || value.length > 500)) fail(`${location}.${key}`, 'expected a string of 1–500 characters.');
+      if (typeof value === 'string' && INVISIBLE_CONTROLS.test(value)) fail(`${location}.${key}`, 'control or invisible characters are not allowed.');
     }
     if (!RULE_KINDS.has(String(rule.kind))) fail(`${location}.kind`, 'unknown rule kind.');
     if (!rule.id || !/^[a-z][a-z0-9-]{0,63}$/.test(String(rule.id))) fail(`${location}.id`, 'expected a short lowercase rule identifier.');

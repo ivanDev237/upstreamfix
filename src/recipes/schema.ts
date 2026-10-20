@@ -28,7 +28,8 @@ export const recipeSchema = {
           "from": { "type": "string", "minLength": 1, "maxLength": 500 },
           "receiver": { "type": "string", "minLength": 1, "maxLength": 500 },
           "via": { "type": "string", "minLength": 1, "maxLength": 500 },
-          "message": { "type": "string", "minLength": 1, "maxLength": 300 }
+          "message": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "noArguments": { "type": "boolean" }
         }
       }
     }

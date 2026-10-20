@@ -107,7 +107,7 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
       });
       continue;
     }
-    if (migration.id === 'openai@5' && !guaranteesNodeMajor(declaration.manifest.engines?.node ?? '', 20)
+    if (!migration.declarativeRecipe && migration.id === 'openai@5' && !guaranteesNodeMajor(declaration.manifest.engines?.node ?? '', 20)
       && !(nodeRuntime === 20 && declaration.manifest.engines?.node === undefined)) {
       manual.push({
         file: sourcePath,
@@ -222,7 +222,7 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   if (!options.dryRun) {
     throw new Error('Direct writes through runMigration are unavailable; use --write for verified Git branch commits.');
   }
-  if (options.nodeRuntime && !((options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (options.nodeRuntime === 20 && migration.id === 'openai@5') || options.nodeRuntime === migration.requiredNodeMajor)) {
+  if (options.nodeRuntime && !((!migration.declarativeRecipe && options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (!migration.declarativeRecipe && options.nodeRuntime === 20 && migration.id === 'openai@5') || options.nodeRuntime === migration.requiredNodeMajor)) {
     throw new Error('--node-runtime 22 applies to firebase-admin@14; --node-runtime 20 applies to openai@5; recipes require their declared nodeMajor.');
   }
   const scoped = loadScopedProject(options.cwd, migration, options.excludedDirectories, options.nodeRuntime);
@@ -235,7 +235,7 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   const compatibilityNotes = migration.inspectManifest
     ? await inspectManifests(migration, options.cwd, options.excludedDirectories)
     : [];
-  if (options.analysisOnly && options.nodeRuntime === 20 && migration.id === 'openai@5') {
+  if (options.analysisOnly && options.nodeRuntime === 20 && !migration.declarativeRecipe && migration.id === 'openai@5') {
     for (let index = compatibilityNotes.length - 1; index >= 0; index--) {
       if (compatibilityNotes[index]?.includes('engines.node (not declared)')) compatibilityNotes.splice(index, 1);
     }

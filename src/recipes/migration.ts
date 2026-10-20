@@ -11,6 +11,7 @@ export interface RecipeRule {
   receiver?: string;
   via?: string;
   message?: string;
+  noArguments?: boolean;
 }
 
 export interface RecipeDefinition {
@@ -190,14 +191,14 @@ function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationR
       }
       const callRule = directCall ? findRule('namespace-call', member) : undefined;
       if (callRule) {
-        if (member === 'app' && directCall) {
-          if (directCall.getArguments().length > 0) {
-            addManual(result, sourceFile, access, 'Named-app calls need a manual modular API mapping.');
-            continue;
-          }
+        if (callRule.noArguments && directCall && directCall.getArguments().length > 0) {
+          addManual(result, sourceFile, access, `The ${member} call has arguments; choose the equivalent API manually.`);
+          continue;
+        }
+        if (directCall) {
           const nested = directCall.getParent();
           if (Node.isPropertyAccessExpression(nested) && nested.getExpression() === directCall) {
-            addManual(result, sourceFile, nested, 'Automatic SDK edits overlap in this file; review the nested app service usage manually.');
+            addManual(result, sourceFile, nested, `The ${member} call is followed by a property access; review the nested API manually.`);
             continue;
           }
         }
@@ -343,6 +344,7 @@ export function createRecipeMigration(recipe: RecipeDefinition): Migration {
     guideUrl: recipe.guideUrl,
     rules: [...new Set(recipe.rules.map((rule) => rule.id))],
     experimental: true,
+    declarativeRecipe: true,
     requiredNodeMajor: recipe.nodeMajor,
     transform: (project) => sourceTransform(project, recipe),
     inspectManifest: (manifest) => guaranteesNodeMajor(manifest.engines?.node ?? '', recipe.nodeMajor)

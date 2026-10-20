@@ -3,12 +3,12 @@
 An SDK publisher can describe a safe subset of an upgrade in YAML. The recipe is data: UpstreamFix never evaluates JavaScript from it. Run a preview first:
 
 ```sh
-upstreamfix migrate --recipe ./upgrade.yml --cwd ./customer-project
+upstreamfix migrate --recipe ./upgrade.yml --experimental --cwd ./customer-project
 ```
 
 Use `--verify` to check the proposed changes in an isolated copy. `--write` retains the ordinary clean Git tree, manual review, verification, and new branch safeguards. A recipe is an explicit experimental opt-in; it is not discovered by `scan` or the GitHub Action.
 
-The [JSON schema](recipe.schema.json) defines the closed set of fields. Unknown fields, duplicate keys, bad package paths, and YAML tags or anchors are rejected. The file limit is 64 KiB. Recipe rules match parsed JavaScript or TypeScript nodes; authors cannot supply regular expressions or executable code. Files with syntax errors are left unchanged. Ambiguous references and overlapping edits become manual review items.
+The [JSON schema](recipe.schema.json) defines the closed set of fields. Unknown fields, duplicate keys, bad package paths, and YAML tags or anchors are rejected. The file limit is 64 KiB. Recipe rules match parsed JavaScript or TypeScript nodes; authors cannot supply regular expressions or executable code. Files with syntax errors are left unchanged. Ambiguous references and overlapping edits become manual review items. Add `noArguments: true` to a `namespace-call` rule when its replacement cannot preserve arguments; such calls become manual review items.
 
 ## Fields
 
