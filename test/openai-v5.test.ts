@@ -255,6 +255,20 @@ async function run() {
     expect(outcome.fileUpdates?.[0]?.contents).toContain('openai.chat.completions.parse(');
   });
 
+  it('tracks a directly constructed OpenAI client exported from a local module', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('/convex/index.ts', `import OpenAI from 'openai';
+export const openai = new OpenAI();
+`);
+    project.createSourceFile('/convex/agents.ts', `import { openai } from '.';
+export const result = openai.beta.chat.completions.parse({ model: 'gpt-4o', messages: [] });
+`);
+    const outcome = openaiV5.transform(project);
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.find((update) => update.file.endsWith('/convex/agents.ts'))?.contents)
+      .toContain('openai.chat.completions.parse');
+  });
+
   it('T33 reports destructured typed clients and bound runner methods instead of silently upgrading', () => {
     const outcome = migrate("import OpenAI from 'openai';\nfunction run({ files }: OpenAI) { files.del('f'); }\nconst client = new OpenAI();\nconst runner = client.chat.completions.runTools({tools: []});\nrunner.finalFunctionCall.bind(runner);\nconst { finalFunctionCall } = runner;\n");
     expect(outcome.fileUpdates).toEqual([]);
