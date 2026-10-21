@@ -321,7 +321,9 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     ? await prepareNodeTypesRepair(options)
     : { notes: [], changes: [], manual: [] } satisfies ManifestOutcome;
   if (nodeTypesRepair.changes.length > 0) {
-    const repairedManifestPaths = new Set(nodeTypesRepair.changes.map((change) => change.absolutePath));
+    const repairedManifestPaths = new Set(nodeTypesRepair.changes
+      .filter((change) => path.basename(change.absolutePath) === 'package.json')
+      .map((change) => change.absolutePath));
     for (let index = result.manual.length - 1; index >= 0; index--) {
       const finding = result.manual[index]!;
       if (/OpenAI v4 may have supplied @types\/node|OpenAI v5 requires Web fetch types/.test(finding.reason)
@@ -334,7 +336,8 @@ export async function runMigration(migration: Migration, options: RunOptions): P
       }
     }
     for (const change of nodeTypesRepair.changes) {
-      if (!result.filesChanged.includes(change.absolutePath)) result.filesChanged.push(change.absolutePath);
+      if (path.basename(change.absolutePath) !== 'package.json' && !result.filesChanged.includes(change.absolutePath))
+        result.filesChanged.push(change.absolutePath);
       result.changes.push({ file: change.absolutePath, line: 1, rule: 'node-types', before: 'Node declarations unavailable', after: '@types/node added after typecheck verification' });
     }
   }
@@ -365,7 +368,11 @@ export async function runMigration(migration: Migration, options: RunOptions): P
       };
   const manifest: ManifestOutcome = {
     notes: [...nodeTypesRepair.notes, ...baseManifest.notes],
-    changes: [...(options.analysisOnly ? nodeTypesRepair.changes : []), ...baseManifest.changes],
+    changes: [
+      ...nodeTypesRepair.changes.filter((change) => path.basename(change.absolutePath) !== 'package.json'),
+      ...(options.analysisOnly ? nodeTypesRepair.changes.filter((change) => path.basename(change.absolutePath) === 'package.json') : []),
+      ...baseManifest.changes,
+    ],
     manual: [...nodeTypesRepair.manual, ...baseManifest.manual],
   };
   if (!options.dryRun && manifest.manual.length > 0) {
@@ -405,10 +412,10 @@ export async function runMigration(migration: Migration, options: RunOptions): P
 
   return {
     ...result,
-    filesChanged: [
+    filesChanged: [...new Set([
       ...result.filesChanged.map((file) => path.relative(options.cwd, file)),
       ...manifest.changes.map((change) => change.relativePath),
-    ],
+    ])],
     changes: result.changes.map((c) => ({ ...c, file: path.relative(options.cwd, c.file) })),
     manual: [...result.manual, ...manifest.manual].map((m) => ({ ...m, file: path.relative(options.cwd, m.file) })),
     manifestNotes: [...new Set([...compatibilityNotes, ...manifest.notes])],
@@ -444,6 +451,7 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
     }
     const tsconfigPath = path.join(directory, 'tsconfig.json');
     let compilerOptions: Record<string, unknown> | undefined;
+    let tsconfigChange: ManifestFileChange | undefined;
     try {
       const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, {}, {
         ...ts.sys,
@@ -547,7 +555,12 @@ async function prepareNodeTypesRepair(options: RunOptions): Promise<ManifestOutc
         onUnRecoverableConfigFileDiagnostic: () => undefined,
       });
       const types = (parsed?.options as unknown as { types?: string[] } | undefined)?.types;
-      if (Array.isArray(types) && !types.includes('node')) continue;
+      if (Array.isArray(types) && !types.includes('node')) {
+        const configBefore = await readFile(tsconfigPath, 'utf8');
+        const configAfter = addNodeTypeToTsconfig(configBefore, types);
+        if (!configAfter) continue;
+        tsconfigChange = { absolutePath: tsconfigPath, relativePath: path.relative(options.cwd, tsconfigPath), before: configBefore, after: configAfter };
+      }
     } catch { continue; }
     const updated = addNodeTypesDependency(raw, runtimeMajor);
     if (!updated) continue;
@@ -570,11 +583,61 @@ async function prepareNodeTypesRepair(options: RunOptions): Promise<ManifestOutc
       }
       lockChange = { absolutePath: lockPath, relativePath: path.relative(options.cwd, lockPath), before: lockResult.before ?? '', after: lockResult.contents };
     }
+    if (tsconfigChange) changes.push(tsconfigChange);
     changes.push({ absolutePath: manifestPath, relativePath: path.relative(options.cwd, manifestPath), before: raw, after: updated });
     if (lockChange) changes.push(lockChange);
     notes.push(`Added @types/node ^${runtimeMajor}.0.0 to ${path.relative(options.cwd, manifestPath)}; the isolated verifier must pass its typecheck before the change can be committed.`);
   }
   return { notes, changes, manual };
+}
+
+function addNodeTypeToTsconfig(raw: string, effectiveTypes: readonly string[]): string | undefined {
+  if (effectiveTypes.includes('node')) return raw;
+  const parsed = ts.parseJsonText('tsconfig.json', raw);
+  const root = parsed.statements[0]?.expression;
+  if (parsed.parseDiagnostics.length > 0 || !root || !ts.isObjectLiteralExpression(root)) return undefined;
+  const findProperty = (object: ts.ObjectLiteralExpression, name: string): ts.PropertyAssignment | undefined =>
+    object.properties.find((property): property is ts.PropertyAssignment => ts.isPropertyAssignment(property)
+      && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) && property.name.text === name);
+  const compilerOptions = findProperty(root, 'compilerOptions');
+  const insertProperty = (object: ts.ObjectLiteralExpression, propertyText: string): string => {
+    const close = object.end - 1;
+    const content = raw.slice(object.getStart(parsed) + 1, close);
+    const whitespace = content.match(/\s*$/)?.[0] ?? '';
+    const insertAt = close - whitespace.length;
+    const multiline = raw.includes('\n');
+    const lineEnding = raw.includes('\r\n') ? '\r\n' : '\n';
+    const parentIndent = raw.slice(0, object.getStart(parsed)).split(/\r?\n/).at(-1)?.match(/^\s*/)?.[0] ?? '';
+    const childIndent = `${parentIndent}  `;
+    const comma = object.properties.length > 0 ? ',' : '';
+    const addition = multiline ? `${comma}${lineEnding}${childIndent}${propertyText}` : `${comma}${propertyText}`;
+    return raw.slice(0, insertAt) + addition + raw.slice(insertAt);
+  };
+  let updated: string;
+  if (compilerOptions && ts.isObjectLiteralExpression(compilerOptions.initializer)) {
+    const optionsObject = compilerOptions.initializer;
+    const typesProperty = findProperty(optionsObject, 'types');
+    if (typesProperty && ts.isArrayLiteralExpression(typesProperty.initializer)) {
+      const array = typesProperty.initializer;
+      const close = array.end - 1;
+      const content = raw.slice(array.getStart(parsed) + 1, close);
+      if (/\/\/|\/\*/.test(content)) return undefined;
+      const whitespace = content.match(/\s*$/)?.[0] ?? '';
+      const insertAt = close - whitespace.length;
+      const hasValues = array.elements.length > 0;
+      const hasTrailingComma = content.trimEnd().endsWith(',');
+      const multiline = content.includes('\n');
+      const lineEnding = raw.includes('\r\n') ? '\r\n' : '\n';
+      const arrayIndent = raw.slice(0, array.getStart(parsed)).split(/\r?\n/).at(-1)?.match(/^\s*/)?.[0] ?? '';
+      const addition = multiline
+        ? `${hasValues && !hasTrailingComma ? ',' : ''}${lineEnding}${arrayIndent}  "node"`
+        : `${hasValues ? (hasTrailingComma ? ' ' : ', ') : ''}"node"`;
+      updated = raw.slice(0, insertAt) + addition + raw.slice(insertAt);
+    } else if (typesProperty) return undefined;
+    else updated = insertProperty(optionsObject, `"types": ${JSON.stringify([...effectiveTypes, 'node'])}`);
+  } else if (compilerOptions) return undefined;
+  else updated = insertProperty(root, `"compilerOptions": { "types": ${JSON.stringify([...effectiveTypes, 'node'])} }`);
+  return ts.parseJsonText('tsconfig.json', updated).parseDiagnostics.length === 0 ? updated : undefined;
 }
 
 function addNodeTypesDependency(raw: string, major: number): string | undefined {
@@ -606,7 +669,7 @@ function addNodeTypesDependency(raw: string, major: number): string | undefined 
     const insertAt = close - whitespace.length;
     const hasEntries = raw.slice(rootStart + 1, insertAt).trim().length > 0;
     const addition = multiline
-      ? `${hasEntries ? ',' : ''}${lineEnding}${indent}"devDependencies": { "@types/node": "${specifier}" }`
+      ? `${hasEntries ? ',' : ''}${lineEnding}${indent}"devDependencies": {${lineEnding}${indent}${indent}"@types/node": "${specifier}"${lineEnding}${indent}}`
       : `${hasEntries ? ', ' : ''}"devDependencies":{"@types/node":"${specifier}"}`;
     updated = raw.slice(0, insertAt) + addition + raw.slice(insertAt);
   }
