@@ -125,6 +125,22 @@ describe('openai v4 to v5', () => {
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
+  it('adds node to a restricted JSONC tsconfig without dropping other ambient types', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-node-restricted-types-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.28.0"},"scripts":{"typecheck":"tsc --noEmit"},"engines":{"node":">=20"}}');
+      await writeFile(path.join(cwd, 'tsconfig.json'), '{\n  "compilerOptions": {\n    // Keep test globals available.\n    "types": ["jest"],\n    "lib": ["ES2022"]\n  }\n}\n');
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'server.ts'), "console.log(process.env.NODE_ENV);\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true, nodeRuntime: 20 });
+      const config = outcome.proposedFiles.find((file) => file.relativePath === 'tsconfig.json')?.after;
+      expect(config).toContain('"jest"');
+      expect(config).toContain('"node"');
+      expect(outcome.proposedFiles.find((file) => file.relativePath === 'package.json')?.after).toContain('"@types/node"');
+      expect(outcome.manual.some((item) => item.file === 'server.ts' && item.reason.includes('@types/node'))).toBe(false);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
   it('tracks a union client only inside its OpenAI instanceof branch', () => {
     const outcome = migrate(`import OpenAI, { type ClientOptions } from 'openai';
 function remove(client: ClientOptions | OpenAI) {
