@@ -61,13 +61,14 @@ describe('public repository benchmark helpers', () => {
     ])).toBe(false);
     expect(requiresRuntimeReviewFromNotes(['OpenAI SDK v5 requires Node.js 20 or later; review engines.node (>=18) before upgrading.'])).toBe(true);
   });
-  it('T34 commits the latest measured OpenAI report above the requested threshold', async () => {
+  it('T34 commits the latest measured OpenAI report with exact gross and eligible rates', async () => {
     const report = await readFile(new URL('../benchmark/openai-5-results.md', import.meta.url), 'utf8');
-    expect(report).toContain('Automatic migration rate: **77.5%** (31 of 40 detected migration items).');
-    expect(report).toContain('Run ID: `39528543941`');
-    expect(report).toContain('Tool SHA: `4fdcbae86e2e64a6cac8cd60697ab52e1e2444f9`');
+    expect(report).toContain('Automatic migration rate: **46.7%** (28 of 60 detected migration items).');
+    expect(report).toContain('Automatic rate excluding manual-review items: **100.0%** (28 of 28 eligible items).');
+    expect(report).toContain('Run ID: `39581519263`');
+    expect(report).toContain('Tool SHA: `10704e8c10a2649dc1b093e77a2552836ab2628e`');
     expect(report).toContain('Run status: **complete** (20 of 20 repositories recorded).');
-    expect(report).toContain('| convex-title-generator | `f77f2d452bc7` | completed | 4 | 4 | 0 |');
+    expect(report).toContain('| convex-title-generator | `f77f2d452bc7` | manual review required | 6 | 3 | 3 |');
     expect(report).toContain('| stackwise | `c49a192df253` | manual review required |');
   });
   it('declares Node 20 only in a disposable OpenAI benchmark manifest', () => {
