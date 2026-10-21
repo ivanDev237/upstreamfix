@@ -140,12 +140,31 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       .filter((entry) => entry.getName() === 'APIError')
       .map((entry) => entry.getAliasNode()?.getText() ?? 'APIError')));
   const classFields = new Map<Node, Set<string>>();
+  const clientFactorySymbols = new Set<MorphSymbol>();
   const isClientType = (type: Node | undefined): boolean => {
     if (!type) return false;
     const parts = type.getText().replace(/\s/g, '').split('|');
     return parts.some((part) => imported.has(part))
       && parts.every((part) => imported.has(part) || part === 'undefined' || part === 'null');
   };
+  // Trace the repository's explicit OpenAI observation factory shape without
+  // trusting arbitrary calls that happen to return a similarly named value.
+  for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+    if (call.getExpression().getText() !== 'observeOpenAI') continue;
+    const argument = call.getArguments()[0];
+    if (!argument || !Node.isNewExpression(argument) || !imported.has(argument.getExpression().getText())) continue;
+    const owner = call.getFirstAncestor((ancestor) => Node.isArrowFunction(ancestor)
+      || Node.isFunctionDeclaration(ancestor) || Node.isFunctionExpression(ancestor));
+    if (!owner) continue;
+    if (Node.isFunctionDeclaration(owner)) {
+      const symbol = owner.getNameNode()?.getSymbol();
+      if (symbol) clientFactorySymbols.add(symbol);
+    } else {
+      const declaration = owner.getParentIfKind(SyntaxKind.VariableDeclaration);
+      const symbol = declaration?.getNameNode().getSymbol();
+      if (symbol) clientFactorySymbols.add(symbol);
+    }
+  }
   const rememberField = (node: Node, name: string): void => {
     const owner = node.getFirstAncestor((ancestor) => Node.isClassDeclaration(ancestor) || Node.isClassExpression(ancestor));
     if (!owner) return;
@@ -179,7 +198,14 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     }
   }
   for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
-    const initializer = variable.getInitializer();
+    let initializer = variable.getInitializer();
+    if (initializer?.getKind() === SyntaxKind.AwaitExpression && Node.isAwaitExpression(initializer))
+      initializer = initializer.getExpression();
+    if (initializer && Node.isCallExpression(initializer) && Node.isIdentifier(initializer.getExpression())) {
+      const factory = initializer.getExpression().getSymbol();
+      const symbol = variable.getNameNode().getSymbol();
+      if (factory && clientFactorySymbols.has(factory) && symbol) clients.add(symbol);
+    }
     if (initializer && Node.isNewExpression(initializer) && imported.has(initializer.getExpression().getText())) {
       const symbol = variable.getNameNode().getSymbol();
       if (symbol) clients.add(symbol);
@@ -239,7 +265,11 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       && Boolean(assignedOwner && classFields.get(assignedOwner)?.has(assignedLeft.getName()));
     const assignedClassField = typedSource && parent && Node.isPropertyDeclaration(parent)
       && Node.isIdentifier(parent.getNameNode()) && parent.getInitializer() === constructor;
-    if (imported.has(constructor.getExpression().getText()) && !Node.isVariableDeclaration(parent)
+    const wrapper = constructor.getParentIfKind(SyntaxKind.CallExpression);
+    const wrappedInKnownFactory = wrapper?.getExpression().getText() === 'observeOpenAI'
+      && Boolean(wrapper.getFirstAncestor((ancestor) => Node.isArrowFunction(ancestor)
+        || Node.isFunctionDeclaration(ancestor) || Node.isFunctionExpression(ancestor)));
+    if (imported.has(constructor.getExpression().getText()) && !wrappedInKnownFactory && !Node.isVariableDeclaration(parent)
       && !assignedKnownClient && !assignedKnownClassField && !assignedClassField) {
       addManual(result, file, constructor, 'An OpenAI client stored outside a local variable needs manual receiver review.');
     }
@@ -422,6 +452,7 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     if (!Node.isPropertyAccessExpression(beta) || beta.getName() !== 'beta') continue;
     if (clientParts(beta.getExpression())?.length === 0)
       addEdit(edits, file, beta, beta.getExpression().getText(), 'beta-chat');
+    else addManual(result, file, property, 'OpenAI v5 removes beta.chat, but this client receiver is not tracked safely.');
   }
   for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     if (!Node.isObjectBindingPattern(variable.getNameNode())) continue;
