@@ -255,10 +255,10 @@ function make(obj: ClientOptions | OpenAI) {
     expect(outcome.manual.some((item) => item.reason.includes('fileFromPath'))).toBe(true);
   });
 
-  it('flags a deep beta resource import removed by v5', () => {
+  it('moves the removed deep beta resource import to its unique public v5 module', () => {
     const outcome = migrate("import type { Message } from 'openai/resources/beta/threads/messages/messages';\nexport type Saved = Message;\n");
-    expect(outcome.manual.some((item) => item.reason.includes('deep beta resource import'))).toBe(true);
-    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("from 'openai/resources/beta/threads/messages'");
   });
 
   it.each([
