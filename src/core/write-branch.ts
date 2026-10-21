@@ -93,6 +93,10 @@ export async function writeMigrationOnBranch(
       ...options.verificationOptions,
       customCommands: options.customCommands,
     });
+    if (addsNodeTypes(outcome.proposedFiles)
+      && !verification.checks.some((check) => check.name.startsWith('Typecheck (') && check.status === 'passed')) {
+      throw new Error('Adding @types/node requires a passing isolated typecheck; no branch or commit was created.');
+    }
     if (verification.status !== 'passed') {
       throw new Error(`Migration verification did not pass (${verification.status}); no branch or commit was created.${verification.note ? ` ${verification.note}` : ''}`);
     }
@@ -145,6 +149,21 @@ export async function writeMigrationOnBranch(
     await rm(worktreeParent, { recursive: true, force: true });
     if (branchCreated && !committed) await removeUncommittedBranch(repositoryRoot, branch, head);
   }
+}
+
+function addsNodeTypes(files: readonly { relativePath: string; before: string; after: string }[]): boolean {
+  return files.some((file) => {
+    if (!file.relativePath.endsWith('package.json')) return false;
+    try {
+      const before = JSON.parse(file.before) as { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown>; peerDependencies?: Record<string, unknown>; optionalDependencies?: Record<string, unknown> };
+      const after = JSON.parse(file.after) as typeof before;
+      const hadTypes = [before.dependencies, before.devDependencies, before.peerDependencies, before.optionalDependencies]
+        .some((section) => typeof section?.['@types/node'] === 'string');
+      const hasTypes = [after.dependencies, after.devDependencies, after.peerDependencies, after.optionalDependencies]
+        .some((section) => typeof section?.['@types/node'] === 'string');
+      return !hadTypes && hasTypes;
+    } catch { return false; }
+  });
 }
 
 async function removeUncommittedBranch(repositoryRoot: string, branch: string, originalHead: string): Promise<void> {

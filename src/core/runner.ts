@@ -317,6 +317,27 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   if (migration.id === 'openai@5' && !migration.declarativeRecipe) {
     result.manual.push(...inspectOpenAiTypeEnvironment(options.cwd, options.excludedDirectories));
   }
+  const nodeTypesRepair = migration.id === 'openai@5' && !migration.declarativeRecipe
+    ? await prepareNodeTypesRepair(options)
+    : { notes: [], changes: [], manual: [] } satisfies ManifestOutcome;
+  if (nodeTypesRepair.changes.length > 0) {
+    const repairedManifestPaths = new Set(nodeTypesRepair.changes.map((change) => change.absolutePath));
+    for (let index = result.manual.length - 1; index >= 0; index--) {
+      const finding = result.manual[index]!;
+      if (/OpenAI v4 may have supplied @types\/node|OpenAI v5 requires Web fetch types/.test(finding.reason)
+        && [...repairedManifestPaths].some((manifestPath) => {
+          const packageDirectory = path.dirname(manifestPath);
+          const findingPath = path.resolve(options.cwd, finding.file);
+          return findingPath === packageDirectory || findingPath.startsWith(packageDirectory + path.sep);
+        })) {
+        result.manual.splice(index, 1);
+      }
+    }
+    for (const change of nodeTypesRepair.changes) {
+      if (!result.filesChanged.includes(change.absolutePath)) result.filesChanged.push(change.absolutePath);
+      result.changes.push({ file: change.absolutePath, line: 1, rule: 'node-types', before: 'Node declarations unavailable', after: '@types/node added after typecheck verification' });
+    }
+  }
   const compatibilityNotes = migration.inspectManifest
     ? await inspectManifests(migration, options.cwd, options.excludedDirectories)
     : [];
@@ -331,8 +352,8 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   const manifestsWithChangedCode = new Set(
     result.filesChanged.map((sourcePath) => scoped.manifestBySource.get(sourcePath)).filter((file): file is string => Boolean(file)),
   );
-  const manifest = !options.analysisOnly && result.manual.length === 0 && result.changes.length > 0
-    ? await migrateManifests(migration, options, manifestsWithChangedCode)
+  const baseManifest = !options.analysisOnly && result.manual.length === 0 && result.changes.length > 0
+    ? await migrateManifests(migration, options, manifestsWithChangedCode, nodeTypesRepair.changes.length > 0 ? options.nodeRuntime ?? 20 : undefined)
     : {
         notes: [options.analysisOnly
           ? 'Dependency versions were not modified during source-only benchmark analysis.'
@@ -342,6 +363,11 @@ export async function runMigration(migration: Migration, options: RunOptions): P
         changes: [],
         manual: [],
       };
+  const manifest: ManifestOutcome = {
+    notes: [...nodeTypesRepair.notes, ...baseManifest.notes],
+    changes: [...(options.analysisOnly ? nodeTypesRepair.changes : []), ...baseManifest.changes],
+    manual: [...nodeTypesRepair.manual, ...baseManifest.manual],
+  };
   if (!options.dryRun && manifest.manual.length > 0) {
     throw new Error('A dependency manifest needs manual review; no files were written. Resolve it and preview again.');
   }
@@ -487,6 +513,109 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
   return findings;
 }
 
+async function prepareNodeTypesRepair(options: RunOptions): Promise<ManifestOutcome> {
+  const findings = inspectOpenAiTypeEnvironment(options.cwd, options.excludedDirectories)
+    .filter((finding) => /OpenAI v4 may have supplied @types\/node|OpenAI v5 requires Web fetch types/.test(finding.reason));
+  if (findings.length === 0) return { notes: [], changes: [], manual: [] };
+  const notes: string[] = [];
+  const changes: ManifestFileChange[] = [];
+  const manual: ManualItem[] = [];
+  for (const manifestPath of findPackageManifests(options.cwd, options.excludedDirectories)) {
+    const raw = await readFile(manifestPath, 'utf8');
+    let manifest: PackageManifest;
+    try { manifest = parseManifest<PackageManifest>(raw); } catch { continue; }
+    if (!(['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+      .some((section) => isSupportedSourceMajor(manifest[section]?.openai ?? '', 4))) continue;
+    const packageDirectory = path.dirname(manifestPath);
+    const relevant = findings.some((finding) => {
+      const findingPath = path.resolve(options.cwd, finding.file);
+      return findingPath === packageDirectory || findingPath.startsWith(packageDirectory + path.sep);
+    });
+    if (!relevant) continue;
+    if (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
+      .some((section) => typeof manifest[section]?.['@types/node'] === 'string')) continue;
+    const scripts = manifest.scripts as Record<string, unknown> | undefined;
+    const typecheckConfigured = typeof scripts?.typecheck === 'string'
+      || await exists(path.join(packageDirectory, 'tsconfig.json'));
+    if (!typecheckConfigured) continue;
+    const runtimeMajor = options.nodeRuntime ?? (typeof manifest.engines?.node === 'string' && guaranteesNodeMajor(manifest.engines.node, 20) ? 20 : undefined);
+    if (runtimeMajor === undefined || runtimeMajor < 20) continue;
+    const tsconfigPath = path.join(packageDirectory, 'tsconfig.json');
+    try {
+      const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, {}, {
+        ...ts.sys,
+        onUnRecoverableConfigFileDiagnostic: () => undefined,
+      });
+      const types = (parsed?.options as unknown as { types?: string[] } | undefined)?.types;
+      if (Array.isArray(types) && !types.includes('node')) continue;
+    } catch { continue; }
+    const updated = addNodeTypesDependency(raw, runtimeMajor);
+    if (!updated) continue;
+    const locks = options.analysisOnly ? await findLockfiles(options.cwd, packageDirectory) : [];
+    let lockChange: ManifestFileChange | undefined;
+    if (locks.length > 0) {
+      const lockPath = path.resolve(options.cwd, locks[0]!);
+      const lockResult = locks.length !== 1 ? { reason: `Unsupported lockfile set: ${locks.join(', ')}.` }
+        : path.basename(lockPath) === 'package-lock.json'
+          ? await regeneratePackageLock(manifestPath, lockPath, updated, options.cwd, options.registryBefore)
+          : path.basename(lockPath) === 'pnpm-lock.yaml'
+            ? await regeneratePnpmLock(manifestPath, lockPath, updated, options.cwd)
+            : path.basename(lockPath) === 'yarn.lock' && options.allowYarnLockInstall
+              ? await regenerateYarnLock(manifestPath, lockPath, updated, options.cwd)
+              : { reason: 'The project lockfile cannot be regenerated safely for the @types/node addition.' };
+      if (!lockResult.contents) {
+        manual.push({ file: path.relative(options.cwd, manifestPath), line: 1,
+          reason: `${lockResult.reason ?? 'Lockfile regeneration failed.'} The Node type dependency was left unchanged.`, snippet: '@types/node repair withheld' });
+        continue;
+      }
+      lockChange = { absolutePath: lockPath, relativePath: path.relative(options.cwd, lockPath), before: lockResult.before ?? '', after: lockResult.contents };
+    }
+    changes.push({ absolutePath: manifestPath, relativePath: path.relative(options.cwd, manifestPath), before: raw, after: updated });
+    if (lockChange) changes.push(lockChange);
+    notes.push(`Added @types/node ^${runtimeMajor}.0.0 to ${path.relative(options.cwd, manifestPath)}; the isolated verifier must pass its typecheck before the change can be committed.`);
+  }
+  return { notes, changes, manual };
+}
+
+function addNodeTypesDependency(raw: string, major: number): string | undefined {
+  const rootStart = raw.charCodeAt(0) === 0xfeff ? 1 : 0;
+  const dependencyMember = findJsonObjectMember(raw, rootStart, 'devDependencies');
+  const lineEnding = raw.includes('\r\n') ? '\r\n' : '\n';
+  const multiline = raw.includes('\n');
+  const indent = raw.match(/(?:\r?\n)([ \t]+)"[^"\r\n]+"\s*:/)?.[1] ?? '  ';
+  const specifier = `^${major}.0.0`;
+  let updated: string;
+  if (dependencyMember) {
+    if (raw[dependencyMember.valueStart] !== '{') return undefined;
+    const end = jsonValueEnd(raw, dependencyMember.valueStart);
+    if (end < 0) return undefined;
+    const close = end - 1;
+    const whitespace = raw.slice(dependencyMember.valueStart + 1, close).match(/\s*$/)?.[0] ?? '';
+    const insertAt = close - whitespace.length;
+    const hasEntries = raw.slice(dependencyMember.valueStart + 1, insertAt).trim().length > 0;
+    const childIndent = multiline ? `${indent}${indent}` : '';
+    const addition = multiline
+      ? `${hasEntries ? ',' : ''}${lineEnding}${childIndent}"@types/node": "${specifier}"`
+      : `${hasEntries ? ', ' : ''}"@types/node": "${specifier}"`;
+    updated = raw.slice(0, insertAt) + addition + raw.slice(insertAt);
+  } else {
+    const end = jsonValueEnd(raw, rootStart);
+    if (end < 0) return undefined;
+    const close = end - 1;
+    const whitespace = raw.slice(rootStart + 1, close).match(/\s*$/)?.[0] ?? '';
+    const insertAt = close - whitespace.length;
+    const hasEntries = raw.slice(rootStart + 1, insertAt).trim().length > 0;
+    const addition = multiline
+      ? `${hasEntries ? ',' : ''}${lineEnding}${indent}"devDependencies": { "@types/node": "${specifier}" }`
+      : `${hasEntries ? ', ' : ''}"devDependencies":{"@types/node":"${specifier}"}`;
+    updated = raw.slice(0, insertAt) + addition + raw.slice(insertAt);
+  }
+  try {
+    const parsed = parseManifest<PackageManifest>(updated);
+    return parsed.devDependencies?.['@types/node'] === specifier ? updated : undefined;
+  } catch { return undefined; }
+}
+
 function hasDomLibrary(compilerOptions: Record<string, unknown> | undefined): boolean {
   const libraries = compilerOptions?.lib;
   return Array.isArray(libraries) && libraries.some((lib) => typeof lib === 'string'
@@ -529,6 +658,7 @@ async function migrateManifests(
   migration: Migration,
   options: RunOptions,
   manifestsWithChangedCode: Set<string>,
+  nodeTypesMajor?: number,
 ): Promise<ManifestOutcome> {
   if (!migration.updateManifest) return { notes: [], changes: [], manual: [] };
   const notes: string[] = [];
@@ -557,6 +687,9 @@ async function migrateManifests(
     }
 
     const before = structuredClone(manifest);
+    const addNodeTypes = nodeTypesMajor !== undefined
+      && !(['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+        .some((section) => typeof manifest[section]?.['@types/node'] === 'string');
     if (options.nodeRuntime !== undefined) {
       const major = options.nodeRuntime;
       if (manifest.engines !== undefined && (typeof manifest.engines !== 'object' || Array.isArray(manifest.engines) || manifest.engines === null)) {
@@ -581,6 +714,10 @@ async function migrateManifests(
       if (declared === undefined) manifest.engines = { ...manifest.engines, node: `>=${major}` };
     }
     const fileNotes = migration.updateManifest(manifest);
+    if (addNodeTypes) {
+      manifest.devDependencies = { ...manifest.devDependencies, '@types/node': `^${nodeTypesMajor}.0.0` };
+      fileNotes.push(`Added @types/node ^${nodeTypesMajor}.0.0 after detecting Node API use; the isolated verifier must pass typecheck before commit.`);
+    }
     if (options.nodeRuntime !== undefined && before.engines?.node === undefined) {
       fileNotes.unshift(`\`${relativePath}\`: added \`engines.node\` = \`>=${options.nodeRuntime}\` after explicit --node-runtime ${options.nodeRuntime} confirmation.`);
     }
@@ -590,9 +727,10 @@ async function migrateManifests(
     }
 
     const versionUpdated = preserveManifestFormatting(raw, before, manifest, migration.packageName);
-    const updated = versionUpdated && options.nodeRuntime !== undefined && before.engines?.node === undefined
+    let updated = versionUpdated && options.nodeRuntime !== undefined && before.engines?.node === undefined
       ? addNodeEngineToManifest(versionUpdated, options.nodeRuntime)
       : versionUpdated;
+    if (updated && addNodeTypes) updated = addNodeTypesDependency(updated, nodeTypesMajor!);
     if (updated === undefined) {
       notes.push(...fileNotes.filter((note) => !note.includes(' → ')));
       manual.push({
