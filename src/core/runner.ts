@@ -226,6 +226,24 @@ function findSourceFiles(root: string, packageName: string, excludedDirectories:
   return found;
 }
 
+function findAllSourceFiles(root: string, excludedDirectories: readonly string[] = []): string[] {
+  const found: string[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const absolutePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name) && !isExcludedDirectory(root, absolutePath, excludedDirectories)) visit(absolutePath);
+      } else if (entry.isFile() && !entry.name.endsWith('.d.ts')
+        && SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
+        && statSync(absolutePath).size <= MAX_SOURCE_BYTES) {
+        found.push(absolutePath);
+      }
+    }
+  };
+  visit(root);
+  return found;
+}
+
 function largeFileContainsPackage(file: string, packageName: string): boolean {
   const needle = packageName === 'stripe' ? 'stripe' : packageName;
   const descriptor = openSync(file, 'r');
@@ -375,7 +393,7 @@ export async function runMigration(migration: Migration, options: RunOptions): P
 
 function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonly string[] = []): ManualItem[] {
   const findings: ManualItem[] = [];
-  const sourceFiles = findSourceFiles(root, '', excludedDirectories);
+  const sourceFiles = findAllSourceFiles(root, excludedDirectories);
   for (const manifestPath of findPackageManifests(root, excludedDirectories)) {
     let manifest: PackageManifest;
     try { manifest = parseManifest<PackageManifest>(readFileSync(manifestPath, 'utf8')); }
