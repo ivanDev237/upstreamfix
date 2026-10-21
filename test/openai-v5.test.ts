@@ -266,6 +266,21 @@ function make(obj: ClientOptions | OpenAI) {
     expect(outcome.fileUpdates?.[0]?.contents).toContain('this.client.chat.completions.runTools(');
   });
 
+  it.each([
+    ['an object literal method', "class Service { client!: OpenAI; nested = { run() { return this.client.files.del('f'); } }; }"],
+    ['a nested function', "class Service { client!: OpenAI; run() { function inner() { return this.client.files.del('f'); } return inner(); } }"],
+  ])('does not treat this as a class instance inside %s', (_context, body) => {
+    const outcome = migrate(`import OpenAI from 'openai';\n${body}\n`);
+    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual.map((item) => item.reason).join('\n')).toMatch(/this|receiver|récepteur|manual/i);
+  });
+
+  it('keeps lexical this tracking through a nested arrow in a class method', () => {
+    const outcome = migrate("import OpenAI from 'openai'; class Service { client!: OpenAI; run() { const inner = () => this.client.files.del('f'); return inner(); } }\n");
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("this.client.files.delete('f')");
+  });
+
   it('tracks an OpenAI instance returned through a local observation factory', () => {
     const outcome = migrate(`import OpenAI from 'openai';
 function observeOpenAI<T extends OpenAI>(client: T): T { return client; }
