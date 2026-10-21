@@ -35,8 +35,8 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
       try {
         await runRealSdkNode(cwd, [path.join(process.cwd(), 'node_modules/typescript/bin/tsc'), '--project', path.join(cwd, 'tsconfig.json')], 90_000);
       } catch (error) {
-        const stderr = error && typeof error === 'object' ? (error as { stderr?: unknown }).stderr : undefined;
-        if (error instanceof Error && stderr !== undefined) error.message += `\n${String(stderr)}`;
+        const output = error && typeof error === 'object' ? error as { stdout?: unknown; stderr?: unknown } : {};
+        if (error instanceof Error) error.message += `\n${String(output.stdout ?? '')}\n${String(output.stderr ?? '')}`;
         throw error;
       }
     };
@@ -82,14 +82,20 @@ for (const message of runner.messages) {
       try {
         await runRealSdkNode(cwd, [path.join(process.cwd(), 'node_modules/typescript/bin/tsc'), '--project', path.join(cwd, 'tsconfig.json')]);
       } catch (error) {
-        const stderr = error && typeof error === 'object' ? (error as { stderr?: unknown }).stderr : undefined;
-        if (error instanceof Error && stderr !== undefined) error.message += `\n${String(stderr)}`;
+        const output = error && typeof error === 'object' ? error as { stdout?: unknown; stderr?: unknown } : {};
+        if (error instanceof Error) error.message += `\n${String(output.stdout ?? '')}\n${String(output.stderr ?? '')}`;
         throw error;
       }
     };
     await install('4.104.0');
     await check();
     await install('5.0.0');
-    await expect(check()).rejects.toMatchObject({ stderr: expect.stringContaining('ChatCompletionContentPartText') });
+    let failedOutput = '';
+    try { await check(); }
+    catch (error) {
+      const output = error && typeof error === 'object' ? error as { stdout?: unknown; stderr?: unknown } : {};
+      failedOutput = `${String(output.stdout ?? '')}\n${String(output.stderr ?? '')}`;
+    }
+    expect(failedOutput).toContain('ChatCompletionContentPartText');
   }, 300_000);
 });
