@@ -424,10 +424,20 @@ client.containers.files.del('container_1', 'file_1');
     expect(outcome.manual.every((item) => item.reason.includes('path parameters'))).toBe(true);
   });
 
-  it('reports otherwise safe edits withheld because the same file has a manual item', () => {
-    const outcome = migrate("import OpenAI from 'openai';\nconst client = new OpenAI();\nclient.files.del('f');\nclient.vectorStores.files.del('vs', 'f');\n");
-    expect(outcome.fileUpdates).toEqual([]);
-    expect(outcome.manual.some((item) => item.reason.includes('del-to-delete') && item.reason.includes('withheld'))).toBe(true);
+  it('applies independent safe edits while retaining unrelated manual findings', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+import { zodResponseFormat } from 'openai/helpers/zod';
+import { z } from 'zod';
+const client = new OpenAI();
+client.files.del('f');
+client.vectorStores.files.del('vs', 'f');
+client.beta.chat.completions.parse({ model: 'gpt-4o', messages: [], response_format: zodResponseFormat(z.object({ name: z.string().optional() }), 'x') });
+`);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("client.files.delete('f')");
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('client.chat.completions.parse');
+    expect(outcome.manual.some((item) => item.reason.includes('path parameters'))).toBe(true);
+    expect(outcome.manual.some((item) => item.reason.includes('optional Zod'))).toBe(true);
+    expect(outcome.manual.some((item) => item.reason.includes('withheld'))).toBe(false);
   });
 
   it('withholds edits from malformed files', () => {
