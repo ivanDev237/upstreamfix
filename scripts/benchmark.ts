@@ -107,7 +107,7 @@ export interface BenchResult {
   usages: number;
   migrated: number;
   manual: number;
-  manualFindings?: Array<{ file: string; line: number; reason: string }>;
+  manualFindings?: Array<{ file: string; line: number; reason: string; classification: 'legitimate' | 'not automated' }>;
   typecheck: CheckResult;
   tests: CheckResult;
   details: string;
@@ -557,7 +557,7 @@ export async function benchmarkOne(
     const outcome = await analyzeBenchmarkMigration(migration, checkout);
     result.migrated = outcome.changes.length;
     result.manual = outcome.manual.length;
-    result.manualFindings = outcome.manual.slice(0, 500).map(({ file, line, reason }) => ({ file, line, reason }));
+    result.manualFindings = outcome.manual.slice(0, 500).map(({ file, line, reason }) => ({ file, line, reason, classification: classifyOpenAiManual(reason) }));
     result.usages = result.migrated + result.manual;
     result.details = outcome.manifestNotes.join(' ');
 
@@ -583,9 +583,19 @@ export async function benchmarkOne(
     const after = await runPhaseChecks(repo, checkout, packageDirs, repo.typecheckScript, repo.testScript, home, memoryMb);
     result.typecheck.after = after.typecheck;
     result.tests.after = after.tests;
+    if (migration.id === 'openai@5' && addsNodeTypes(outcome.proposedFiles)
+      && !after.typecheck.startsWith('pass')) {
+      result.migrated = Math.max(0, result.migrated - 1);
+      result.manual += 1;
+      result.manualFindings = [...(result.manualFindings ?? []), {
+        file: 'package.json', line: 1,
+        reason: 'The @types/node addition did not pass the isolated typecheck; it is not counted as automatically migrated.',
+        classification: 'not automated',
+      }];
+    }
     if (migration.id === 'openai@5') {
       const newCompilerFindings = compilerRegressionFindings(before.typecheck, after.typecheck);
-      result.manualFindings = [...(result.manualFindings ?? []), ...newCompilerFindings];
+      result.manualFindings = [...(result.manualFindings ?? []), ...newCompilerFindings.map((finding) => ({ ...finding, classification: classifyOpenAiManual(finding.reason) }))];
       result.manual += newCompilerFindings.length;
       result.usages = result.migrated + result.manual;
     }
@@ -649,8 +659,8 @@ export function renderBenchmarkReport(
 ): string {
   const detected = results.reduce((sum, row) => sum + row.usages, 0);
   const migrated = results.reduce((sum, row) => sum + row.migrated, 0);
-  const manual = results.reduce((sum, row) => sum + row.manual, 0);
-  const eligible = Math.max(0, detected - manual);
+  const legitimateManual = results.reduce((sum, row) => sum + (row.manualFindings ?? []).filter((finding) => finding.classification === 'legitimate').length, 0);
+  const eligible = Math.max(0, detected - legitimateManual);
   const rate = detected === 0 ? 'N/A' : `${((migrated / detected) * 100).toFixed(1)}%`;
   const eligibleRate = eligible === 0 ? 'N/A' : `${((migrated / eligible) * 100).toFixed(1)}%`;
   const lines = [
@@ -661,21 +671,42 @@ export function renderBenchmarkReport(
     ...((process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA) && /^[0-9a-f]{40}$/.test(process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA ?? '') ? [`Tool SHA: \`${process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA}\``, ''] : []),
     `Run status: **${completion}** (${results.length} of ${expectedCount} repositories recorded).`, '',
     `Automatic migration rate: **${rate}** (${migrated} of ${detected} detected migration items).`,
-    `Automatic rate excluding manual-review items: **${eligibleRate}** (${migrated} of ${eligible} eligible items).`,
+    `Criterion rate excluding legitimate manual items: **${eligibleRate}** (${migrated} of ${eligible} eligible items; ${legitimateManual} legitimate manual items excluded).`,
     'The denominator counts migration change groups plus manual findings, including potential edits withheld in files with manual findings and up to five new compiler diagnostics per previously passing project; it does not count individual API callsites. The OpenAI benchmark confirms Node.js 20 for its disposable Node 24 container only; it does not establish any repository’s production runtime.', '',
     '| Repository | Pinned commit | Status | Detected items | Migrated | Manual | Types before | Types after | Tests before | Tests after | Details |',
     '|---|---|---:|---:|---:|---:|---|---|---|---|---|',
     ...results.map((row) => `| ${cell(row.name)} | \`${row.commit.slice(0, 12)}\` | ${cell(row.status)} | ${row.usages} | ${row.migrated} | ${row.manual} | ${cell(row.typecheck.before)} | ${cell(row.typecheck.after)} | ${cell(row.tests.before)} | ${cell(row.tests.after)} | ${cell(row.details)} |`),
     ...(results.some((row) => row.manualFindings?.length) ? [
       '', '## Manual findings', '',
-      '| Repository | File | Line | Reason |',
-      '|---|---|---:|---|',
+      '| Repository | File | Line | Classification | Reason |',
+      '|---|---|---:|---|---|',
       ...results.flatMap((row) => (row.manualFindings ?? []).map((finding) =>
-        `| ${cell(row.name)} | ${cell(finding.file)} | ${finding.line} | ${cell(finding.reason)} |`)),
+        `| ${cell(row.name)} | ${cell(finding.file)} | ${finding.line} | ${cell(finding.classification)} | ${cell(finding.reason)} |`)),
     ] : []),
     '', `Project checks run only inside Docker image \`${nodeImage}\` with networking disabled. Dependency installation runs in Docker with no host credentials; lifecycle scripts are disabled.`, '',
   ];
   return lines.join('\n');
+}
+
+function classifyOpenAiManual(reason: string): 'legitimate' | 'not automated' {
+  if (/rejects optional Zod response fields|tool message content may be a ChatCompletionContentPartText\[\]|Stream<ChatCompletionChunk>.*not assignable to parameter of type 'Response \| AsyncIterableOpenAIStreamReturnTypes'/.test(reason))
+    return 'legitimate';
+  return 'not automated';
+}
+
+function addsNodeTypes(files: readonly { relativePath: string; before: string; after: string }[]): boolean {
+  return files.some((file) => {
+    if (!file.relativePath.endsWith('package.json')) return false;
+    try {
+      const before = JSON.parse(file.before) as Record<string, Record<string, unknown> | undefined>;
+      const after = JSON.parse(file.after) as Record<string, Record<string, unknown> | undefined>;
+      const had = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
+        .some((section) => typeof before[section]?.['@types/node'] === 'string');
+      const has = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
+        .some((section) => typeof after[section]?.['@types/node'] === 'string');
+      return !had && has;
+    } catch { return false; }
+  });
 }
 
 async function main(): Promise<void> {

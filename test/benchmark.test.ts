@@ -64,7 +64,7 @@ describe('public repository benchmark helpers', () => {
   it('T34 commits the latest measured OpenAI report with exact gross and eligible rates', async () => {
     const report = await readFile(new URL('../benchmark/openai-5-results.md', import.meta.url), 'utf8');
     expect(report).toContain('Automatic migration rate: **46.7%** (28 of 60 detected migration items).');
-    expect(report).toContain('Automatic rate excluding manual-review items: **100.0%** (28 of 28 eligible items).');
+    expect(report).toContain('Criterion rate excluding legitimate manual items: **53.8%** (28 of 52 eligible items; 8 legitimate manual items excluded).');
     expect(report).toContain('Run ID: `39581519263`');
     expect(report).toContain('Tool SHA: `10704e8c10a2649dc1b093e77a2552836ab2628e`');
     expect(report).toContain('Run status: **complete** (20 of 20 repositories recorded).');
@@ -130,7 +130,7 @@ describe('public repository benchmark helpers', () => {
 
     expect(report).toContain('33.3%');
     expect(report).toContain('2 of 3 detected migration items');
-    expect(report).toContain('Criterion rate excluding legitimate manual items: **50.0%** (1 of 2 eligible items).');
+    expect(report).toContain('Criterion rate excluding legitimate manual items: **50.0%** (1 of 2 eligible items; 1 legitimate manual items excluded).');
     expect(report).toContain('| sample | src/a.ts | 1 | legitimate | Human choice |');
     expect(report).toContain('| sample | src/b.ts | 2 | not automated | Still automatable |');
   });
@@ -138,9 +138,9 @@ describe('public repository benchmark helpers', () => {
     const report = renderBenchmarkReport([{
       name: 'sample', commit: 'a'.repeat(40), status: 'manual review required', usages: 1, migrated: 0, manual: 1,
       typecheck: { before: 'pass', after: 'pass' }, tests: { before: 'pass', after: 'pass' }, details: '',
-      manualFindings: [{ file: 'src/stripe.ts', line: 42, reason: 'Variable RequestOptions need review.' }],
+      manualFindings: [{ file: 'src/stripe.ts', line: 42, reason: 'Variable RequestOptions need review.', classification: 'not automated' }],
     }]);
-    expect(report).toContain('| sample | src/stripe.ts | 42 | Variable RequestOptions need review. |');
+    expect(report).toContain('| sample | src/stripe.ts | 42 | not automated | Variable RequestOptions need review. |');
   });
 
   it('identifies the exact GitHub run and tool commit behind a benchmark report', () => {
