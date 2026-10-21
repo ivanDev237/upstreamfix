@@ -299,14 +299,17 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
   }
   for (const declaration of file.getImportDeclarations()) {
     const specifier = declaration.getModuleSpecifierValue();
+    let hasRemovedUploadsExport = false;
     if (specifier === 'openai/uploads') {
       for (const entry of declaration.getNamedImports()) {
-        if (REMOVED_UPLOAD_EXPORTS.has(entry.getName()))
+        if (REMOVED_UPLOAD_EXPORTS.has(entry.getName())) {
+          hasRemovedUploadsExport = true;
           addManual(result, file, entry, `OpenAI v5 removes uploads export ${entry.getName()}; choose a supported replacement manually.`);
+        }
       }
     }
     const moved = MOVED_IMPORTS.get(specifier);
-    if (moved) addEdit(edits, file, declaration.getModuleSpecifier(), `'${moved}'`, 'moved-import');
+    if (moved && !hasRemovedUploadsExport) addEdit(edits, file, declaration.getModuleSpecifier(), `'${moved}'`, 'moved-import');
     else if (specifier === 'openai/shims' || specifier === 'openai/src' || specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
       addManual(result, file, declaration, 'OpenAI v5 removes this private or shim import; review the replacement and runtime configuration.');
     if (specifier.startsWith('openai/resources/') && declaration.getNamedImports().some((entry) => /Page$/.test(entry.getName()) && !declaration.isTypeOnly() && !entry.isTypeOnly()))
@@ -325,14 +328,18 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
   }
   for (const declaration of file.getExportDeclarations()) {
     const specifier = declaration.getModuleSpecifierValue();
+    let hasRemovedUploadsExport = false;
     if (specifier === 'openai/uploads') {
       for (const entry of declaration.getNamedExports()) {
-        if (REMOVED_UPLOAD_EXPORTS.has(entry.getName()))
+        if (REMOVED_UPLOAD_EXPORTS.has(entry.getName())) {
+          hasRemovedUploadsExport = true;
           addManual(result, file, entry, `OpenAI v5 removes uploads export ${entry.getName()}; review this public re-export manually.`);
+        }
       }
     }
     const moved = specifier ? MOVED_IMPORTS.get(specifier) : undefined;
-    if (moved && declaration.getModuleSpecifier()) addEdit(edits, file, declaration.getModuleSpecifier()!, `'${moved}'`, 'moved-import');
+    if (moved && !hasRemovedUploadsExport && declaration.getModuleSpecifier())
+      addEdit(edits, file, declaration.getModuleSpecifier()!, `'${moved}'`, 'moved-import');
   }
   for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
     const expression = call.getExpression();
@@ -345,10 +352,13 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       const argument = call.getArguments()[0];
       const specifier = argument?.getText().replace(/^['"]|['"]$/g, '');
       const moved = specifier ? MOVED_IMPORTS.get(specifier) : undefined;
-      if (moved && argument) addEdit(edits, file, argument, `'${moved}'`, 'moved-import');
+      const declaration = call.getParentIfKind(SyntaxKind.VariableDeclaration);
+      const binding = declaration?.getNameNode();
+      const hasRemovedUploadsExport = specifier === 'openai/uploads' && binding && Node.isObjectBindingPattern(binding)
+        && binding.getElements().some((element) => REMOVED_UPLOAD_EXPORTS.has(
+          element.getPropertyNameNode()?.getText() ?? element.getNameNode().getText()));
+      if (moved && argument && !hasRemovedUploadsExport) addEdit(edits, file, argument, `'${moved}'`, 'moved-import');
       if (specifier === 'openai/uploads') {
-        const declaration = call.getParentIfKind(SyntaxKind.VariableDeclaration);
-        const binding = declaration?.getNameNode();
         if (binding && Node.isObjectBindingPattern(binding)) {
           for (const element of binding.getElements()) {
             const name = element.getPropertyNameNode()?.getText() ?? element.getNameNode().getText();
