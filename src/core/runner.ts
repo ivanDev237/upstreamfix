@@ -472,7 +472,7 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
     if (nodeTypesExcluded) {
       const sourcePath = sourceFiles.find((candidate) => candidate === directory || candidate.startsWith(directory + path.sep))
         ?? tsconfigPath;
-      findings.push({ file: path.relative(root, sourcePath), line: 1,
+      findings.push({ file: sourcePath, line: 1,
         reason: 'compilerOptions.types excludes @types/node, so Node built-ins and globals are unavailable despite the package dependency; include "node" and run typecheck.',
         snippet: 'compilerOptions.types excludes node' });
     }
@@ -484,7 +484,7 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
       const source = readFileSync(sourcePath, 'utf8');
       const usage = findNodeTypeUsage(source);
       if (!usage) continue;
-      findings.push({ file: path.relative(root, sourcePath), line: usage.line,
+      findings.push({ file: sourcePath, line: usage.line,
         reason: 'OpenAI v4 may have supplied @types/node transitively; v5 does not. This file uses a Node built-in or global, but Node declarations are not visible to the compiler. Add a compatible @types/node devDependency, include "node" in compilerOptions.types when restricted, and run typecheck; otherwise review this runtime-specific use manually.',
         snippet: source.split('\n')[usage.line - 1]?.trim().slice(0, 500) ?? usage.name });
       break;
