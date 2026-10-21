@@ -202,6 +202,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
   }
   const clients = new Set<MorphSymbol>();
   const complexClients = new Set<MorphSymbol>();
+  const narrowedClientScopes = new Map<MorphSymbol, Node>();
   const clientPrefixes = new Map<MorphSymbol, string[]>();
   const variableInitializers = new Map<MorphSymbol, Node>();
   for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
@@ -320,6 +321,11 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       const symbol = variable.getNameNode().getSymbol();
       if (symbol) clients.add(symbol);
     }
+    if (Node.isIdentifier(variable.getNameNode()) && variable.getTypeNode()
+      && [...imported].some((name) => new RegExp(`\\b${name}\\b`).test(variable.getTypeNode()!.getText()))) {
+      const symbol = variable.getNameNode().getSymbol();
+      if (symbol) complexClients.add(symbol);
+    }
     if (Node.isIdentifier(variable.getNameNode()) && isRunsSubresourceType(variable.getTypeNode())) {
       const symbol = variable.getNameNode().getSymbol();
       if (symbol) {
@@ -328,9 +334,38 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       }
     }
   }
+  // Follow explicit ClientOptions | OpenAI values only in the true branch of
+  // an instanceof check. The else branch remains deliberately untracked.
+  for (const statement of file.getDescendantsOfKind(SyntaxKind.IfStatement)) {
+    const condition = statement.getExpression();
+    if (!Node.isBinaryExpression(condition) || condition.getOperatorToken().getKind() !== SyntaxKind.InstanceOfKeyword) continue;
+    const left = condition.getLeft();
+    const right = condition.getRight();
+    const symbol = Node.isIdentifier(left) ? left.getSymbol() : undefined;
+    if (!symbol || !complexClients.has(symbol) || !Node.isIdentifier(right) || !imported.has(right.getText())) continue;
+    narrowedClientScopes.set(symbol, statement.getThenStatement());
+  }
+  // A separately declared alias remains safe when every observed initializer
+  // is itself a tracked client. Iterate to support short alias chains.
+  for (let pass = 0; pass < file.getDescendantsOfKind(SyntaxKind.VariableDeclaration).length; pass++) {
+    let changed = false;
+    for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+      const initializer = variable.getInitializer();
+      const symbol = variable.getNameNode().getSymbol();
+      if (!symbol || clients.has(symbol) || !initializer || !Node.isIdentifier(initializer)) continue;
+      const source = initializer.getSymbol();
+      if (source && clients.has(source)) { clients.add(symbol); changed = true; }
+    }
+    if (!changed) break;
+  }
   const clientParts = (node: Node): string[] | undefined => {
-    if (Node.isIdentifier(node)) return node.getSymbol() && clients.has(node.getSymbol()!)
+    if (Node.isIdentifier(node)) {
+      const symbol = node.getSymbol();
+      const scope = symbol ? narrowedClientScopes.get(symbol) : undefined;
+      const narrowedHere = Boolean(scope && (node === scope || node.getParent() === scope || scope.getDescendants().includes(node)));
+      return symbol && (clients.has(symbol) || narrowedHere)
       ? clientPrefixes.get(node.getSymbol()!) ?? [] : undefined;
+    }
     if (Node.isElementAccessExpression(node)) return undefined;
     if (!Node.isPropertyAccessExpression(node)) return undefined;
     if (node.getExpression().getKind() === SyntaxKind.ThisKeyword) {
