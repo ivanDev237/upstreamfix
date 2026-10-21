@@ -125,6 +125,7 @@ describe('public repository benchmark helpers', () => {
 
     expect(report).toContain('66.7%');
     expect(report).toContain('2 of 3 detected migration items');
+    expect(report).toContain('Automatic rate excluding manual-review items: **100.0%** (2 of 2 eligible items).');
     expect(report).toContain('| sample | `aaaaaaaaaaaa` | completed | 3 | 2 | 1 | pass | fail: TS error | fail: existing test | pass |  |');
   });
   it('Z3 shows the file, line and reason for each benchmark manual finding', () => {
