@@ -184,6 +184,12 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     result.manual.push({ file: file.getFilePath(), line: 1, reason: 'The source contains syntax errors; no OpenAI edits were applied.', snippet: '' });
     return;
   }
+  const hasOpenAiModuleEvidence = file.getImportDeclarations().some((declaration) => declaration.getModuleSpecifierValue().includes('openai'))
+    || file.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) => {
+      const argument = call.getArguments()[0];
+      return (call.getExpression().getText() === 'require' || call.getExpression().getKind() === SyntaxKind.ImportKeyword)
+        && argument && Node.isStringLiteral(argument) && argument.getLiteralValue().includes('openai');
+    });
   // v5 removes this helper. It may be imported, re-exported, destructured from
   // require(), or accessed through a namespace/computed property. Never move
   // the module path while a reference remains: the new module has no export.
@@ -544,13 +550,17 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       wrappedTarget = wrapped.getExpression();
     if (wrappedTarget) {
       const targetMethod = clientParts(wrappedTarget)?.join('.') ?? pathParts(wrappedTarget).slice(1).join('.');
-      if (isAffectedMethod(targetMethod))
+      const computedTarget = Node.isElementAccessExpression(wrappedTarget)
+        || wrappedTarget.getDescendantsOfKind(SyntaxKind.ElementAccessExpression).length > 0;
+      const targetRoot = rootIdentifier(wrappedTarget)?.getSymbol();
+      if (isAffectedMethod(targetMethod) || (computedTarget && (Boolean(targetRoot && clients.has(targetRoot)) || hasOpenAiModuleEvidence)))
         addManual(result, file, call, 'OpenAI v5 changes this method, but .call/.apply/.bind obscures its receiver and arguments; review it manually.');
       continue;
     }
     if (Node.isElementAccessExpression(expression)) {
       const possibleMethod = pathParts(expression).slice(1).join('.');
-      if (isAffectedMethod(possibleMethod))
+      const root = rootIdentifier(expression)?.getSymbol();
+      if (isAffectedMethod(possibleMethod) || Boolean(root && clients.has(root)) || hasOpenAiModuleEvidence)
         addManual(result, file, call, 'OpenAI v5 changes this method, but computed receiver access requires manual review.');
       continue;
     }
@@ -580,7 +590,11 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
           ? declaration.getTypeNode() : undefined;
         return Boolean(type && ![...imported].some((name) => new RegExp(`\\b${name}\\b`).test(type.getText())));
       });
-      if (isAffectedMethod(possibleMethod) && !definitelyOtherReceiver)
+      const hasComputedPath = Node.isElementAccessExpression(expression)
+        || expression.getDescendantsOfKind(SyntaxKind.ElementAccessExpression).length > 0;
+      const rootSymbol = root?.getSymbol();
+      if ((isAffectedMethod(possibleMethod) || (hasComputedPath
+        && (Boolean(rootSymbol && clients.has(rootSymbol)) || hasOpenAiModuleEvidence))) && !definitelyOtherReceiver)
         addManual(result, file, call, 'OpenAI v5 changes this method, but its client receiver is not tracked safely; review the receiver and arguments manually.');
       if (root?.getSymbol() && complexClients.has(root.getSymbol()!) && isAffectedMethod(possibleMethod))
         addManual(result, file, call, 'valeur OpenAI non suivie : vérifier la variante de ce client avant la migration.');
