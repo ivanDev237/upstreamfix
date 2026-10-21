@@ -49,9 +49,9 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
     for (const name of files.keys()) project.addSourceFileAtPath(path.join(cwd, name));
     const result = openaiV5.transform(project);
     expect(result.manual).toEqual([]);
-    // The nested v4 message module is absent in v5 and is migrated to its
-    // flattened module path; stable deprecated paths such as openai/error stay.
-    expect(result.fileUpdates).toHaveLength(10);
+    // Only the truly removed nested message module moves; openai/error remains
+    // a deprecated v5 re-export and therefore does not add a changed file.
+    expect(result.fileUpdates).toHaveLength(9);
     for (const update of result.fileUpdates ?? []) await writeFile(update.file, update.contents);
     await writeFile(tsconfigPath, JSON.stringify({ ...tsconfig, include: ['*.ts'] }));
     await install('5.0.0');
