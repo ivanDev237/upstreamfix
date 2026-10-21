@@ -451,7 +451,6 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
     }
     const tsconfigPath = path.join(directory, 'tsconfig.json');
     let compilerOptions: Record<string, unknown> | undefined;
-    let tsconfigChange: ManifestFileChange | undefined;
     try {
       const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, {}, {
         ...ts.sys,
@@ -549,6 +548,7 @@ async function prepareNodeTypesRepair(options: RunOptions): Promise<ManifestOutc
     const runtimeMajor = options.nodeRuntime ?? (typeof manifest.engines?.node === 'string' && guaranteesNodeMajor(manifest.engines.node, 20) ? 20 : undefined);
     if (runtimeMajor === undefined || runtimeMajor < 20) continue;
     const tsconfigPath = path.join(packageDirectory, 'tsconfig.json');
+    let tsconfigChange: ManifestFileChange | undefined;
     try {
       const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, {}, {
         ...ts.sys,
@@ -595,7 +595,8 @@ function addNodeTypeToTsconfig(raw: string, effectiveTypes: readonly string[]): 
   if (effectiveTypes.includes('node')) return raw;
   const parsed = ts.parseJsonText('tsconfig.json', raw);
   const root = parsed.statements[0]?.expression;
-  if (parsed.parseDiagnostics.length > 0 || !root || !ts.isObjectLiteralExpression(root)) return undefined;
+  const diagnostics = (parsed as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? [];
+  if (diagnostics.length > 0 || !root || !ts.isObjectLiteralExpression(root)) return undefined;
   const findProperty = (object: ts.ObjectLiteralExpression, name: string): ts.PropertyAssignment | undefined =>
     object.properties.find((property): property is ts.PropertyAssignment => ts.isPropertyAssignment(property)
       && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) && property.name.text === name);
@@ -637,7 +638,9 @@ function addNodeTypeToTsconfig(raw: string, effectiveTypes: readonly string[]): 
     else updated = insertProperty(optionsObject, `"types": ${JSON.stringify([...effectiveTypes, 'node'])}`);
   } else if (compilerOptions) return undefined;
   else updated = insertProperty(root, `"compilerOptions": { "types": ${JSON.stringify([...effectiveTypes, 'node'])} }`);
-  return ts.parseJsonText('tsconfig.json', updated).parseDiagnostics.length === 0 ? updated : undefined;
+  const validated = ts.parseJsonText('tsconfig.json', updated);
+  return ((validated as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? []).length === 0
+    ? updated : undefined;
 }
 
 function addNodeTypesDependency(raw: string, major: number): string | undefined {
