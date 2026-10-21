@@ -195,7 +195,7 @@ client.files.del('file_1');
 client.beta.chat.completions.parse({model:'gpt-4o', messages:[]});
 unrelated.files.del('file_2');
 `);
-    expect(outcome.manual).toEqual([]);
+    expect(outcome.manual.some((item) => item.snippet === "unrelated.files.del('file_2')" && item.reason.includes('receiver'))).toBe(true);
     const next = outcome.fileUpdates?.[0]?.contents ?? '';
     expect(next).toContain("client.files.delete('file_1')");
     expect(next).toContain('client.chat.completions.parse(');
