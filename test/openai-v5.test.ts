@@ -292,6 +292,27 @@ const finish = runner.finalFunctionCall;
     expect(outcome.manual.some((item) => item.reason.includes('path parameters'))).toBe(true);
   });
 
+  it('rewrites tracked retrieve calls with exact known OpenAI named path parameters', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+const client = new OpenAI();
+client.beta.threads.runs.retrieve(threadId, runId);
+client.beta.threads.messages.retrieve(threadId, messageId);
+`);
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('runs.retrieve(runId, { thread_id: threadId })');
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('messages.retrieve(messageId, { thread_id: threadId })');
+  });
+
+  it('keeps named path calls manual when the OpenAI client receiver is untracked', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+declare function createClient(): OpenAI;
+const client = createClient();
+client.beta.threads.runs.retrieve(threadId, runId);
+`);
+    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual.some((item) => item.reason.includes('path parameters'))).toBe(true);
+  });
+
   it('reports semantic changes without guessing a rewrite', () => {
     const outcome = migrate(`import OpenAI from 'openai';
 const client = new OpenAI({httpAgent: agent});
