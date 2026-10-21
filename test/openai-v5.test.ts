@@ -316,6 +316,19 @@ client.beta.threads.messages.retrieve(threadId, messageId);
     expect(outcome.fileUpdates?.[0]?.contents).toContain('messages.retrieve(messageId, { thread_id: threadId })');
   });
 
+  it('rewrites the real Threads retrieve and submitToolOutputs path shapes', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+const client = new OpenAI();
+async function poll(threadId: string, run: OpenAI.Beta.Threads.Runs.Run) {
+  await client.beta.threads.runs.retrieve(threadId!, run.id);
+  await client.beta.threads.runs.submitToolOutputs(threadId!, run.id, { tool_outputs: [] });
+}
+`);
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('runs.retrieve(run.id, { thread_id: threadId! })');
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('runs.submitToolOutputs(run.id, { thread_id: threadId!, ...{ tool_outputs: [] } })');
+  });
+
   it('keeps named path calls manual when the OpenAI client receiver is untracked', () => {
     const outcome = migrate(`import OpenAI from 'openai';
 declare function createClient(): OpenAI;
