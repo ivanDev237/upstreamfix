@@ -82,8 +82,9 @@ describe('openai v4 to v5', () => {
       await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
       await writeFile(path.join(cwd, 'other.ts'), 'console.log(process.env.NODE_ENV);\n');
       const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
-      expect(outcome.manual.some((item) => item.file === 'other.ts' && item.reason.includes('@types/node'))).toBe(true);
-      expect(outcome.manual.some((item) => item.file === 'tsconfig.json' && item.reason.includes('Web'))).toBe(true);
+      expect(outcome.manual.some((item) => item.file === 'other.ts' && item.reason.includes('@types/node'))).toBe(false);
+      expect(outcome.manual.some((item) => item.file === 'tsconfig.json' && item.reason.includes('Web'))).toBe(false);
+      expect(outcome.proposedFiles.find((item) => item.relativePath === 'package.json')?.after).toContain('"@types/node"');
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 

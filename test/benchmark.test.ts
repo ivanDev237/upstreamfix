@@ -129,7 +129,7 @@ describe('public repository benchmark helpers', () => {
     ]);
 
     expect(report).toContain('33.3%');
-    expect(report).toContain('2 of 3 detected migration items');
+    expect(report).toContain('1 of 3 detected migration items');
     expect(report).toContain('Criterion rate excluding legitimate manual items: **50.0%** (1 of 2 eligible items; 1 legitimate manual items excluded).');
     expect(report).toContain('| sample | src/a.ts | 1 | legitimate | Human choice |');
     expect(report).toContain('| sample | src/b.ts | 2 | not automated | Still automatable |');
