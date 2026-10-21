@@ -17,6 +17,7 @@ const CHANGED_PATH_METHODS = new Set([
 ]);
 const SAFE_NAMED_PATH_REWRITES = new Map([
   ['beta.threads.runs.retrieve', 'thread_id'],
+  ['beta.threads.runs.submitToolOutputs', 'thread_id'],
   ['beta.threads.messages.retrieve', 'thread_id'],
 ]);
 const DELETED_METHODS = new Set([
@@ -83,6 +84,11 @@ function addEdit(edits: Edit[], file: SourceFile, node: Node, replacement: strin
 }
 
 function isStablePathArgument(node: Node): boolean {
+  if (Node.isNonNullExpression(node)) return Node.isIdentifier(node.getExpression());
+  // The SDK's Run.id is a plain response field. Restrict this exception to a
+  // simple identifier receiver and the literal `id` property; computed access
+  // and arbitrary property expressions remain manual.
+  if (Node.isPropertyAccessExpression(node) && node.getName() === 'id' && Node.isIdentifier(node.getExpression())) return true;
   return Node.isIdentifier(node) || Node.isStringLiteral(node) || Node.isNumericLiteral(node)
     || node.getKind() === SyntaxKind.TrueKeyword || node.getKind() === SyntaxKind.FalseKeyword
     || node.getKind() === SyntaxKind.NullKeyword;
@@ -389,6 +395,14 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       if (safeShape) {
         addEdit(edits, file, call,
           `${expression.getText()}(${args[1]!.getText()}, { ${namedPathKey}: ${args[0]!.getText()} })`,
+          'named-path-parameters');
+      } else if (method === 'beta.threads.runs.submitToolOutputs' && args.length === 3
+        && isStablePathArgument(args[0]!) && isStablePathArgument(args[1]!)
+        && Node.isObjectLiteralExpression(args[2]!)
+        && !args[2]!.getProperties().some((property) =>
+          (Node.isPropertyAssignment(property) || Node.isShorthandPropertyAssignment(property)) && property.getName() === 'thread_id')) {
+        addEdit(edits, file, call,
+          `${expression.getText()}(${args[1]!.getText()}, { ...(${args[2]!.getText()}), ${namedPathKey}: ${args[0]!.getText()} })`,
           'named-path-parameters');
       } else {
         addManual(result, file, call, 'OpenAI v5 uses named path parameters here; argument count, spread, or expression order is ambiguous.');

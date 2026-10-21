@@ -326,7 +326,7 @@ async function poll(threadId: string, run: OpenAI.Beta.Threads.Runs.Run) {
 `);
     expect(outcome.manual).toEqual([]);
     expect(outcome.fileUpdates?.[0]?.contents).toContain('runs.retrieve(run.id, { thread_id: threadId! })');
-    expect(outcome.fileUpdates?.[0]?.contents).toContain('runs.submitToolOutputs(run.id, { thread_id: threadId!, ...{ tool_outputs: [] } })');
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('runs.submitToolOutputs(run.id, { ...({ tool_outputs: [] }), thread_id: threadId! })');
   });
 
   it('keeps named path calls manual when the OpenAI client receiver is untracked', () => {
