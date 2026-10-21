@@ -53,4 +53,27 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
     expect(await readFile(path.join(cwd, 'paths.ts'), 'utf8')).toContain('runs.retrieve(runId, { thread_id: threadId })');
     expect(await readFile(path.join(cwd, 'observed.ts'), 'utf8')).toContain('openai.chat.completions.parse(');
   }, 300_000);
+
+  it('reproduces the v5 tool message content union using the published SDK declarations', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-openai-content-types-'));
+    roots.push(cwd);
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ private: true, type: 'module', dependencies: { openai: '4.104.0' } }));
+    await writeFile(path.join(cwd, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true,
+      skipLibCheck: true, target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext' }, include: ['index.ts'] }));
+    await writeFile(path.join(cwd, 'index.ts'), `import OpenAI from 'openai';
+const client = new OpenAI({apiKey:'sk-test-fixture'});
+const runner = client.chat.completions.runTools({model:'gpt-4o', messages:[], tools:[]});
+for (const message of runner.messages) {
+  if (message.role === 'tool' && message.content) {
+    if (message.content.startsWith('created node')) console.log(message.content);
+  }
+}
+`);
+    const install = (version: string) => runRealSdkNpm(cwd, ['install', '--ignore-scripts', '--no-save', '--package-lock=false', '--no-audit', '--no-fund', `openai@${version}`, '@types/node@22']);
+    const check = () => runRealSdkNode(cwd, [path.join(process.cwd(), 'node_modules/typescript/bin/tsc'), '--project', path.join(cwd, 'tsconfig.json')]);
+    await install('4.104.0');
+    await check();
+    await install('5.0.0');
+    await expect(check()).rejects.toMatchObject({ stderr: expect.stringContaining('ChatCompletionContentPartText') });
+  }, 300_000);
 });

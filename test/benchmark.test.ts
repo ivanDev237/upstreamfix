@@ -19,6 +19,16 @@ it('records a newly failing typecheck at its source line without claiming the SD
   expect(compilerRegressionFindings('pass', "fail: Command failed (exit code 2). … src/run.ts(7,3): error TS2580: Cannot find name 'process'.")[0]?.file)
     .toBe('src/run.ts');
 });
+it('explains v5 tool message content widening with a specific manual fix', () => {
+  const diagnostics = [
+    "fail: src/TextToGraph.ts(44,31): error TS2339: Property 'startsWith' does not exist on type 'string | ChatCompletionContentPartText[]'.",
+    "src/TextToGraph.ts(45,40): error TS2345: Argument of type 'string | ChatCompletionContentPartText[]' is not assignable to parameter of type 'string'.",
+  ].join('\n');
+  const findings = compilerRegressionFindings('pass', diagnostics);
+  expect(findings).toHaveLength(2);
+  expect(findings.every((finding) => finding.reason.includes('ChatCompletionContentPartText[]'))).toBe(true);
+  expect(findings.every((finding) => finding.reason.includes('tool message content'))).toBe(true);
+});
 it('keeps a Node types candidate only when the post-migration typecheck passes', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-openai-node-types-fix-'));
   try {
