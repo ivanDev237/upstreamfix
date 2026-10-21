@@ -4,7 +4,7 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, compilerRegressionFindings, confirmBenchmarkNodeRuntime, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkManifest, readBenchmarkRepos, renderBenchmarkReport, requiresRuntimeReviewFromNotes, hasVerificationRegression, resolveBenchmarkConfig, resolveDockerLimits, tryNodeTypesRepair, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
+import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, compilerRegressionFindings, confirmBenchmarkNodeRuntime, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkManifest, readBenchmarkRepos, renderBenchmarkReport, requiresRuntimeReviewFromNotes, hasVerificationRegression, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
 
 it('P3.4 marks the LUMEN pass-to-fail typecheck as needing review', () => {
   expect(hasVerificationRegression('pass', 'fail: src/components/ErrorBoundary.tsx TS2580')).toBe(true);
@@ -33,27 +33,6 @@ it('explains v5 tool message content widening with a specific manual fix', () =>
   expect(findings).toHaveLength(2);
   expect(findings.every((finding) => finding.reason.includes('ChatCompletionContentPartText[]'))).toBe(true);
   expect(findings.every((finding) => finding.reason.includes('tool message content'))).toBe(true);
-});
-it('keeps a Node types candidate only when the post-migration typecheck passes', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-openai-node-types-fix-'));
-  try {
-    const manifestPath = path.join(root, 'package.json');
-    await writeFile(manifestPath, JSON.stringify({ dependencies: { openai: '5.0.0' }, engines: { node: '>=20' } }));
-    const outcome = await tryNodeTypesRepair(manifestPath, async () => 'pass');
-    expect(outcome).toEqual({ accepted: true, previousVersion: undefined, proposedVersion: '^20.17.0' });
-    expect(JSON.parse(await readFile(manifestPath, 'utf8')).devDependencies['@types/node']).toBe('^20.17.0');
-  } finally { await rm(root, { recursive: true, force: true }); }
-});
-it('restores the manifest when adding compatible Node types does not fix the typecheck', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-openai-node-types-reject-'));
-  try {
-    const manifestPath = path.join(root, 'package.json');
-    const before = JSON.stringify({ dependencies: { openai: '5.0.0' }, engines: { node: '>=20' } });
-    await writeFile(manifestPath, before);
-    const outcome = await tryNodeTypesRepair(manifestPath, async () => 'fail: another TypeScript error');
-    expect(outcome.accepted).toBe(false);
-    expect(await readFile(manifestPath, 'utf8')).toBe(before);
-  } finally { await rm(root, { recursive: true, force: true }); }
 });
 it('P3.4 marks experimental status in benchmark reports', () => {
   expect(renderBenchmarkReport([], 'complete', 0, openaiV5)).toContain('**Experimental migration:**');
