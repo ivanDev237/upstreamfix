@@ -36,6 +36,11 @@ const MOVED_IMPORTS = new Map([
   ['openai/resources/beta/chat/completions', 'openai/resources/chat/completions'],
   ['openai/resources/beta/threads/messages/messages', 'openai/resources/beta/threads/messages'],
 ]);
+const MOVED_MESSAGE_TYPES = new Map([
+  ['MessageContentText', 'TextContentBlock'],
+  ['ThreadMessage', 'Message'],
+  ['MessageContentImageFile', 'ImageFileContentBlock'],
+]);
 const RUN_TOOLS_EVENTS = new Map([
   ['functionCall', 'functionToolCall'], ['functionCallResult', 'functionToolCallResult'],
   ['finalFunctionCall', 'finalFunctionToolCall'], ['finalFunctionCallResult', 'finalFunctionToolCallResult'],
@@ -77,6 +82,7 @@ function rootIdentifier(node: Node): Node | undefined {
   if (Node.isIdentifier(node)) return node;
   if (Node.isPropertyAccessExpression(node)) return rootIdentifier(node.getExpression());
   if (Node.isElementAccessExpression(node)) return rootIdentifier(node.getExpression());
+  if (Node.isQualifiedName(node)) return rootIdentifier(node.getLeft());
   return undefined;
 }
 
@@ -151,6 +157,7 @@ function isStablePathArgument(node: Node): boolean {
 
 function transformFile(file: SourceFile, result: MigrationResult, exportedClients: Map<string, Set<string>>): void {
   const imported = new Set<string>();
+  const messageNamespaceImports = new Set<MorphSymbol>();
   const edits: Edit[] = [];
   const typedSource = /\.[cm]?tsx?$/.test(file.getFilePath());
   for (const declaration of file.getImportDeclarations()) {
@@ -407,10 +414,16 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     if (moved && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper)) {
       addEdit(edits, file, declaration.getModuleSpecifier(), `'${moved}'`, 'moved-import');
       if (specifier === 'openai/resources/beta/threads/messages/messages') {
+        const namespace = declaration.getNamespaceImport();
+        const namespaceSymbol = namespace?.getSymbol();
+        if (namespaceSymbol) messageNamespaceImports.add(namespaceSymbol);
         for (const entry of declaration.getNamedImports()) {
-          if (entry.getName() !== 'MessageContentText') continue;
+          const renamed = MOVED_MESSAGE_TYPES.get(entry.getName());
+          if (!renamed) continue;
           const localName = entry.getAliasNode()?.getText() ?? entry.getName();
-          addEdit(edits, file, entry, `TextContentBlock as ${localName}`, 'moved-import');
+          const typePrefix = declaration.isTypeOnly() ? '' : 'type ';
+          const alias = localName === renamed ? '' : ` as ${localName}`;
+          addEdit(edits, file, entry, `${typePrefix}${renamed}${alias}`, 'moved-import');
         }
       }
     } else if (specifier === 'openai/shims' || specifier === 'openai/src' || specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
@@ -421,6 +434,26 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       addManual(result, file, declaration, 'OpenAI v5 removes APIClient; review replacement with the main OpenAI class.');
     if (specifier === 'openai/core')
       addManual(result, file, declaration, 'OpenAI v5 refactors openai/core; review every imported export against the public v5 entry points.');
+  }
+  for (const qualified of file.getDescendantsOfKind(SyntaxKind.QualifiedName)) {
+    const root = rootIdentifier(qualified);
+    const name = qualified.getRight().getText();
+    const renamed = MOVED_MESSAGE_TYPES.get(name);
+    if (renamed && root?.getSymbol() && messageNamespaceImports.has(root.getSymbol()!))
+      addEdit(edits, file, qualified.getRight(), renamed, 'moved-import');
+  }
+  for (const property of file.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)) {
+    const root = rootIdentifier(property);
+    const renamed = MOVED_MESSAGE_TYPES.get(property.getName());
+    if (renamed && root?.getSymbol() && messageNamespaceImports.has(root.getSymbol()!))
+      addManual(result, file, property, 'A moved OpenAI message type is accessed as a runtime namespace property; review the type-only replacement manually.');
+  }
+  for (const element of file.getDescendantsOfKind(SyntaxKind.ElementAccessExpression)) {
+    const root = rootIdentifier(element);
+    const argument = element.getArgumentExpression();
+    const name = argument && Node.isStringLiteral(argument) ? argument.getText().slice(1, -1) : undefined;
+    if (name && MOVED_MESSAGE_TYPES.has(name) && root?.getSymbol() && messageNamespaceImports.has(root.getSymbol()!))
+      addManual(result, file, element, 'A moved OpenAI message type uses computed namespace access; review the v5 type replacement manually.');
   }
   if (file.getFullText().includes('zodResponseFormat')) {
     for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
@@ -441,8 +474,36 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       }
     }
     const moved = specifier ? MOVED_IMPORTS.get(specifier) : undefined;
-    if (moved && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper) && declaration.getModuleSpecifier())
+    if (moved && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper) && declaration.getModuleSpecifier()) {
       addEdit(edits, file, declaration.getModuleSpecifier()!, `'${moved}'`, 'moved-import');
+      if (specifier === 'openai/resources/beta/threads/messages/messages') {
+        for (const entry of declaration.getNamedExports()) {
+          const renamed = MOVED_MESSAGE_TYPES.get(entry.getName());
+          if (!renamed) continue;
+          const typePrefix = declaration.isTypeOnly() ? '' : 'type ';
+          const aliasName = entry.getAliasNode()?.getText() ?? entry.getName();
+          const alias = aliasName === renamed ? '' : ` as ${aliasName}`;
+          addEdit(edits, file, entry, `${typePrefix}${renamed}${alias}`, 'moved-import');
+        }
+      }
+    }
+  }
+  for (const importType of file.getDescendantsOfKind(SyntaxKind.ImportType)) {
+    const argument = importType.getArgument();
+    const rawSpecifier = argument.getText();
+    if (!/^(['"]).*\1$/.test(rawSpecifier)) continue;
+    const specifier = rawSpecifier.slice(1, -1);
+    const moved = MOVED_IMPORTS.get(specifier);
+    if (moved) {
+      const quote = rawSpecifier[0];
+      addEdit(edits, file, argument, `${quote}${moved}${quote}`, 'moved-import');
+    }
+    if (specifier !== 'openai/resources/beta/threads/messages/messages') continue;
+    const qualifier = importType.getQualifier();
+    const leaf = qualifier && Node.isQualifiedName(qualifier) ? qualifier.getRight() : qualifier;
+    if (!leaf || !Node.isIdentifier(leaf)) continue;
+    const renamed = MOVED_MESSAGE_TYPES.get(leaf.getText());
+    if (renamed) addEdit(edits, file, leaf, renamed, 'moved-import');
   }
   for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
     const expression = call.getExpression();
