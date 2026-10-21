@@ -15,8 +15,11 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-openai-sdk-'));
     roots.push(cwd);
     await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ private: true, type: 'module', dependencies: { openai: '4.104.0' } }));
-    await writeFile(path.join(cwd, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true,
-      skipLibCheck: true, target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext' }, include: ['*.ts'] }));
+    const tsconfigPath = path.join(cwd, 'tsconfig.json');
+    const tsconfig = { compilerOptions: { strict: true, noEmit: true,
+      skipLibCheck: true, target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext' },
+      include: ['files.ts', 'chat.ts', 'stream.ts', 'tools.ts', 'class.ts', 'events.ts', 'moved.ts', 'paths.ts', 'observed.ts'] };
+    await writeFile(tsconfigPath, JSON.stringify(tsconfig));
     const files = new Map([
       ['files.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const remove = () => client.files.del('file_123');\n"],
       ['chat.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const parse = () => client.beta.chat.completions.parse({model:'gpt-4o', messages:[]});\n"],
@@ -48,6 +51,7 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
     expect(result.manual).toEqual([]);
     expect(result.fileUpdates).toHaveLength(10);
     for (const update of result.fileUpdates ?? []) await writeFile(update.file, update.contents);
+    await writeFile(tsconfigPath, JSON.stringify({ ...tsconfig, include: ['*.ts'] }));
     await install('5.0.0');
     await check();
     expect(await readFile(path.join(cwd, 'chat.ts'), 'utf8')).toContain('client.chat.completions.parse');
@@ -70,7 +74,7 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
       skipLibCheck: true, target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext' }, include: ['index.ts'] }));
     await writeFile(path.join(cwd, 'index.ts'), `import OpenAI from 'openai';
 const client = new OpenAI({apiKey:'sk-test-fixture'});
-const runner = client.chat.completions.runTools({model:'gpt-4o', messages:[], tools:[]});
+const runner = client.beta.chat.completions.runTools({model:'gpt-4o', messages:[], tools:[]});
 for (const message of runner.messages) {
   if (message.role === 'tool' && message.content) {
     if (message.content.startsWith('created node')) console.log(message.content);
