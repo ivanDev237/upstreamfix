@@ -449,8 +449,9 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
         reason: `OpenAI v5's Bun guide requires @types/bun >=1.2.0; declared ${bunTypes} needs review and typecheck.`,
         snippet: `@types/bun: ${bunTypes}` });
     }
+    const hasDomTypes = hasDomLibrary(compilerOptions);
     if (compilerOptions && Array.isArray(compilerOptions.lib)
-      && !compilerOptions.lib.some((lib) => typeof lib === 'string' && /^dom(?:\.iterable)?$/i.test(lib))
+      && !hasDomTypes
       && nodeTypesMajor && Number(nodeTypesMajor[1]) < 20) {
       findings.push({ file: manifestPath, line: 1,
         reason: `OpenAI v5 needs Web fetch types, but this tsconfig excludes DOM and @types/node ${nodeTypes} predates Node 20. Upgrade @types/node >=20 and typecheck; review runtime compatibility first.`,
@@ -458,7 +459,7 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
     }
 
     if (compilerOptions && Array.isArray(compilerOptions.lib)
-      && !compilerOptions.lib.some((lib) => typeof lib === 'string' && /^dom(?:\.iterable)?$/i.test(lib))
+      && !hasDomTypes
       && !nodeTypes && !workersTypes && !bunTypes) {
       findings.push({ file: tsconfigPath, line: 1,
         reason: 'OpenAI v5 requires Web fetch types (RequestInit, Headers, Blob, File). This tsconfig excludes DOM and the package lacks @types/node; choose a compatible DOM lib or @types/node >=20, then typecheck. The correct runtime target cannot be inferred safely.',
@@ -491,6 +492,12 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
     }
   }
   return findings;
+}
+
+function hasDomLibrary(compilerOptions: Record<string, unknown> | undefined): boolean {
+  const libraries = compilerOptions?.lib;
+  return Array.isArray(libraries) && libraries.some((lib) => typeof lib === 'string'
+    && /^(?:lib\.)?dom(?:\.iterable)?(?:\.d\.ts)?$/i.test(lib));
 }
 
 function findNodeTypeUsage(source: string): { line: number; name: string } | undefined {
