@@ -108,6 +108,7 @@ describe('public repository benchmark helpers', () => {
       await writeFile(path.join(cwd, 'index.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.beta.chat.completions.stream({model:'gpt-4o',messages:[]});\n");
       const outcome = await analyzeBenchmarkMigration(openaiV5, cwd);
       expect(outcome.changes.some((change) => change.rule === 'beta-chat')).toBe(true);
+      expect(outcome.runtimeOverrideFiles).toContain('index.ts');
       expect(outcome.manual.some((item) => item.reason.includes('Node.js 20'))).toBe(false);
       expect(outcome.manifestNotes.some((item) => item.includes('Node.js 20'))).toBe(true);
       expect((await readFile(path.join(cwd, 'index.ts'), 'utf8'))).toContain('client.beta.chat');

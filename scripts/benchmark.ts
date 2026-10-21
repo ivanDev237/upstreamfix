@@ -555,11 +555,20 @@ export async function benchmarkOne(
     await clearPackageManagerCredentialFiles(checkout);
 
     const outcome = await analyzeBenchmarkMigration(migration, checkout);
-    result.migrated = countLogicalMigrationGroups(outcome);
-    result.manual = outcome.manual.length;
-    result.manualFindings = outcome.manual.slice(0, 500).map(({ file, line, reason }) => ({ file, line, reason, classification: classifyOpenAiManual(reason) }));
+    const runtimeOverrideFiles = new Set(outcome.runtimeOverrideFiles ?? []);
+    const runtimeOverrideChanges = outcome.changes.filter((change) => change.rule !== 'node-types' && runtimeOverrideFiles.has(change.file));
+    const countedChanges = outcome.changes.filter((change) => change.rule === 'node-types' || !runtimeOverrideFiles.has(change.file));
+    result.migrated = countLogicalMigrationGroups({ changes: countedChanges });
+    result.manual = outcome.manual.length + runtimeOverrideChanges.length;
+    result.manualFindings = [
+      ...outcome.manual.slice(0, 500).map(({ file, line, reason }) => ({ file, line, reason, classification: classifyOpenAiManual(reason) })),
+      ...runtimeOverrideChanges.map(({ file, line }) => ({ file, line,
+        reason: 'This source edit was analyzed only under the benchmark Node 20 override; the repository runtime is not confirmed and the edit is excluded from automatic and criterion rates.',
+        classification: 'not automated' as const })),
+    ];
     result.usages = result.migrated + result.manual;
-    result.details = outcome.manifestNotes.join(' ');
+    result.details = [outcome.manifestNotes.join(' '), runtimeOverrideChanges.length > 0
+      ? `${runtimeOverrideChanges.length} source migration group(s) depended only on the benchmark Node 20 override and were excluded from automatic migration counts.` : ''].filter(Boolean).join(' ');
 
     // Display diffs may summarize large lockfiles and are not guaranteed to be
     // executable patches. Apply the exact, path-checked file changes instead.
