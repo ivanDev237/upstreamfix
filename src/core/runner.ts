@@ -580,18 +580,43 @@ async function prepareNodeTypesRepair(options: RunOptions): Promise<ManifestOutc
           snippet: 'tsconfig repair withheld' });
         continue;
       }
-      const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, {}, {
-        ...ts.sys,
-        onUnRecoverableConfigFileDiagnostic: () => undefined,
-      });
-      const types = (parsed?.options as unknown as { types?: string[] } | undefined)?.types;
-      if (Array.isArray(types) && !types.includes('node')) {
+      if (await exists(tsconfigPath)) {
         const configBefore = await readFile(tsconfigPath, 'utf8');
-        const configAfter = addNodeTypeToTsconfig(configBefore, types);
-        if (!configAfter) continue;
-        tsconfigChange = { absolutePath: tsconfigPath, relativePath: path.relative(options.cwd, tsconfigPath), before: configBefore, after: configAfter };
+        const localConfig = ts.parseConfigFileTextToJson(tsconfigPath, configBefore);
+        if (localConfig.error || !localConfig.config || typeof localConfig.config !== 'object') {
+          manual.push({ file: tsconfigPath, line: 1,
+            reason: 'The Node type repair was withheld because tsconfig.json is malformed; repair its JSONC syntax and rerun typecheck.',
+            snippet: 'tsconfig repair withheld' });
+          continue;
+        }
+        const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, {}, {
+          ...ts.sys,
+          onUnRecoverableConfigFileDiagnostic: () => undefined,
+        });
+        if (!parsed || parsed.errors.some((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)) {
+          manual.push({ file: tsconfigPath, line: 1,
+            reason: 'The Node type repair was withheld because the effective TypeScript configuration could not be resolved safely.',
+            snippet: 'tsconfig repair withheld' });
+          continue;
+        }
+        const types = (parsed.options as unknown as { types?: string[] }).types;
+        if (Array.isArray(types) && !types.includes('node')) {
+          const configAfter = addNodeTypeToTsconfig(configBefore, types);
+          if (!configAfter) {
+            manual.push({ file: tsconfigPath, line: 1,
+              reason: 'The Node type repair was withheld because compilerOptions.types contains comments, a trailing comma, or a structure that cannot be edited without changing its formatting.',
+              snippet: 'tsconfig repair withheld' });
+            continue;
+          }
+          tsconfigChange = { absolutePath: tsconfigPath, relativePath: path.relative(options.cwd, tsconfigPath), before: configBefore, after: configAfter };
+        }
       }
-    } catch { continue; }
+    } catch {
+      manual.push({ file: tsconfigPath, line: 1,
+        reason: 'The Node type repair was withheld because tsconfig.json could not be read safely.',
+        snippet: 'tsconfig repair withheld' });
+      continue;
+    }
     const updated = addNodeTypesDependency(raw, runtimeMajor);
     if (!updated) continue;
     const locks = options.analysisOnly ? await findLockfiles(options.cwd, packageDirectory) : [];
@@ -664,12 +689,13 @@ function addNodeTypeToTsconfig(raw: string, effectiveTypes: readonly string[]): 
       const insertAt = close - whitespace.length;
       const hasValues = array.elements.length > 0;
       const hasTrailingComma = content.trimEnd().endsWith(',');
+      if (hasTrailingComma) return undefined;
       const multiline = content.includes('\n');
       const lineEnding = raw.includes('\r\n') ? '\r\n' : '\n';
       const arrayIndent = raw.slice(0, array.getStart(parsed)).split(/\r?\n/).at(-1)?.match(/^\s*/)?.[0] ?? '';
       const addition = multiline
         ? `${hasValues && !hasTrailingComma ? ',' : ''}${lineEnding}${arrayIndent}  "node"`
-        : `${hasValues ? (hasTrailingComma ? ' ' : ', ') : ''}"node"`;
+        : `${hasValues ? ', ' : ''}"node"`;
       updated = raw.slice(0, insertAt) + addition + raw.slice(insertAt);
     } else if (typesProperty) return undefined;
     else updated = insertProperty(optionsObject, `"types": ${JSON.stringify([...effectiveTypes, 'node'])}`);

@@ -3,7 +3,7 @@ import { Project, ModuleKind, ScriptTarget } from 'ts-morph';
 import { openaiV5 } from '../src/migrations/openai-v5/index.js';
 import { findApplicableMigrations, migrations } from '../src/migrations/index.js';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { runMigration } from '../src/core/runner.js';
@@ -154,6 +154,132 @@ describe('openai v4 to v5', () => {
       const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true, nodeRuntime: 20 });
       expect(outcome.proposedFiles.some((file) => file.relativePath === 'package.json' && file.after.includes('@types/node'))).toBe(false);
       expect(outcome.manual.some((item) => item.reason.includes('Git, URL, local, aliased, override'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('does not read symlinked tsconfig or lockfile contents outside the project', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-symlink-config-'));
+    const outside = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-secret-'));
+    const sentinel = 'DO_NOT_LEAK_CONFIG_SECRET';
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.28.0' }, scripts: { typecheck: 'tsc --noEmit' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(outside, 'tsconfig.json'), JSON.stringify({ compilerOptions: { types: ['node'], secret: sentinel } }));
+      await writeFile(path.join(outside, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': { secret: sentinel } } }));
+      await symlink(path.join(outside, 'tsconfig.json'), path.join(cwd, 'tsconfig.json'));
+      await symlink(path.join(outside, 'package-lock.json'), path.join(cwd, 'package-lock.json'));
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'server.ts'), 'console.log(process.env.NODE_ENV);\n');
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true, nodeRuntime: 20 });
+      expect(outcome.proposedFiles.some((file) => /(?:tsconfig|package-lock|package\.json)$/.test(file.relativePath))).toBe(false);
+      expect(outcome.manual.some((finding) => finding.reason.includes('symlinked or out-of-project'))).toBe(true);
+      expect(JSON.stringify(outcome)).not.toContain(sentinel);
+    } finally { await rm(cwd, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+  });
+
+  it('refuses a tsconfig extends target that is a symlink outside the project', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-extends-link-'));
+    const outside = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-extends-secret-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.28.0' }, scripts: { typecheck: 'tsc --noEmit' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(outside, 'base.json'), JSON.stringify({ compilerOptions: { types: ['node'], privateSetting: 'EXTENDS_SECRET' } }));
+      await symlink(path.join(outside, 'base.json'), path.join(cwd, 'linked-base.json'));
+      await writeFile(path.join(cwd, 'tsconfig.json'), '{"extends":"./linked-base.json"}');
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'server.ts'), 'console.log(process.env.NODE_ENV);\n');
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true, nodeRuntime: 20 });
+      expect(outcome.proposedFiles.some((file) => file.relativePath === 'package.json' || file.relativePath === 'tsconfig.json')).toBe(false);
+      expect(outcome.manual.some((finding) => finding.reason.includes('symlinked or out-of-project'))).toBe(true);
+      expect(JSON.stringify(outcome)).not.toContain('EXTENDS_SECRET');
+    } finally { await rm(cwd, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+  });
+
+  it('refuses a symlinked lockfile without reading or reporting its target', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-lock-link-'));
+    const outside = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-lock-secret-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.28.0' }, scripts: { typecheck: 'tsc --noEmit' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(outside, 'package-lock.json'), '{"lockfileVersion":3,"secret":"LOCK_SECRET"}');
+      await symlink(path.join(outside, 'package-lock.json'), path.join(cwd, 'package-lock.json'));
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'server.ts'), 'console.log(process.env.NODE_ENV);\n');
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true, nodeRuntime: 20 });
+      expect(outcome.proposedFiles.some((file) => file.relativePath.endsWith('package.json') || file.relativePath.endsWith('package-lock.json'))).toBe(false);
+      expect(outcome.manual.some((finding) => finding.reason.includes('lockfile is symlinked'))).toBe(true);
+      expect(JSON.stringify(outcome)).not.toContain('LOCK_SECRET');
+    } finally { await rm(cwd, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+  });
+
+  it('keeps nested package findings when only the root package Node types are repaired', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-monorepo-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.28.0' }, scripts: { typecheck: 'tsc --noEmit' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'tsconfig.json'), JSON.stringify({ compilerOptions: { types: [], lib: ['ES2022'] } }));
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'server.ts'), 'console.log(process.env.NODE_ENV);\n');
+      const nested = path.join(cwd, 'packages', 'worker');
+      await mkdir(nested, { recursive: true });
+      await writeFile(path.join(nested, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.28.0' }, devDependencies: { '@types/node': '^18.0.0' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(nested, 'tsconfig.json'), JSON.stringify({ compilerOptions: { types: [], lib: ['ES2022'] } }));
+      await writeFile(path.join(nested, 'worker.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('w'); console.log(process.env.NODE_ENV);\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true, nodeRuntime: 20 });
+      expect(outcome.proposedFiles.find((file) => file.relativePath === 'package.json')?.after).toContain('"@types/node"');
+      expect(outcome.proposedFiles.some((file) => file.relativePath === 'packages/worker/package.json')).toBe(false);
+      expect(outcome.manual.some((finding) => finding.file === 'packages/worker/worker.ts' && finding.reason.includes('@types/node'))).toBe(true);
+      expect(outcome.changes.filter((change) => change.rule === 'node-types').every((change) => !change.file.includes('packages/worker'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('preserves single-line package.json formatting during the Node type repair', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-format-'));
+    const manifest = '{"dependencies":{"openai":"^4.28.0"},"scripts":{"typecheck":"tsc --noEmit"},"engines":{"node":">=20"}}';
+    try {
+      await writeFile(path.join(cwd, 'package.json'), manifest);
+      await writeFile(path.join(cwd, 'tsconfig.json'), '{"compilerOptions":{"lib":["ES2022"]}}');
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'server.ts'), 'console.log(process.env.NODE_ENV);\n');
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true, nodeRuntime: 20 });
+      const updated = outcome.proposedFiles.find((file) => file.relativePath === 'package.json')?.after;
+      expect(updated).toContain('"devDependencies":{"@types/node":"^20.0.0"}');
+      expect(updated).not.toContain('\n');
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('preserves an existing trailing comma when appending Node to tsconfig types', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-trailing-types-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.28.0' }, scripts: { typecheck: 'tsc --noEmit' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'tsconfig.json'), '{"compilerOptions":{"types":["jest",],"lib":["ES2022"]}}');
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'server.ts'), 'console.log(process.env.NODE_ENV);\n');
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true, nodeRuntime: 20 });
+      const config = outcome.proposedFiles.find((file) => file.relativePath === 'tsconfig.json')?.after;
+      expect(config).toBeUndefined();
+      expect(outcome.proposedFiles.some((file) => file.relativePath === 'package.json')).toBe(false);
+      expect(outcome.manual.some((finding) => finding.reason.includes('trailing comma'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('returns project-relative paths when process.cwd differs from options.cwd', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-relative-paths-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.28.0' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
+      expect(outcome.filesChanged.every((file) => !path.isAbsolute(file) && file !== '..' && !file.startsWith('../'))).toBe(true);
+      expect(outcome.changes.every((change) => !path.isAbsolute(change.file) && !change.file.startsWith('../'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('reports a manual finding instead of silently skipping a commented Node types array', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-commented-types-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.28.0' }, scripts: { typecheck: 'tsc --noEmit' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'tsconfig.json'), '{"compilerOptions":{"types":["jest" /* keep test globals */],"lib":["ES2022"]}}');
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'server.ts'), 'console.log(process.env.NODE_ENV);\n');
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true, nodeRuntime: 20 });
+      expect(outcome.proposedFiles.some((file) => file.relativePath.endsWith('package.json') || file.relativePath.endsWith('tsconfig.json'))).toBe(false);
+      expect(outcome.manual.some((finding) => finding.file === 'tsconfig.json' && finding.reason.includes('comments'))).toBe(true);
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
