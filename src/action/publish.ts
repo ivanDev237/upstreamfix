@@ -210,7 +210,16 @@ export function validatePublishableBundle(proposal: Proposal, blobs: Record<stri
     else if (/(?:^|\/)tsconfig\.json$/.test(file)) {
       const directory = file.replace(/(?:^|\/)tsconfig\.json$/, '');
       if (!manifestDirectories.has(directory)) throw new Error('Bundle tsconfig is not owned by the package manifest being migrated.');
-      validateNodeTypesTsconfigDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
+      const packageManifest = blobs[directory ? `${directory}/package.json` : 'package.json'];
+      let nodeTypesAddedInBundle = false;
+      if (packageManifest?.before !== undefined) {
+        const beforePackage = parseJsonObject(packageManifest.before, 'package.json');
+        const afterPackage = parseJsonObject(packageManifest.after, 'package.json');
+        const sections = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
+        nodeTypesAddedInBundle = sections.every((section) => typeof record(beforePackage[section])?.['@types/node'] !== 'string')
+          && typeof record(afterPackage.devDependencies)?.['@types/node'] === 'string';
+      }
+      validateNodeTypesTsconfigDelta(blob.before, blob.after, migration.packageName, migration.toMajor, nodeTypesAddedInBundle);
     }
     else if (/(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json)$/.test(file)) {
       const lock = parseJsonObject(blob.after, file);
@@ -361,7 +370,7 @@ function validateManifestDelta(beforeText: string, afterText: string, packageNam
   if (!isDeepStrictEqual(normalized, before)) throw new Error('Bundle package.json changes fields beyond the SDK version or approved Node.js requirement.');
 }
 
-function validateNodeTypesTsconfigDelta(beforeText: string, afterText: string, packageName: string, targetMajor: number): void {
+function validateNodeTypesTsconfigDelta(beforeText: string, afterText: string, packageName: string, targetMajor: number, nodeTypesAddedInBundle: boolean): void {
   if (packageName !== 'openai' || targetMajor !== 5) throw new Error('Bundle tsconfig changes are only allowed for the OpenAI Node type repair.');
   const beforeSyntax = ts.parseJsonText('tsconfig.json', beforeText);
   const afterSyntax = ts.parseJsonText('tsconfig.json', afterText);
@@ -376,12 +385,14 @@ function validateNodeTypesTsconfigDelta(beforeText: string, afterText: string, p
   const afterOptions = record(after.compilerOptions);
   const beforeTypes = beforeOptions?.types;
   const afterTypes = afterOptions?.types;
-  if (!afterOptions || !Array.isArray(afterTypes)
+  if (!nodeTypesAddedInBundle || !afterOptions || !Array.isArray(afterTypes)
     || !afterTypes.every((item) => typeof item === 'string')
     || afterTypes.at(-1) !== 'node') {
     throw new Error('Bundle tsconfig must end the compilerOptions.types array with the Node type.');
   }
-  const effectiveTypes = Array.isArray(beforeTypes) ? beforeTypes : afterTypes.slice(0, -1);
+  if (before.extends !== undefined && !Array.isArray(beforeTypes))
+    throw new Error('Bundle tsconfig extends an unbundled config with inherited types; the exact deterministic Node types change cannot be independently established.');
+  const effectiveTypes = Array.isArray(beforeTypes) ? beforeTypes : [];
   if (!effectiveTypes.every((item) => typeof item === 'string') || effectiveTypes.includes('node'))
     throw new Error('Bundle tsconfig has an invalid inherited Node types repair.');
   const expected = addNodeTypeToTsconfig(beforeText, effectiveTypes as string[]);
