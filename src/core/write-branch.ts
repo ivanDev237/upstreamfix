@@ -93,7 +93,7 @@ export async function writeMigrationOnBranch(
       ...options.verificationOptions,
       customCommands: options.customCommands,
     });
-    if (addsNodeTypes(outcome.proposedFiles)
+    if (requiresNodeTypesTypecheck(outcome.proposedFiles)
       && !verification.checks.some((check) => check.name.startsWith('Typecheck (') && check.status === 'passed')) {
       throw new Error('Adding @types/node requires a passing isolated typecheck; no branch or commit was created.');
     }
@@ -151,7 +151,8 @@ export async function writeMigrationOnBranch(
   }
 }
 
-function addsNodeTypes(files: readonly { relativePath: string; before: string; after: string }[]): boolean {
+function requiresNodeTypesTypecheck(files: readonly { relativePath: string; before: string; after: string }[]): boolean {
+  if (files.some((file) => /(?:^|\/)tsconfig(?:\.[^/]+)?\.json$/.test(file.relativePath) && file.before !== file.after)) return true;
   return files.some((file) => {
     if (!file.relativePath.endsWith('package.json')) return false;
     try {

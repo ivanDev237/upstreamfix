@@ -223,11 +223,11 @@ function findSourceFiles(root: string, packageName: string, excludedDirectories:
       if (!entry.isFile() || entry.name.endsWith('.d.ts')) continue;
       if (!SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
       if (statSync(absolutePath).size > MAX_SOURCE_BYTES) {
-        if (packageName === '' || largeFileContainsPackage(absolutePath, packageName)) found.push(absolutePath);
+        if (packageName === '' || packageName === 'openai' || largeFileContainsPackage(absolutePath, packageName)) found.push(absolutePath);
       }
       else {
         const source = readFileSync(absolutePath, 'utf8');
-        if (packageName === '' || source.includes(packageName) || (packageName === 'stripe' && /\bstripe\b/i.test(source))) found.push(absolutePath);
+        if (packageName === '' || packageName === 'openai' || source.includes(packageName) || (packageName === 'stripe' && /\bstripe\b/i.test(source))) found.push(absolutePath);
       }
     }
   };
@@ -383,7 +383,7 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     notes: [...nodeTypesRepair.notes, ...baseManifest.notes],
     changes: [
       ...nodeTypesRepair.changes.filter((change) => path.basename(change.absolutePath) !== 'package.json'),
-      ...(options.analysisOnly ? nodeTypesRepair.changes.filter((change) => path.basename(change.absolutePath) === 'package.json') : []),
+      ...nodeTypesRepair.changes.filter((change) => path.basename(change.absolutePath) === 'package.json'),
       ...baseManifest.changes,
     ],
     manual: [...nodeTypesRepair.manual, ...baseManifest.manual],
@@ -619,7 +619,7 @@ async function prepareNodeTypesRepair(options: RunOptions): Promise<ManifestOutc
     }
     const updated = addNodeTypesDependency(raw, runtimeMajor);
     if (!updated) continue;
-    const locks = options.analysisOnly ? await findLockfiles(options.cwd, packageDirectory) : [];
+    const locks = await findLockfiles(options.cwd, packageDirectory);
     let lockChange: ManifestFileChange | undefined;
     if (locks.length > 0) {
       const lockPath = path.resolve(options.cwd, locks[0]!);
@@ -653,7 +653,7 @@ async function prepareNodeTypesRepair(options: RunOptions): Promise<ManifestOutc
   return { notes, changes, manual };
 }
 
-function addNodeTypeToTsconfig(raw: string, effectiveTypes: readonly string[]): string | undefined {
+export function addNodeTypeToTsconfig(raw: string, effectiveTypes: readonly string[]): string | undefined {
   if (effectiveTypes.includes('node')) return raw;
   const parsed = ts.parseJsonText('tsconfig.json', raw);
   const root = parsed.statements[0]?.expression;
@@ -706,11 +706,12 @@ function addNodeTypeToTsconfig(raw: string, effectiveTypes: readonly string[]): 
     ? updated : undefined;
 }
 
-function addNodeTypesDependency(raw: string, major: number): string | undefined {
+export function addNodeTypesDependency(raw: string, major: number): string | undefined {
   const rootStart = raw.charCodeAt(0) === 0xfeff ? 1 : 0;
   const dependencyMember = findJsonObjectMember(raw, rootStart, 'devDependencies');
   const lineEnding = raw.includes('\r\n') ? '\r\n' : '\n';
-  const multiline = raw.includes('\n');
+  const separatorMatch = /"(\s*:\s*)"/.exec(raw);
+  const keyValueSeparator = separatorMatch?.[1] ?? ': ';
   const indent = raw.match(/(?:\r?\n)([ \t]+)"[^"\r\n]+"\s*:/)?.[1] ?? '  ';
   const specifier = `^${major}.0.0`;
   let updated: string;
@@ -719,24 +720,26 @@ function addNodeTypesDependency(raw: string, major: number): string | undefined 
     const end = jsonValueEnd(raw, dependencyMember.valueStart);
     if (end < 0) return undefined;
     const close = end - 1;
+    const multilineDependencies = /\r?\n/.test(raw.slice(dependencyMember.valueStart + 1, close));
     const whitespace = raw.slice(dependencyMember.valueStart + 1, close).match(/\s*$/)?.[0] ?? '';
     const insertAt = close - whitespace.length;
     const hasEntries = raw.slice(dependencyMember.valueStart + 1, insertAt).trim().length > 0;
-    const childIndent = multiline ? `${indent}${indent}` : '';
-    const addition = multiline
-      ? `${hasEntries ? ',' : ''}${lineEnding}${childIndent}"@types/node": "${specifier}"`
-      : `${hasEntries ? ', ' : ''}"@types/node": "${specifier}"`;
+    const childIndent = multilineDependencies ? `${indent}${indent}` : '';
+    const addition = multilineDependencies
+      ? `${hasEntries ? ',' : ''}${lineEnding}${childIndent}"@types/node"${keyValueSeparator}"${specifier}"`
+      : `${hasEntries ? ', ' : ''}"@types/node"${keyValueSeparator}"${specifier}"`;
     updated = raw.slice(0, insertAt) + addition + raw.slice(insertAt);
   } else {
     const end = jsonValueEnd(raw, rootStart);
     if (end < 0) return undefined;
     const close = end - 1;
+    const multilineRoot = /\r?\n/.test(raw.slice(rootStart + 1, close));
     const whitespace = raw.slice(rootStart + 1, close).match(/\s*$/)?.[0] ?? '';
     const insertAt = close - whitespace.length;
     const hasEntries = raw.slice(rootStart + 1, insertAt).trim().length > 0;
-    const addition = multiline
-      ? `${hasEntries ? ',' : ''}${lineEnding}${indent}"devDependencies": {${lineEnding}${indent}${indent}"@types/node": "${specifier}"${lineEnding}${indent}}`
-      : `${hasEntries ? ', ' : ''}"devDependencies":{"@types/node":"${specifier}"}`;
+    const addition = multilineRoot
+      ? `${hasEntries ? ',' : ''}${lineEnding}${indent}"devDependencies"${keyValueSeparator}{${lineEnding}${indent}${indent}"@types/node"${keyValueSeparator}"${specifier}"${lineEnding}${indent}}`
+      : `${hasEntries ? ', ' : ''}"devDependencies"${keyValueSeparator}{"@types/node"${keyValueSeparator}"${specifier}"}`;
     updated = raw.slice(0, insertAt) + addition + raw.slice(insertAt);
   }
   try {
@@ -1320,7 +1323,7 @@ function unsafeTsconfigReference(root: string, initialConfig: string): boolean {
   return visit(initialConfig);
 }
 
-function addNodeEngineToManifest(raw: string, major: number): string | undefined {
+export function addNodeEngineToManifest(raw: string, major: number): string | undefined {
   const rootStart = raw.charCodeAt(0) === 0xfeff ? 1 : 0;
   if (raw[rootStart] !== '{') return undefined;
   const engineMember = findJsonObjectMember(raw, rootStart, 'engines');
@@ -1348,7 +1351,7 @@ function addNodeEngineToManifest(raw: string, major: number): string | undefined
   }
 }
 
-function preserveManifestFormatting(
+export function preserveManifestFormatting(
   raw: string,
   before: PackageManifest,
   after: PackageManifest,

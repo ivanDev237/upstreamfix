@@ -3,6 +3,10 @@ import { migrations } from '../migrations/index.js';
 import type { ActionConfig } from './config.js';
 import { isDeepStrictEqual } from 'node:util';
 import { Project, ts } from 'ts-morph';
+import { guaranteesNodeMajor } from '../core/node-range.js';
+import { isSupportedSourceMajor } from '../core/project-discovery.js';
+import { addNodeEngineToManifest, addNodeTypeToTsconfig, addNodeTypesDependency, preserveManifestFormatting } from '../core/runner.js';
+import type { PackageManifest } from '../core/types.js';
 
 export interface Proposal {
   schema: 1;
@@ -189,6 +193,7 @@ export function validatePublishableBundle(proposal: Proposal, blobs: Record<stri
   if (!migration) throw new Error('Unknown bundle migration.');
   const project = new Project({ useInMemoryFileSystem: true, skipAddingFilesFromTsConfig: true, compilerOptions: { allowJs: true } });
   const sources = new Map<string, BundleBlob>();
+  const manifestDirectories = new Set(proposal.files.filter((file) => /(?:^|\/)package\.json$/.test(file)).map((file) => file.replace(/(?:^|\/)package\.json$/, '')));
   if (proposal.files.length > 100) throw new Error('Bundle contains too many changed files.');
   for (const file of proposal.files) {
     const blob = blobs[file];
@@ -202,7 +207,11 @@ export function validatePublishableBundle(proposal: Proposal, blobs: Record<stri
       continue;
     }
     if (/(?:^|\/)package\.json$/.test(file)) validateManifestDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
-    else if (/(?:^|\/)tsconfig\.json$/.test(file)) validateNodeTypesTsconfigDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
+    else if (/(?:^|\/)tsconfig\.json$/.test(file)) {
+      const directory = file.replace(/(?:^|\/)tsconfig\.json$/, '');
+      if (!manifestDirectories.has(directory)) throw new Error('Bundle tsconfig is not owned by the package manifest being migrated.');
+      validateNodeTypesTsconfigDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
+    }
     else if (/(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json)$/.test(file)) {
       const lock = parseJsonObject(blob.after, file);
       if (![2, 3].includes(lock.lockfileVersion as number) || !record(lock.packages)) throw new Error('Bundle npm lockfile format is unsupported.');
@@ -267,10 +276,30 @@ function rejectExecutableShadowing(before: Record<string, unknown>, after: Recor
 function parseJsonObject(contents: string, label: string): Record<string, unknown> {
   if (contents.length > 8 * 1024 * 1024) throw new Error(`Bundle ${label} exceeds the validation size limit.`);
   try {
+    const syntax = ts.parseJsonText(label, contents);
+    const diagnostics = (syntax as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? [];
+    if (diagnostics.length || hasDuplicateJsonKeys(syntax)) throw new Error('duplicate or invalid JSON keys');
     const value: unknown = JSON.parse(contents);
     if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;
   } catch { /* fixed error below */ }
   throw new Error(`Bundle ${label} is invalid JSON.`);
+}
+
+function hasDuplicateJsonKeys(source: ts.JsonSourceFile): boolean {
+  const visit = (node: ts.Node): boolean => {
+    if (ts.isObjectLiteralExpression(node)) {
+      const names = new Set<string>();
+      for (const property of node.properties) {
+        if (!ts.isPropertyAssignment(property)) continue;
+        const name = ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) || ts.isNumericLiteral(property.name)
+          ? property.name.text : undefined;
+        if (name !== undefined && names.has(name)) return true;
+        if (name !== undefined) names.add(name);
+      }
+    }
+    return node.forEachChild(visit) ?? false;
+  };
+  return visit(source);
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -298,27 +327,45 @@ function validateManifestDelta(beforeText: string, afterText: string, packageNam
     else delete normalized.engines;
   }
   const dependencySections = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
+  const beforeOpenAi = dependencySections.map((section) => record(before[section])?.openai).find((value) => typeof value === 'string');
+  const afterOpenAi = dependencySections.map((section) => record(after[section])?.openai).find((value) => typeof value === 'string');
   const beforeNodeTypes = dependencySections.map((section) => record(before[section])?.['@types/node']);
   const afterNodeTypes = dependencySections.map((section) => record(after[section])?.['@types/node']);
   if (JSON.stringify(beforeNodeTypes) !== JSON.stringify(afterNodeTypes)) {
-    const runtime = typeof afterEngines?.node === 'string' ? /^\s*>=\s*(\d+)(?:\.0(?:\.0)?)?\s*$/.exec(afterEngines.node) : null;
+    const runtimeMajor = typeof afterEngines?.node === 'string'
+      ? [20, 22].find((major) => guaranteesNodeMajor(afterEngines.node as string, major)) : undefined;
     const added = afterNodeTypes[1];
-    if (packageName !== 'openai' || targetMajor !== 5 || beforeNodeTypes.some((value) => value !== undefined)
-      || typeof added !== 'string' || !runtime || Number(runtime[1]) < 20 || added !== `^${runtime[1]}.0.0`
+    if (packageName !== 'openai' || targetMajor !== 5 || typeof beforeOpenAi !== 'string'
+      || !isSupportedSourceMajor(beforeOpenAi, 4) || afterOpenAi !== '^5.0.0'
+      || beforeNodeTypes.some((value) => value !== undefined)
+      || typeof added !== 'string' || runtimeMajor === undefined || added !== `^${runtimeMajor}.0.0`
       || afterNodeTypes.some((value, index) => index !== 1 && value !== undefined)) {
       throw new Error('Bundle package.json adds or changes @types/node outside the deterministic Node runtime repair.');
     }
     const normalizedDevDependencies = record(normalized.devDependencies);
     if (normalizedDevDependencies) {
       delete normalizedDevDependencies['@types/node'];
-      if (!record(before.devDependencies)) delete normalized.devDependencies;
+      if (!record(before.devDependencies) && Object.keys(normalizedDevDependencies).length === 0) delete normalized.devDependencies;
     }
+    const migration = migrations.find((candidate) => candidate.id === 'openai@5');
+    const expectedManifest = structuredClone(before) as PackageManifest;
+    if (record(expectedManifest.engines)?.node === undefined)
+      expectedManifest.engines = { ...record(expectedManifest.engines), node: '>=20' } as Record<string, string>;
+    const notes = migration?.updateManifest?.(expectedManifest) ?? [];
+    if (!migration || notes.some((note) => note.includes('requires Node.js'))) throw new Error('Bundle package.json is not eligible for the OpenAI Node type repair.');
+    let expectedText = preserveManifestFormatting(beforeText, before as PackageManifest, expectedManifest, 'openai');
+    if (expectedText && record(before.engines)?.node === undefined) expectedText = addNodeEngineToManifest(expectedText, 20);
+    if (expectedText) expectedText = addNodeTypesDependency(expectedText, runtimeMajor!);
+    if (expectedText !== afterText) throw new Error('Bundle package.json differs from the exact deterministic Node type repair.');
   }
   if (!isDeepStrictEqual(normalized, before)) throw new Error('Bundle package.json changes fields beyond the SDK version or approved Node.js requirement.');
 }
 
 function validateNodeTypesTsconfigDelta(beforeText: string, afterText: string, packageName: string, targetMajor: number): void {
   if (packageName !== 'openai' || targetMajor !== 5) throw new Error('Bundle tsconfig changes are only allowed for the OpenAI Node type repair.');
+  const beforeSyntax = ts.parseJsonText('tsconfig.json', beforeText);
+  const afterSyntax = ts.parseJsonText('tsconfig.json', afterText);
+  if (hasDuplicateJsonKeys(beforeSyntax) || hasDuplicateJsonKeys(afterSyntax)) throw new Error('Bundle tsconfig contains duplicate JSON keys.');
   const beforeParsed = ts.parseConfigFileTextToJson('tsconfig.json', beforeText);
   const afterParsed = ts.parseConfigFileTextToJson('tsconfig.json', afterText);
   if (beforeParsed.error || afterParsed.error || !record(beforeParsed.config) || !record(afterParsed.config))
@@ -329,14 +376,16 @@ function validateNodeTypesTsconfigDelta(beforeText: string, afterText: string, p
   const afterOptions = record(after.compilerOptions);
   const beforeTypes = beforeOptions?.types;
   const afterTypes = afterOptions?.types;
-  if (!beforeOptions || !afterOptions || !Array.isArray(beforeTypes) || !beforeTypes.every((item) => typeof item === 'string')
-    || beforeTypes.includes('node') || !Array.isArray(afterTypes)
+  if (!afterOptions || !Array.isArray(afterTypes)
     || !afterTypes.every((item) => typeof item === 'string')
-    || !isDeepStrictEqual(afterTypes, [...beforeTypes, 'node'])) {
-    throw new Error('Bundle tsconfig may only append "node" to an existing compilerOptions.types array.');
+    || afterTypes.at(-1) !== 'node') {
+    throw new Error('Bundle tsconfig must end the compilerOptions.types array with the Node type.');
   }
-  afterOptions.types = [...beforeTypes];
-  if (!isDeepStrictEqual(after, before)) throw new Error('Bundle tsconfig changes fields beyond the deterministic node types addition.');
+  const effectiveTypes = Array.isArray(beforeTypes) ? beforeTypes : afterTypes.slice(0, -1);
+  if (!effectiveTypes.every((item) => typeof item === 'string') || effectiveTypes.includes('node'))
+    throw new Error('Bundle tsconfig has an invalid inherited Node types repair.');
+  const expected = addNodeTypeToTsconfig(beforeText, effectiveTypes as string[]);
+  if (expected !== afterText) throw new Error('Bundle tsconfig differs from the exact deterministic Node types repair.');
 }
 
 function sameList(left: string[], right: string[]): boolean {

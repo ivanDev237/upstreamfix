@@ -18,6 +18,20 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('P10 rejects an added Node type package bundled with any unrelated devDependency', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply openai@5 migration with UpstreamFix' };
+    const before = '{"name":"client","dependencies":{"openai":"^4.0.0"}}';
+    const after = '{"name":"client","dependencies":{"openai":"^5.0.0"},"devDependencies":{"@types/node":"^20.0.0","evil-pkg":"^1.0.0"}}';
+    expect(() => validatePublishableBundle({ ...proposal, migration: 'openai@5', files: ['package.json'] },
+      { 'package.json': { before, after } }, identity)).toThrow(/package.json|deterministic|unexpected/i);
+  });
+  it('P10 rejects duplicate package manifest keys at the publication boundary', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply openai@5 migration with UpstreamFix' };
+    const before = '{"dependencies":{"openai":"^4.0.0"}}';
+    const after = '{"dependencies":{"openai":"^5.0.0"},"scripts":{},"scripts":{"postinstall":"evil"}}';
+    expect(() => validatePublishableBundle({ ...proposal, migration: 'openai@5', files: ['package.json'] },
+      { 'package.json': { before, after } }, identity)).toThrow(/duplicate|invalid JSON/i);
+  });
   it('Z4 permits a nested executable with an existing name and a moved entry point', () => {
     const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
     const before = JSON.stringify({ lockfileVersion: 3, packages: { '': {}, 'node_modules/mime': { bin: { mime: 'old.js' } } } });
@@ -194,7 +208,7 @@ describe('Action publication boundary', () => {
   it('allows only deterministic OpenAI @types/node and tsconfig node type additions', () => {
     const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply openai@5 migration with UpstreamFix' };
     const beforePackage = '{"dependencies":{"openai":"^4.28.0"},"engines":{"node":">=20"}}';
-    const afterPackage = '{"dependencies":{"openai":"^5.0.0"},"engines":{"node":">=20"},"devDependencies":{"@types/node":"^20.0.0"}}';
+    const afterPackage = '{"dependencies":{"openai":"^5.0.0"},"engines":{"node":">=20"}, "devDependencies":{"@types/node":"^20.0.0"}}';
     const beforeConfig = '{\n  "compilerOptions": {\n    "types": ["jest"]\n  }\n}\n';
     const afterConfig = '{\n  "compilerOptions": {\n    "types": ["jest", "node"]\n  }\n}\n';
     expect(() => validatePublishableBundle({ ...proposal, migration: 'openai@5', files: ['package.json', 'tsconfig.json'], commit, verification: 'passed' }, {
