@@ -28,6 +28,24 @@ it('P3.4 keeps OpenAI disabled in the Action until the reviewed config opts in',
   expect(disabled.find((item) => item.migration === 'openai@5')).toMatchObject({ status: 'none', verification: 'skipped' });
   expect(disabled.find((item) => item.migration === 'openai@5')?.report).toContain('Experimental migration disabled');
 });
+it('does not assume Node 20 in the Action when the client has no declared runtime', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-openai-action-runtime-'));
+  roots.push(root);
+  const client = path.join(root, 'client');
+  await execFile('git', ['init', '-q', client]);
+  await writeFile(path.join(client, '.upstreamfix.yml'), 'experimental:\n  - openai@5\n');
+  await writeFile(path.join(client, 'package.json'), '{"dependencies":{"openai":"^4.0.0"},"scripts":{"typecheck":"tsc --noEmit"}}\n');
+  await writeFile(path.join(client, 'tsconfig.json'), '{"compilerOptions":{"noEmit":true}}\n');
+  await writeFile(path.join(client, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('file_1');\n");
+  await execFile('git', ['add', '.'], { cwd: client });
+  await execFile('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'base'], { cwd: client });
+  const base = (await execFile('git', ['rev-parse', 'HEAD'], { cwd: client })).stdout.trim();
+  const proposals = await prepareProposals(client, path.join(root, 'output'), base, 'workflow_dispatch');
+  const openai = proposals.find((item) => item.migration === 'openai@5');
+  expect(openai?.status).toBe('manual');
+  expect(openai?.report).toContain('engines.node: not declared');
+  expect(openai?.commit).toBeUndefined();
+});
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 it.each(['remote.origin.pushurl', 'url.https://token@evil.invalid/.pushinsteadof'])('X8 rejects checkout credentials hidden in %s', async (key) => {

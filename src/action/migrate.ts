@@ -63,8 +63,7 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
       proposals.push({ ...common, status: 'none', files: [], verification: 'skipped', report: 'This migration is no longer applicable to the repository.' });
       continue;
     }
-    const preview = await runMigration(migration, { cwd: project, dryRun: true, excludedDirectories: config.exclude, registryBefore,
-      ...(migration.id === 'openai@5' ? { nodeRuntime: 20 } : {}) });
+    const preview = await runMigration(migration, { cwd: project, dryRun: true, excludedDirectories: config.exclude, registryBefore });
     if (preview.manual.length > 0) {
       proposals.push({ ...common, status: 'manual', files: [], verification: 'skipped', report: renderMarkdownReport(migration, preview, true) });
       continue;

@@ -95,7 +95,10 @@ export async function writeMigrationOnBranch(
     });
     if (requiresNodeTypesTypecheck(outcome.proposedFiles)
       && !verification.checks.some((check) => check.name.startsWith('Typecheck (') && check.status === 'passed')) {
-      throw new Error('Adding @types/node requires a passing isolated typecheck; no branch or commit was created.');
+      const typecheck = verification.checks.find((check) => check.name.startsWith('Typecheck ('));
+      throw new Error(typecheck?.status === 'failed'
+        ? 'The isolated typecheck failed; no branch or commit was created.'
+        : 'The Node type repair requires a configured isolated typecheck; no branch or commit was created.');
     }
     if (verification.status !== 'passed') {
       throw new Error(`Migration verification did not pass (${verification.status}); no branch or commit was created.${verification.note ? ` ${verification.note}` : ''}`);
