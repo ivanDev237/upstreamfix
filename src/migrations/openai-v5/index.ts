@@ -68,6 +68,8 @@ const REMOVED_UPLOAD_EXPORTS = new Set([
 interface Edit { start: number; end: number; replacement: string; rule: string; before: string; line: number }
 
 function pathParts(node: Node): string[] {
+  const expression = unwrapTransparentExpression(node);
+  if (expression !== node) return pathParts(expression);
   if (Node.isIdentifier(node)) return [node.getText()];
   if (Node.isPropertyAccessExpression(node)) return [...pathParts(node.getExpression()), node.getName()];
   if (Node.isElementAccessExpression(node)) {
@@ -79,11 +81,20 @@ function pathParts(node: Node): string[] {
 }
 
 function rootIdentifier(node: Node): Node | undefined {
+  const expression = unwrapTransparentExpression(node);
+  if (expression !== node) return rootIdentifier(expression);
   if (Node.isIdentifier(node)) return node;
   if (Node.isPropertyAccessExpression(node)) return rootIdentifier(node.getExpression());
   if (Node.isElementAccessExpression(node)) return rootIdentifier(node.getExpression());
   if (Node.isQualifiedName(node)) return rootIdentifier(node.getLeft());
   return undefined;
+}
+
+function unwrapTransparentExpression(node: Node): Node {
+  if (Node.isParenthesizedExpression(node) || Node.isNonNullExpression(node)
+    || Node.isAsExpression(node) || Node.isTypeAssertion(node) || Node.isSatisfiesExpression(node))
+    return unwrapTransparentExpression(node.getExpression());
+  return node;
 }
 
 function isAffectedMethod(method: string): boolean {
@@ -359,6 +370,8 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     if (!changed) break;
   }
   const clientParts = (node: Node): string[] | undefined => {
+    const unwrapped = unwrapTransparentExpression(node);
+    if (unwrapped !== node) return clientParts(unwrapped);
     if (Node.isIdentifier(node)) {
       const symbol = node.getSymbol();
       const scope = symbol ? narrowedClientScopes.get(symbol) : undefined;
