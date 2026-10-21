@@ -107,7 +107,7 @@ export interface BenchResult {
   usages: number;
   migrated: number;
   manual: number;
-  manualFindings?: Array<{ file: string; line: number; reason: string; classification: 'legitimate' | 'not automated' }>;
+  manualFindings?: Array<{ file: string; line: number; reason: string; classification: 'legitimate' | 'not automated' | 'benchmark regression' }>;
   typecheck: CheckResult;
   tests: CheckResult;
   details: string;
@@ -555,7 +555,7 @@ export async function benchmarkOne(
     await clearPackageManagerCredentialFiles(checkout);
 
     const outcome = await analyzeBenchmarkMigration(migration, checkout);
-    result.migrated = outcome.changes.length;
+    result.migrated = countLogicalMigrationGroups(outcome);
     result.manual = outcome.manual.length;
     result.manualFindings = outcome.manual.slice(0, 500).map(({ file, line, reason }) => ({ file, line, reason, classification: classifyOpenAiManual(reason) }));
     result.usages = result.migrated + result.manual;
@@ -585,17 +585,18 @@ export async function benchmarkOne(
     result.tests.after = after.tests;
     if (migration.id === 'openai@5' && addsNodeTypes(outcome.proposedFiles)
       && !after.typecheck.startsWith('pass')) {
-      result.migrated = Math.max(0, result.migrated - 1);
-      result.manual += 1;
+      const failedNodeGroups = countNodeTypesGroups(outcome);
+      result.migrated = Math.max(0, result.migrated - failedNodeGroups);
+      result.manual += failedNodeGroups;
       result.manualFindings = [...(result.manualFindings ?? []), {
         file: 'package.json', line: 1,
-        reason: 'The @types/node addition did not pass the isolated typecheck; it is not counted as automatically migrated.',
+        reason: `The ${failedNodeGroups} logical @types/node repair group(s) did not pass isolated typecheck; they are not counted as automatically migrated.`,
         classification: 'not automated',
       }];
     }
     if (migration.id === 'openai@5') {
       const newCompilerFindings = compilerRegressionFindings(before.typecheck, after.typecheck);
-      result.manualFindings = [...(result.manualFindings ?? []), ...newCompilerFindings.map((finding) => ({ ...finding, classification: classifyOpenAiManual(finding.reason) }))];
+      result.manualFindings = [...(result.manualFindings ?? []), ...newCompilerFindings.map((finding) => ({ ...finding, classification: 'benchmark regression' as const }))];
       result.manual += newCompilerFindings.length;
       result.usages = result.migrated + result.manual;
     }
@@ -660,9 +661,12 @@ export function renderBenchmarkReport(
   const detected = results.reduce((sum, row) => sum + row.usages, 0);
   const migrated = results.reduce((sum, row) => sum + row.migrated, 0);
   const legitimateManual = results.reduce((sum, row) => sum + (row.manualFindings ?? []).filter((finding) => finding.classification === 'legitimate').length, 0);
+  const benchmarkRegressions = results.reduce((sum, row) => sum + (row.manualFindings ?? []).filter((finding) => finding.classification === 'benchmark regression').length, 0);
   const eligible = Math.max(0, detected - legitimateManual);
+  const eligibleWithoutBenchRegressions = Math.max(0, eligible - benchmarkRegressions);
   const rate = detected === 0 ? 'N/A' : `${((migrated / detected) * 100).toFixed(1)}%`;
   const eligibleRate = eligible === 0 ? 'N/A' : `${((migrated / eligible) * 100).toFixed(1)}%`;
+  const eligibleWithoutBenchRegressionsRate = eligibleWithoutBenchRegressions === 0 ? 'N/A' : `${((migrated / eligibleWithoutBenchRegressions) * 100).toFixed(1)}%`;
   const lines = [
     `# ${migration.title} public repository benchmark`, '',
     ...(migration.experimental ? ['> **Experimental migration:** these results are research evidence, not validation for automatic rollout.', ''] : []),
@@ -672,6 +676,7 @@ export function renderBenchmarkReport(
     `Run status: **${completion}** (${results.length} of ${expectedCount} repositories recorded).`, '',
     `Automatic migration rate: **${rate}** (${migrated} of ${detected} detected migration items).`,
     `Criterion rate excluding legitimate manual items: **${eligibleRate}** (${migrated} of ${eligible} eligible items; ${legitimateManual} legitimate manual items excluded).`,
+    `Rate excluding benchmark-generated compiler regressions as well: **${eligibleWithoutBenchRegressionsRate}** (${migrated} of ${eligibleWithoutBenchRegressions} items; ${benchmarkRegressions} generated regressions excluded separately).`,
     'The denominator counts migration change groups plus manual findings, including potential edits withheld in files with manual findings and up to five new compiler diagnostics per previously passing project; it does not count individual API callsites. The OpenAI benchmark confirms Node.js 20 for its disposable Node 24 container only; it does not establish any repository’s production runtime.', '',
     '| Repository | Pinned commit | Status | Detected items | Migrated | Manual | Types before | Types after | Tests before | Tests after | Details |',
     '|---|---|---:|---:|---:|---:|---|---|---|---|---|',
@@ -692,6 +697,15 @@ function classifyOpenAiManual(reason: string): 'legitimate' | 'not automated' {
   if (/rejects optional Zod response fields|tool message content may be a ChatCompletionContentPartText\[\]|Stream<ChatCompletionChunk>.*not assignable to parameter of type 'Response \| AsyncIterableOpenAIStreamReturnTypes'/.test(reason))
     return 'legitimate';
   return 'not automated';
+}
+
+/** Node type setup is one logical repair per owning package, even when it edits tsconfig, package.json and a lockfile. */
+export function countNodeTypesGroups(outcome: Pick<RunOutcome, 'changes'>): number {
+  return new Set(outcome.changes.filter((change) => change.rule === 'node-types').map((change) => path.dirname(path.resolve(change.file)))).size;
+}
+
+export function countLogicalMigrationGroups(outcome: Pick<RunOutcome, 'changes'>): number {
+  return outcome.changes.filter((change) => change.rule !== 'node-types').length + countNodeTypesGroups(outcome);
 }
 
 function addsNodeTypes(files: readonly { relativePath: string; before: string; after: string }[]): boolean {

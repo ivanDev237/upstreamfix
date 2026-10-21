@@ -4,7 +4,7 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, compilerRegressionFindings, confirmBenchmarkNodeRuntime, containerEnvArgs, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkManifest, readBenchmarkRepos, renderBenchmarkReport, requiresRuntimeReviewFromNotes, hasVerificationRegression, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
+import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, compilerRegressionFindings, confirmBenchmarkNodeRuntime, containerEnvArgs, countLogicalMigrationGroups, countNodeTypesGroups, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkManifest, readBenchmarkRepos, renderBenchmarkReport, requiresRuntimeReviewFromNotes, hasVerificationRegression, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
 
 it('P3.4 marks the LUMEN pass-to-fail typecheck as needing review', () => {
   expect(hasVerificationRegression('pass', 'fail: src/components/ErrorBoundary.tsx TS2580')).toBe(true);
@@ -14,6 +14,17 @@ it('does not count a benchmark-only Node types repair as an automatic migration'
   const source = await readFile(new URL('../scripts/benchmark.ts', import.meta.url), 'utf8');
   expect(source).not.toMatch(/tryNodeTypesRepair|acceptedNodeTypesRepair/);
   expect(source).not.toMatch(/result\.migrated\s*\+=\s*1/);
+});
+it('counts Node type setup once per package, not once per edited file', () => {
+  const outcome = { changes: [
+    { file: '/repo/package.json', rule: 'node-types' },
+    { file: '/repo/tsconfig.json', rule: 'node-types' },
+    { file: '/repo/package-lock.json', rule: 'node-types' },
+    { file: '/repo/packages/worker/package.json', rule: 'node-types' },
+    { file: '/repo/src/a.ts', rule: 'rename' },
+  ] } as Parameters<typeof countLogicalMigrationGroups>[0];
+  expect(countNodeTypesGroups(outcome)).toBe(2);
+  expect(countLogicalMigrationGroups(outcome)).toBe(3);
 });
 it('records a newly failing typecheck at its source line without claiming the SDK caused it', () => {
   const findings = compilerRegressionFindings('pass', "fail: src/conversation.ts(49,32): error TS2339: Property 'chat' does not exist on type 'Beta'.");
@@ -127,14 +138,17 @@ describe('public repository benchmark helpers', () => {
         manualFindings: [
           { file: 'src/a.ts', line: 1, reason: 'Human choice', classification: 'legitimate' },
           { file: 'src/b.ts', line: 2, reason: 'Still automatable', classification: 'not automated' },
+          { file: 'src/generated.ts', line: 3, reason: 'Compiler regression produced by benchmark fixture', classification: 'benchmark regression' },
         ] },
     ]);
 
     expect(report).toContain('33.3%');
     expect(report).toContain('1 of 3 detected migration items');
     expect(report).toContain('Criterion rate excluding legitimate manual items: **50.0%** (1 of 2 eligible items; 1 legitimate manual items excluded).');
+    expect(report).toContain('Rate excluding benchmark-generated compiler regressions as well: **100.0%** (1 of 1 items; 1 generated regressions excluded separately).');
     expect(report).toContain('| sample | src/a.ts | 1 | legitimate | Human choice |');
     expect(report).toContain('| sample | src/b.ts | 2 | not automated | Still automatable |');
+    expect(report).toContain('| sample | src/generated.ts | 3 | benchmark regression | Compiler regression produced by benchmark fixture |');
   });
   it('Z3 shows the file, line and reason for each benchmark manual finding', () => {
     const report = renderBenchmarkReport([{
