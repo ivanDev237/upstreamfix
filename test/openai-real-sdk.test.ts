@@ -93,6 +93,12 @@ for (const message of runner.messages) {
     };
     await install('4.20.1');
     await check();
+    const project = new Project({ skipAddingFilesFromTsConfig: true });
+    project.addSourceFileAtPath(path.join(cwd, 'index.ts'));
+    const migration = openaiV5.transform(project);
+    expect(migration.manual).toEqual([]);
+    expect(migration.fileUpdates).toHaveLength(1);
+    await writeFile(migration.fileUpdates![0]!.file, migration.fileUpdates![0]!.contents);
     await install('5.0.0');
     let failedOutput = '';
     try { await check(); }
