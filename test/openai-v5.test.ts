@@ -386,8 +386,6 @@ client.beta.threads.runs.retrieve(threadId, runId);
 
   it.each([
     ['a tsconfig path alias', "import { client } from '@/lib/openai'; client.files.del('f');"],
-    ['AzureOpenAI', "import { AzureOpenAI } from 'openai'; const client = new AzureOpenAI({ endpoint: 'https://example.invalid', apiKey: 'x' }); client.files.del('f');"],
-    ['a typed Runs subresource', "import OpenAI from 'openai'; declare const runs: OpenAI.Beta.Threads.Runs; runs.retrieve(threadId, runId);"],
     ['computed method access', "import OpenAI from 'openai'; const client = new OpenAI(); client['files']['del']('f');"],
     ['a bound deleted method', "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del.call(client.files, 'f');"],
     ['an applied changed method', "import OpenAI from 'openai'; const client = new OpenAI(); client.beta.threads.runs.retrieve.apply(client.beta.threads.runs, [threadId, runId]);"],
@@ -395,6 +393,18 @@ client.beta.threads.runs.retrieve(threadId, runId);
     const outcome = migrate(source);
     expect(outcome.fileUpdates).toEqual([]);
     expect(outcome.manual.map((item) => item.reason).join('\n')).toMatch(/receiver|récepteur|suivi|manual/i);
+  });
+
+  it('tracks AzureOpenAI and typed OpenAI Runs subresources', () => {
+    const outcome = migrate(`import { AzureOpenAI, type OpenAI } from 'openai';
+const client = new AzureOpenAI({ endpoint: 'https://example.invalid', apiKey: 'x' });
+client.files.del('f');
+declare const runs: OpenAI.Beta.Threads.Runs;
+runs.retrieve(threadId, runId);
+`);
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("client.files.delete('f')");
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('runs.retrieve(runId, { thread_id: threadId })');
   });
 
   it('reports semantic changes without guessing a rewrite', () => {
