@@ -364,9 +364,16 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       }
     }
     const moved = MOVED_IMPORTS.get(specifier);
-    if (moved && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper))
+    if (moved && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper)) {
       addEdit(edits, file, declaration.getModuleSpecifier(), `'${moved}'`, 'moved-import');
-    else if (specifier === 'openai/shims' || specifier === 'openai/src' || specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
+      if (specifier === 'openai/resources/beta/threads/messages/messages') {
+        for (const entry of declaration.getNamedImports()) {
+          if (entry.getName() !== 'MessageContentText') continue;
+          const localName = entry.getAliasNode()?.getText() ?? entry.getName();
+          addEdit(edits, file, entry, `TextContentBlock as ${localName}`, 'moved-import');
+        }
+      }
+    } else if (specifier === 'openai/shims' || specifier === 'openai/src' || specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
       addManual(result, file, declaration, 'OpenAI v5 removes this private or shim import; review the replacement and runtime configuration.');
     if (specifier.startsWith('openai/resources/') && declaration.getNamedImports().some((entry) => /Page$/.test(entry.getName()) && !declaration.isTypeOnly() && !entry.isTypeOnly()))
       addManual(result, file, declaration, 'OpenAI v5 converts resource-specific Page classes to type aliases; review runtime uses before upgrading.');
