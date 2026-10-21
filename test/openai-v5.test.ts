@@ -452,16 +452,17 @@ export const result = openai.beta.chat.completions.parse({ model: 'gpt-4o', mess
     expect(outcome.manual.some((item) => item.reason.includes('fileFromPath'))).toBe(true);
   });
 
-  it('keeps the deprecated deep beta resource subpath and renames its moved type', () => {
+  it('moves the removed deep beta resource module and renames its moved type', () => {
     const outcome = migrate("import type { Message } from 'openai/resources/beta/threads/messages/messages';\nexport type Saved = Message;\n");
     expect(outcome.manual).toEqual([]);
-    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("from 'openai/resources/beta/threads/messages'");
   });
 
   it('renames the moved MessageContentText type while preserving its local binding', () => {
     const outcome = migrate("import type { MessageContentText } from 'openai/resources/beta/threads/messages/messages';\nexport type Saved = MessageContentText;\n");
     expect(outcome.manual).toEqual([]);
     expect(outcome.fileUpdates?.[0]?.contents).toContain('TextContentBlock as MessageContentText');
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("from 'openai/resources/beta/threads/messages'");
     expect(outcome.fileUpdates?.[0]?.contents).toContain('export type Saved = MessageContentText');
   });
 
@@ -469,12 +470,13 @@ export const result = openai.beta.chat.completions.parse({ model: 'gpt-4o', mess
     const outcome = migrate("import { type MessageContentText as TextPart, type ThreadMessage as LegacyMessage, type MessageContentImageFile as ImagePart } from 'openai/resources/beta/threads/messages/messages';\nexport type Saved = [TextPart, LegacyMessage, ImagePart];\n");
     const output = outcome.fileUpdates?.[0]?.contents ?? '';
     expect(outcome.manual).toEqual([]);
-    expect(output).toContain("import { type TextContentBlock as TextPart, type Message as LegacyMessage, type ImageFileContentBlock as ImagePart } from 'openai/resources/beta/threads/messages/messages'");
+    expect(output).toContain("import { type TextContentBlock as TextPart, type Message as LegacyMessage, type ImageFileContentBlock as ImagePart } from 'openai/resources/beta/threads/messages'");
   });
 
   it('renames moved message types referenced through a namespace import', () => {
     const outcome = migrate("import * as Messages from 'openai/resources/beta/threads/messages/messages';\nexport type Saved = Messages.MessageContentText | Messages.ThreadMessage | Messages.MessageContentImageFile;\n");
     const output = outcome.fileUpdates?.[0]?.contents ?? '';
+    expect(output).toContain("from 'openai/resources/beta/threads/messages'");
     expect(output).toContain('Messages.TextContentBlock');
     expect(output).toContain('Messages.Message');
     expect(output).toContain('Messages.ImageFileContentBlock');
@@ -487,13 +489,13 @@ export const result = openai.beta.chat.completions.parse({ model: 'gpt-4o', mess
     expect(output).toContain('export type { TextContentBlock as MessageContentText');
     expect(output).toContain('Message as ThreadMessage');
     expect(output).toContain('ImageFileContentBlock as MessageContentImageFile');
-    expect(output).toContain("from 'openai/resources/beta/threads/messages/messages'");
+    expect(output).toContain("from 'openai/resources/beta/threads/messages'");
   });
 
   it('renames message types in import type queries', () => {
     const outcome = migrate("export type Saved = import('openai/resources/beta/threads/messages/messages').ThreadMessage;\n");
     const output = outcome.fileUpdates?.[0]?.contents ?? '';
-    expect(output).toContain("import('openai/resources/beta/threads/messages/messages').Message");
+    expect(output).toContain("import('openai/resources/beta/threads/messages').Message");
     expect(output).not.toContain('ThreadMessage');
   });
 
@@ -783,6 +785,12 @@ client.chat.completions.runTools({tools: []}).on('functionCall');
     const source = kind === 'import' ? "import type { Stream } from 'openai/streaming';" : `${kind}('openai/streaming');`;
     const outcome = migrate(`${source}\n`);
     expect(outcome.fileUpdates).toEqual([]);
+  });
+
+  it('holds a necessary deep import move when the old path also names a mock', () => {
+    const outcome = migrate("import type { MessageContentText } from 'openai/resources/beta/threads/messages/messages';\nvi.mock('openai/resources/beta/threads/messages/messages');\n");
+    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual.some((item) => item.reason.includes('old specifier also appears elsewhere'))).toBe(true);
   });
 
   it.each([

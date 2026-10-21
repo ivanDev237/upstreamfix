@@ -27,9 +27,11 @@ const DELETED_METHODS = new Set([
   'beta.assistants.del', 'beta.threads.del', 'beta.threads.messages.del',
   'responses.del', 'evals.del', 'evals.runs.del', 'containers.del', 'containers.files.del',
 ]);
-// v5 keeps these public subpaths as deprecated re-exports. Moving them is
-// cosmetic and can silently detach test mocks, declaration shims and type imports.
-const MOVED_IMPORTS = new Map<string, string>();
+// Most deprecated public subpaths remain exported in v5 and must stay stable.
+// This nested v4 message module is the exception: v5 flattens it to messages.ts.
+const MOVED_IMPORTS = new Map<string, string>([
+  ['openai/resources/beta/threads/messages/messages', 'openai/resources/beta/threads/messages'],
+]);
 const MOVED_MESSAGE_TYPES = new Map([
   ['MessageContentText', 'TextContentBlock'],
   ['ThreadMessage', 'Message'],
@@ -101,6 +103,10 @@ function unwrapTransparentExpression(node: Node): Node {
 
 function isAffectedMethod(method: string): boolean {
   return DELETED_METHODS.has(method) || CHANGED_PATH_METHODS.has(method) || SAFE_NAMED_PATH_REWRITES.has(method);
+}
+
+function hasDuplicateMovedSpecifier(file: SourceFile, specifier: string): boolean {
+  return file.getFullText().split(specifier).length > 2;
 }
 
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
@@ -642,6 +648,10 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     }
     const moved = MOVED_IMPORTS.get(specifier);
     const isMessageModule = specifier === 'openai/resources/beta/threads/messages/messages';
+    if (moved && hasDuplicateMovedSpecifier(file, specifier)) {
+      addManual(result, file, declaration, `OpenAI v5 moved this module to ${moved}, but the old specifier also appears elsewhere in the file (for example a mock or declaration); update every reference together manually.`);
+      continue;
+    }
     if (moved && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper)) {
       addEdit(edits, file, declaration.getModuleSpecifier(), `'${moved}'`, 'moved-import');
     }
@@ -704,10 +714,14 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       }
     }
     const moved = specifier ? MOVED_IMPORTS.get(specifier) : undefined;
+    if (moved && hasDuplicateMovedSpecifier(file, specifier!)) {
+      addManual(result, file, declaration, `OpenAI v5 moved this module to ${moved}, but the old specifier also appears elsewhere in the file; update every reference together manually.`);
+      continue;
+    }
     if (moved && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper) && declaration.getModuleSpecifier()) {
       addEdit(edits, file, declaration.getModuleSpecifier()!, `'${moved}'`, 'moved-import');
     }
-    if (specifier === 'openai/resources/beta/threads/messages/messages') {
+    if (MOVED_IMPORTS.has(specifier ?? '')) {
       for (const entry of declaration.getNamedExports()) {
         const renamed = MOVED_MESSAGE_TYPES.get(entry.getName());
         if (!renamed) continue;
@@ -725,6 +739,10 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     const specifier = rawSpecifier.slice(1, -1);
     const moved = MOVED_IMPORTS.get(specifier);
     if (moved) {
+      if (hasDuplicateMovedSpecifier(file, specifier)) {
+        addManual(result, file, importType, `OpenAI v5 moved this module to ${moved}, but the old specifier also appears elsewhere in the file; update every reference together manually.`);
+        continue;
+      }
       const quote = rawSpecifier[0];
       addEdit(edits, file, argument, `${quote}${moved}${quote}`, 'moved-import');
     }
@@ -781,7 +799,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     if (Node.isPropertyAccessExpression(expression) && expression.getName() === 'pipe'
       && file.getFullText().includes('.asResponse()') && expression.getExpression().getText().endsWith('.body'))
       addManual(result, file, call, 'OpenAI v5 Web response body is a ReadableStream; use a deliberate Web-to-Node stream conversion.');
-    if (expression.getText() === 'require') {
+    if (expression.getText() === 'require' || expression.getKind() === SyntaxKind.ImportKeyword) {
       const argument = call.getArguments()[0];
       const specifier = argument?.getText().replace(/^['"]|['"]$/g, '');
       const moved = specifier ? MOVED_IMPORTS.get(specifier) : undefined;
@@ -790,7 +808,9 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       const hasRemovedUploadsExport = specifier === 'openai/uploads' && binding && Node.isObjectBindingPattern(binding)
         && binding.getElements().some((element) => REMOVED_UPLOAD_EXPORTS.has(
           element.getPropertyNameNode()?.getText() ?? element.getNameNode().getText()));
-      if (moved && argument && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper))
+      if (moved && argument && hasDuplicateMovedSpecifier(file, specifier!)) {
+        addManual(result, file, call, `OpenAI v5 moved this module to ${moved}, but the old specifier also appears elsewhere in the file; update every reference together manually.`);
+      } else if (moved && argument && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper))
         addEdit(edits, file, argument, `'${moved}'`, 'moved-import');
       if (specifier === 'openai/uploads') {
         if (binding && Node.isObjectBindingPattern(binding)) {
