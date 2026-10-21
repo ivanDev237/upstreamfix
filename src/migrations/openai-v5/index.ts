@@ -1,4 +1,5 @@
 import { Node, SyntaxKind, type Project, type SourceFile, type Symbol as MorphSymbol } from 'ts-morph';
+import { resolve } from 'node:path';
 import type { Change, ManualItem, Migration, MigrationResult, PackageManifest } from '../../core/types.js';
 import { guaranteesNodeMajor } from '../../core/node-range.js';
 
@@ -83,6 +84,49 @@ function addEdit(edits: Edit[], file: SourceFile, node: Node, replacement: strin
     line: file.getLineAndColumnAtPos(node.getStart()).line });
 }
 
+function directlyConstructedOpenAIExports(project: Project): Map<string, Set<string>> {
+  const exported = new Map<string, Set<string>>();
+  for (const source of project.getSourceFiles()) {
+    const constructors = new Set<string>();
+    for (const declaration of source.getImportDeclarations()) {
+      if (declaration.getModuleSpecifierValue() !== 'openai') continue;
+      const defaultImport = declaration.getDefaultImport();
+      if (defaultImport) constructors.add(defaultImport.getText());
+      for (const named of declaration.getNamedImports()) {
+        if (named.getName() === 'OpenAI') constructors.add(named.getAliasNode()?.getText() ?? 'OpenAI');
+      }
+    }
+    if (constructors.size === 0) continue;
+    for (const variable of source.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+      if (!Node.isIdentifier(variable.getNameNode())) continue;
+      const statement = variable.getParentIfKind(SyntaxKind.VariableDeclarationList)
+        ?.getParentIfKind(SyntaxKind.VariableStatement);
+      if (!statement?.getModifiers().some((modifier) => modifier.getKind() === SyntaxKind.ExportKeyword)) continue;
+      const initializer = variable.getInitializer();
+      if (!initializer || !Node.isNewExpression(initializer) || !Node.isIdentifier(initializer.getExpression())
+        || !constructors.has(initializer.getExpression().getText())) continue;
+      const names = exported.get(source.getFilePath()) ?? new Set<string>();
+      names.add(variable.getName());
+      exported.set(source.getFilePath(), names);
+    }
+  }
+  return exported;
+}
+
+function resolveLocalImport(file: SourceFile, specifier: string): SourceFile | undefined {
+  const resolved = file.getImportDeclarations().find((declaration) =>
+    declaration.getModuleSpecifierValue() === specifier)?.getModuleSpecifierSourceFile();
+  if (resolved) return resolved;
+  if (!specifier.startsWith('.')) return undefined;
+  const base = resolve(file.getDirectoryPath(), specifier);
+  for (const candidate of [base, `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.jsx`,
+    resolve(base, 'index.ts'), resolve(base, 'index.tsx'), resolve(base, 'index.js'), resolve(base, 'index.jsx')]) {
+    const source = file.getProject().getSourceFile(candidate);
+    if (source) return source;
+  }
+  return undefined;
+}
+
 function isStablePathArgument(node: Node): boolean {
   if (Node.isNonNullExpression(node)) return Node.isIdentifier(node.getExpression());
   // The SDK's Run.id is a plain response field. Restrict this exception to a
@@ -94,7 +138,7 @@ function isStablePathArgument(node: Node): boolean {
     || node.getKind() === SyntaxKind.NullKeyword;
 }
 
-function transformFile(file: SourceFile, result: MigrationResult): void {
+function transformFile(file: SourceFile, result: MigrationResult, exportedClients: Map<string, Set<string>>): void {
   const imported = new Set<string>();
   const edits: Edit[] = [];
   const typedSource = /\.[cm]?tsx?$/.test(file.getFilePath());
@@ -144,6 +188,17 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     .flatMap((declaration) => declaration.getNamedImports()
       .filter((entry) => entry.getName() === 'APIError')
       .map((entry) => entry.getAliasNode()?.getText() ?? 'APIError')));
+  for (const declaration of file.getImportDeclarations()) {
+    const source = resolveLocalImport(file, declaration.getModuleSpecifierValue());
+    if (!source) continue;
+    const exportedNames = exportedClients.get(source.getFilePath());
+    if (!exportedNames) continue;
+    for (const named of declaration.getNamedImports()) {
+      if (!exportedNames.has(named.getName())) continue;
+      const symbol = (named.getAliasNode() ?? named.getNameNode()).getSymbol();
+      if (symbol) clients.add(symbol);
+    }
+  }
   const classFields = new Map<Node, Set<string>>();
   const clientFactorySymbols = new Set<MorphSymbol>();
   const isClientType = (type: Node | undefined): boolean => {
@@ -514,7 +569,8 @@ export const openaiV5: Migration = {
   rules: ['del-to-delete', 'beta-chat', 'moved-import'],
   transform(project: Project): MigrationResult {
     const result: MigrationResult = { changes: [], manual: [], filesChanged: [], fileUpdates: [] };
-    for (const file of project.getSourceFiles()) transformFile(file, result);
+    const exportedClients = directlyConstructedOpenAIExports(project);
+    for (const file of project.getSourceFiles()) transformFile(file, result, exportedClients);
     return result;
   },
   updateManifest(manifest: PackageManifest): string[] {
