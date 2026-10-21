@@ -15,6 +15,10 @@ const CHANGED_PATH_METHODS = new Set([
   'evals.runs.cancel', 'evals.runs.outputItems.retrieve', 'evals.runs.outputItems.list',
   'containers.files.retrieve', 'containers.files.delete', 'containers.files.content.retrieve',
 ]);
+const SAFE_NAMED_PATH_REWRITES = new Map([
+  ['beta.threads.runs.retrieve', 'thread_id'],
+  ['beta.threads.messages.retrieve', 'thread_id'],
+]);
 const DELETED_METHODS = new Set([
   'chat.completions.del', 'files.del', 'models.del',
   'fineTuning.checkpoints.permissions.del', 'vectorStores.del', 'vectorStores.files.del',
@@ -76,6 +80,12 @@ function addManual(result: MigrationResult, file: SourceFile, node: Node, reason
 function addEdit(edits: Edit[], file: SourceFile, node: Node, replacement: string, rule: string): void {
   edits.push({ start: node.getStart(), end: node.getEnd(), before: node.getText(), replacement, rule,
     line: file.getLineAndColumnAtPos(node.getStart()).line });
+}
+
+function isStablePathArgument(node: Node): boolean {
+  return Node.isIdentifier(node) || Node.isStringLiteral(node) || Node.isNumericLiteral(node)
+    || node.getKind() === SyntaxKind.TrueKeyword || node.getKind() === SyntaxKind.FalseKeyword
+    || node.getKind() === SyntaxKind.NullKeyword;
 }
 
 function transformFile(file: SourceFile, result: MigrationResult): void {
@@ -331,6 +341,9 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     }
     const parts = clientParts(expression);
     if (!parts || parts.length < 2) {
+      const possibleMethod = pathParts(expression).slice(1).join('.');
+      if (SAFE_NAMED_PATH_REWRITES.has(possibleMethod))
+        addManual(result, file, call, 'OpenAI v5 uses named path parameters here, but this client receiver is not tracked safely.');
       const root = rootIdentifier(expression);
       if (root?.getSymbol() && complexClients.has(root.getSymbol()!)
         && (expression.getName() === 'del' || expression.getText().includes('.beta.chat.')))
@@ -338,6 +351,20 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       continue;
     }
     const method = parts.join('.');
+    const namedPathKey = SAFE_NAMED_PATH_REWRITES.get(method);
+    if (namedPathKey) {
+      const args = call.getArguments();
+      const safeShape = args.length === 2 && args.every(isStablePathArgument)
+        && /^,\s*$/.test(file.getFullText().slice(args[0]!.getEnd(), args[1]!.getStart()));
+      if (safeShape) {
+        addEdit(edits, file, call,
+          `${expression.getText()}(${args[1]!.getText()}, { ${namedPathKey}: ${args[0]!.getText()} })`,
+          'named-path-parameters');
+      } else {
+        addManual(result, file, call, 'OpenAI v5 uses named path parameters here; argument count, spread, or expression order is ambiguous.');
+      }
+      continue;
+    }
     if (call.getArguments().some((argument) => Node.isCallExpression(argument)
       && argument.getExpression().getText() === 'encodeURIComponent'))
       addManual(result, file, call, 'OpenAI v5 URI-encodes path parameters itself; remove only deliberate pre-encoding after reviewing the endpoint.');
