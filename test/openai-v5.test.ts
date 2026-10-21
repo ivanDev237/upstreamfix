@@ -334,6 +334,38 @@ export const result = openai.beta.chat.completions.parse({ model: 'gpt-4o', mess
     expect(outcome.fileUpdates?.[0]?.contents).toContain('export type Saved = MessageContentText');
   });
 
+  it('preserves inline type modifiers and renames all moved message type imports', () => {
+    const outcome = migrate("import { type MessageContentText as TextPart, type ThreadMessage as LegacyMessage, type MessageContentImageFile as ImagePart } from 'openai/resources/beta/threads/messages/messages';\nexport type Saved = [TextPart, LegacyMessage, ImagePart];\n");
+    const output = outcome.fileUpdates?.[0]?.contents ?? '';
+    expect(outcome.manual).toEqual([]);
+    expect(output).toContain("import { type TextContentBlock as TextPart, type Message as LegacyMessage, type ImageFileContentBlock as ImagePart } from 'openai/resources/beta/threads/messages'");
+  });
+
+  it('renames moved message types referenced through a namespace import', () => {
+    const outcome = migrate("import * as Messages from 'openai/resources/beta/threads/messages/messages';\nexport type Saved = Messages.MessageContentText | Messages.ThreadMessage | Messages.MessageContentImageFile;\n");
+    const output = outcome.fileUpdates?.[0]?.contents ?? '';
+    expect(output).toContain('Messages.TextContentBlock');
+    expect(output).toContain('Messages.Message');
+    expect(output).toContain('Messages.ImageFileContentBlock');
+    expect(output).not.toContain('Messages.ThreadMessage');
+  });
+
+  it('renames moved message types in public re-exports', () => {
+    const outcome = migrate("export type { MessageContentText, ThreadMessage, MessageContentImageFile } from 'openai/resources/beta/threads/messages/messages';\n");
+    const output = outcome.fileUpdates?.[0]?.contents ?? '';
+    expect(output).toContain('export type { TextContentBlock as MessageContentText');
+    expect(output).toContain('Message as ThreadMessage');
+    expect(output).toContain('ImageFileContentBlock as MessageContentImageFile');
+    expect(output).toContain("from 'openai/resources/beta/threads/messages'");
+  });
+
+  it('renames message types in import type queries', () => {
+    const outcome = migrate("export type Saved = import('openai/resources/beta/threads/messages/messages').ThreadMessage;\n");
+    const output = outcome.fileUpdates?.[0]?.contents ?? '';
+    expect(output).toContain("import('openai/resources/beta/threads/messages').Message");
+    expect(output).not.toContain('ThreadMessage');
+  });
+
   it.each([
     "export { fileFromPath } from 'openai/uploads';\n",
     "const { fileFromPath: upload } = require('openai/uploads');\nupload('/tmp/x');\n",
