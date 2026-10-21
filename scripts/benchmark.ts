@@ -649,7 +649,10 @@ export function renderBenchmarkReport(
 ): string {
   const detected = results.reduce((sum, row) => sum + row.usages, 0);
   const migrated = results.reduce((sum, row) => sum + row.migrated, 0);
+  const manual = results.reduce((sum, row) => sum + row.manual, 0);
+  const eligible = Math.max(0, detected - manual);
   const rate = detected === 0 ? 'N/A' : `${((migrated / detected) * 100).toFixed(1)}%`;
+  const eligibleRate = eligible === 0 ? 'N/A' : `${((migrated / eligible) * 100).toFixed(1)}%`;
   const lines = [
     `# ${migration.title} public repository benchmark`, '',
     ...(migration.experimental ? ['> **Experimental migration:** these results are research evidence, not validation for automatic rollout.', ''] : []),
@@ -658,6 +661,7 @@ export function renderBenchmarkReport(
     ...((process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA) && /^[0-9a-f]{40}$/.test(process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA ?? '') ? [`Tool SHA: \`${process.env.UPSTREAMFIX_SOURCE_SHA ?? process.env.GITHUB_SHA}\``, ''] : []),
     `Run status: **${completion}** (${results.length} of ${expectedCount} repositories recorded).`, '',
     `Automatic migration rate: **${rate}** (${migrated} of ${detected} detected migration items).`,
+    `Automatic rate excluding manual-review items: **${eligibleRate}** (${migrated} of ${eligible} eligible items).`,
     'The denominator counts migration change groups plus manual findings, including potential edits withheld in files with manual findings and up to five new compiler diagnostics per previously passing project; it does not count individual API callsites. The OpenAI benchmark confirms Node.js 20 for its disposable Node 24 container only; it does not establish any repository’s production runtime.', '',
     '| Repository | Pinned commit | Status | Detected items | Migrated | Manual | Types before | Types after | Tests before | Tests after | Details |',
     '|---|---|---:|---:|---:|---:|---|---|---|---|---|',
