@@ -91,7 +91,7 @@ for (const message of runner.messages) {
         throw error;
       }
     };
-    await install('4.104.0');
+    await install('4.20.1');
     await check();
     await install('5.0.0');
     let failedOutput = '';
