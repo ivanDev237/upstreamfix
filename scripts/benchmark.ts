@@ -13,6 +13,7 @@ import { newTypeScriptDiagnostics, parseTypeScriptDiagnostics } from '../src/cor
 import { runMigration, type RunOutcome } from '../src/core/runner.js';
 import { applyProposedFiles, readRegularFile } from '../src/core/verify.js';
 import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from '../src/core/project-discovery.js';
+import { guaranteesNodeMajor } from '../src/core/node-range.js';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 import { migrations } from '../src/migrations/index.js';
 
@@ -398,6 +399,42 @@ export function confirmBenchmarkNodeRuntime(manifest: PackageManifest, migration
   return 'Node.js >=20 was declared in the disposable benchmark copy after explicit benchmark-only confirmation of its Node 24 container; the repository production runtime remains unverified.';
 }
 
+export interface NodeTypesRepairResult {
+  accepted: boolean;
+  previousVersion: string | undefined;
+  proposedVersion: '^20.17.0';
+}
+
+/** Add Node Web platform declarations only when the target runtime is Node 20+ and the full typecheck accepts them. */
+export async function tryNodeTypesRepair(
+  manifestPath: string,
+  verifyTypecheck: () => Promise<string>,
+): Promise<NodeTypesRepairResult> {
+  const original = await readRegularFile(manifestPath);
+  const manifest = await readBenchmarkManifest(manifestPath);
+  const proposedVersion = '^20.17.0' as const;
+  const previousVersion = manifest.devDependencies?.['@types/node'] ?? manifest.dependencies?.['@types/node'];
+  if (!guaranteesNodeMajor(manifest.engines?.node ?? '', 20))
+    return { accepted: false, previousVersion, proposedVersion };
+
+  const currentMajor = /^(?:\^|~|>=)?\s*(\d+)/.exec(previousVersion ?? '')?.[1];
+  if (previousVersion && (currentMajor === undefined || Number(currentMajor) >= 20))
+    return { accepted: false, previousVersion, proposedVersion };
+
+  if (manifest.dependencies?.['@types/node']) {
+    manifest.dependencies['@types/node'] = proposedVersion;
+  } else {
+    manifest.devDependencies = { ...manifest.devDependencies, '@types/node': proposedVersion };
+  }
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  try {
+    if (await verifyTypecheck() === 'pass')
+      return { accepted: true, previousVersion, proposedVersion };
+  } catch { /* A failed install or typecheck rejects the candidate fix. */ }
+  await writeFile(manifestPath, original, 'utf8');
+  return { accepted: false, previousVersion, proposedVersion };
+}
+
 async function ensureTargetMajorInBenchmarkCopy(root: string, packageDirs: string[], migration: Migration): Promise<string[]> {
   const notes: string[] = [];
   for (const directory of packageDirs) {
@@ -580,7 +617,40 @@ export async function benchmarkOne(
       'The original lockfiles were retained in the disposable checkout and updated by the selected package manager for post-migration checks.',
     ].filter(Boolean))].join(' ');
     await installDependencies(repo, checkout, installLocations, home, 'post-migration', memoryMb);
-    const after = await runPhaseChecks(repo, checkout, packageDirs, repo.typecheckScript, repo.testScript, home, memoryMb);
+    let after = await runPhaseChecks(repo, checkout, packageDirs, repo.typecheckScript, repo.testScript, home, memoryMb);
+    let acceptedNodeTypesRepair = false;
+    const hasRepairableTypeEnvironmentError = /TS2580[^;\n]*Cannot find name ['`]process['`]|TS2304[^;\n]*(?:RequestInit|Headers|Blob|File|Response|FormData|AbortController)/
+      .test(after.typecheck) && before.typecheck === 'pass';
+    if (migration.id === 'openai@5' && hasRepairableTypeEnvironmentError) {
+      for (const packageDir of packageDirs) {
+        const manifestPath = path.join(packageDir, 'package.json');
+        const manifest = await readBenchmarkManifest(manifestPath).catch(() => undefined);
+        const declaresOpenAiV5 = manifest && (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+          .some((section) => isSupportedSourceMajor(manifest[section]?.openai ?? '', 5));
+        if (!declaresOpenAiV5) continue;
+        const repair = await tryNodeTypesRepair(manifestPath, async () => {
+          await installDependencies(repo, checkout, installLocations, home, 'post-migration', memoryMb);
+          return (await runPhaseChecks(repo, checkout, packageDirs, repo.typecheckScript, repo.testScript, home, memoryMb)).typecheck;
+        });
+        if (repair.accepted) {
+          acceptedNodeTypesRepair = true;
+          after = await runPhaseChecks(repo, checkout, packageDirs, repo.typecheckScript, repo.testScript, home, memoryMb);
+          result.migrated += 1;
+          result.details += ` Added @types/node ${repair.proposedVersion} in the disposable benchmark copy; the target typecheck passed.`;
+          result.manualFindings = (result.manualFindings ?? []).filter((finding) =>
+            !/OpenAI v5 requires Web fetch types|OpenAI v4 may have supplied @types\/node/.test(finding.reason));
+          result.manual = result.manualFindings.length;
+          result.usages = result.migrated + result.manual;
+          break;
+        }
+      }
+      if (!acceptedNodeTypesRepair) {
+        // A rejected candidate may have changed the generated lockfile; restore
+        // dependency state from the unchanged package manifest before reporting.
+        await installDependencies(repo, checkout, installLocations, home, 'post-migration', memoryMb);
+        after = await runPhaseChecks(repo, checkout, packageDirs, repo.typecheckScript, repo.testScript, home, memoryMb);
+      }
+    }
     result.typecheck.after = after.typecheck;
     result.tests.after = after.tests;
     if (migration.id === 'openai@5') {
