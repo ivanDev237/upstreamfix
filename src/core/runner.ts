@@ -427,6 +427,10 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
     } catch { /* Missing or invalid configuration cannot establish the active compiler environment. */ }
     const nodeTypes = manifest.devDependencies?.['@types/node'] ?? manifest.dependencies?.['@types/node'];
     const nodeTypesMajor = /^\s*[~^]?(\d+)/.exec(nodeTypes ?? '');
+    const explicitlyLoadedTypes = Array.isArray(compilerOptions?.types)
+      ? (compilerOptions.types as unknown[]).filter((value): value is string => typeof value === 'string')
+      : undefined;
+    const nodeTypesVisible = Boolean(nodeTypes) && (!explicitlyLoadedTypes || explicitlyLoadedTypes.includes('node'));
     const workersTypes = manifest.devDependencies?.['@cloudflare/workers-types'] ?? manifest.dependencies?.['@cloudflare/workers-types'];
     const workersVersion = /^\s*(?:[~^]|>=)?(\d+)\.(\d+)\.(\d+)/.exec(workersTypes ?? '');
     if (workersTypes && (!workersVersion || (Number(workersVersion[1]) === 0
@@ -452,6 +456,7 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
     const hasDomTypes = hasDomLibrary(compilerOptions);
     if (compilerOptions && Array.isArray(compilerOptions.lib)
       && !hasDomTypes
+      && nodeTypesVisible
       && nodeTypesMajor && Number(nodeTypesMajor[1]) < 20) {
       findings.push({ file: manifestPath, line: 1,
         reason: `OpenAI v5 needs Web fetch types, but this tsconfig excludes DOM and @types/node ${nodeTypes} predates Node 20. Upgrade @types/node >=20 and typecheck; review runtime compatibility first.`,
@@ -460,22 +465,10 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
 
     if (compilerOptions && Array.isArray(compilerOptions.lib)
       && !hasDomTypes
-      && !nodeTypes && !workersTypes && !bunTypes) {
+      && !nodeTypesVisible && !workersTypes && !bunTypes) {
       findings.push({ file: tsconfigPath, line: 1,
         reason: 'OpenAI v5 requires Web fetch types (RequestInit, Headers, Blob, File). This tsconfig excludes DOM and the package lacks @types/node; choose a compatible DOM lib or @types/node >=20, then typecheck. The correct runtime target cannot be inferred safely.',
         snippet: `compilerOptions.lib: ${JSON.stringify(compilerOptions.lib)}` });
-    }
-    const explicitlyLoadedTypes = Array.isArray(compilerOptions?.types)
-      ? (compilerOptions.types as unknown[]).filter((value): value is string => typeof value === 'string')
-      : undefined;
-    const nodeTypesVisible = Boolean(nodeTypes) && (!explicitlyLoadedTypes || explicitlyLoadedTypes.includes('node'));
-    const nodeTypesExcluded = Boolean(nodeTypes) && explicitlyLoadedTypes !== undefined && !explicitlyLoadedTypes.includes('node');
-    if (nodeTypesExcluded) {
-      const sourcePath = sourceFiles.find((candidate) => candidate === directory || candidate.startsWith(directory + path.sep))
-        ?? tsconfigPath;
-      findings.push({ file: sourcePath, line: 1,
-        reason: 'compilerOptions.types excludes @types/node, so Node built-ins and globals are unavailable despite the package dependency; include "node" and run typecheck.',
-        snippet: 'compilerOptions.types excludes node' });
     }
     if (nodeTypesVisible) continue;
     for (const sourcePath of sourceFiles) {
