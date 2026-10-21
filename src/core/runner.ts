@@ -532,7 +532,7 @@ async function prepareNodeTypesRepair(options: RunOptions): Promise<ManifestOutc
       return findingPath === packageDirectory || findingPath.startsWith(packageDirectory + path.sep);
     });
     if (!relevant) continue;
-    if (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
+    if ((['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
       .some((section) => typeof manifest[section]?.['@types/node'] === 'string')) continue;
     const scripts = manifest.scripts as Record<string, unknown> | undefined;
     const typecheckConfigured = typeof scripts?.typecheck === 'string'
