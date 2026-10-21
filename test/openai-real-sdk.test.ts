@@ -30,7 +30,14 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
       ['moved.ts', "import type { OpenAIError } from 'openai/error';\nexport type MigrationError = OpenAIError;\n"],
       ['deep.ts', "import type { Message, MessageContentText } from 'openai/resources/beta/threads/messages/messages';\nexport type SavedMessage = Message;\nexport type SavedText = MessageContentText;\n"],
       ['paths.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nconst runs: OpenAI.Beta.Threads.Runs = client.beta.threads.runs;\nexport const retrieveSubresourceRun = (threadId: string, runId: string) => runs.retrieve(threadId, runId);\nexport const retrieveRun = (threadId: string, runId: string) => client.beta.threads.runs.retrieve(threadId, runId);\nexport const retrieveMessage = (threadId: string, messageId: string) => client.beta.threads.messages.retrieve(threadId, messageId);\n"],
-      ['beta-chat-types.ts', "import type { ParsedChatCompletion } from 'openai/resources/beta/chat/completions';\nexport type SavedCompletion = ParsedChatCompletion<unknown>;\n"],
+      ['beta-chat-types.ts', `import { ChatCompletionStream, ChatCompletionRunner, ChatCompletionStreamingRunner, Completions,
+  type ParsedChoice, type ParsedChatCompletionMessage, type ParsedFunctionToolCall,
+  type ChatCompletionStreamParams, type ChatCompletionToolRunnerParams } from 'openai/resources/beta/chat/completions';
+export type SavedCompletion = ParsedChoice<ParsedChatCompletionMessage<ParsedFunctionToolCall>>;
+export type StreamArgs = ChatCompletionStreamParams;
+export type ToolArgs = ChatCompletionToolRunnerParams;
+export const runtimeTypes = [ChatCompletionStream, ChatCompletionRunner, ChatCompletionStreamingRunner, Completions];
+`],
       ['observed.ts', "import OpenAI from 'openai';\nfunction observeOpenAI<T extends OpenAI>(client: T): T { return client; }\nconst createOpenAIClient = async () => observeOpenAI(new OpenAI({apiKey: 'sk-test-fixture'}));\nexport async function parse() { const openai = await createOpenAIClient(); return openai.beta.chat.completions.parse({model:'gpt-4o', messages:[]}); }\n"],
     ]);
     for (const [name, source] of files) await writeFile(path.join(cwd, name), source);
