@@ -270,7 +270,7 @@ export interface RunOptions {
   nodeRuntime?: number;
   /** Yarn Classic needs a full dependency installation to regenerate yarn.lock. */
   allowYarnLockInstall?: boolean;
-  /** Count source findings only; never regenerate lockfiles or prepare manifest writes. */
+  /** Analyze without writing the checkout or regenerating lockfiles. */
   analysisOnly?: boolean;
   /** Benchmark-only source analysis under Node 20; retains a manual runtime finding. */
   analysisRuntimeOverride?: boolean;
@@ -356,7 +356,13 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     result.filesChanged.map((sourcePath) => scoped.manifestBySource.get(sourcePath)).filter((file): file is string => Boolean(file)),
   );
   const baseManifest = !options.analysisOnly && result.manual.length === 0 && result.changes.length > 0
-    ? await migrateManifests(migration, options, manifestsWithChangedCode, nodeTypesRepair.changes.length > 0 ? options.nodeRuntime ?? 20 : undefined)
+    ? await migrateManifests(
+      migration,
+      options,
+      manifestsWithChangedCode,
+      nodeTypesRepair.changes.length > 0 ? options.nodeRuntime ?? 20 : undefined,
+      new Set(nodeTypesRepair.changes.filter((change) => path.basename(change.absolutePath) === 'package.json').map((change) => change.absolutePath)),
+    )
     : {
         notes: [options.analysisOnly
           ? 'Dependency versions were not modified during source-only benchmark analysis.'
@@ -564,29 +570,9 @@ async function prepareNodeTypesRepair(options: RunOptions): Promise<ManifestOutc
     } catch { continue; }
     const updated = addNodeTypesDependency(raw, runtimeMajor);
     if (!updated) continue;
-    const locks = options.analysisOnly ? await findLockfiles(options.cwd, packageDirectory) : [];
-    let lockChange: ManifestFileChange | undefined;
-    if (locks.length > 0) {
-      const lockPath = path.resolve(options.cwd, locks[0]!);
-      const lockResult = locks.length !== 1 ? { reason: `Unsupported lockfile set: ${locks.join(', ')}.` }
-        : path.basename(lockPath) === 'package-lock.json'
-          ? await regeneratePackageLock(manifestPath, lockPath, updated, options.cwd, options.registryBefore)
-          : path.basename(lockPath) === 'pnpm-lock.yaml'
-            ? await regeneratePnpmLock(manifestPath, lockPath, updated, options.cwd)
-            : path.basename(lockPath) === 'yarn.lock' && options.allowYarnLockInstall
-              ? await regenerateYarnLock(manifestPath, lockPath, updated, options.cwd)
-              : { reason: 'The project lockfile cannot be regenerated safely for the @types/node addition.' };
-      if (!lockResult.contents) {
-        manual.push({ file: path.relative(options.cwd, manifestPath), line: 1,
-          reason: `${lockResult.reason ?? 'Lockfile regeneration failed.'} The Node type dependency was left unchanged.`, snippet: '@types/node repair withheld' });
-        continue;
-      }
-      lockChange = { absolutePath: lockPath, relativePath: path.relative(options.cwd, lockPath), before: lockResult.before ?? '', after: lockResult.contents };
-    }
     if (tsconfigChange) changes.push(tsconfigChange);
     changes.push({ absolutePath: manifestPath, relativePath: path.relative(options.cwd, manifestPath), before: raw, after: updated });
-    if (lockChange) changes.push(lockChange);
-    notes.push(`Added @types/node ^${runtimeMajor}.0.0 to ${path.relative(options.cwd, manifestPath)}; the isolated verifier must pass its typecheck before the change can be committed.`);
+    notes.push(`Added @types/node ^${runtimeMajor}.0.0 to ${path.relative(options.cwd, manifestPath)}; lockfile changes and typecheck acceptance are handled in the isolated verifier.`);
   }
   return { notes, changes, manual };
 }
@@ -725,6 +711,7 @@ async function migrateManifests(
   options: RunOptions,
   manifestsWithChangedCode: Set<string>,
   nodeTypesMajor?: number,
+  nodeTypesManifestPaths: Set<string> = new Set(),
 ): Promise<ManifestOutcome> {
   if (!migration.updateManifest) return { notes: [], changes: [], manual: [] };
   const notes: string[] = [];
@@ -753,7 +740,7 @@ async function migrateManifests(
     }
 
     const before = structuredClone(manifest);
-    const addNodeTypes = nodeTypesMajor !== undefined
+    const addNodeTypes = nodeTypesMajor !== undefined && nodeTypesManifestPaths.has(manifestPath)
       && !(['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
         .some((section) => typeof manifest[section]?.['@types/node'] === 'string');
     if (options.nodeRuntime !== undefined) {
