@@ -35,7 +35,8 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
       try {
         await runRealSdkNode(cwd, [path.join(process.cwd(), 'node_modules/typescript/bin/tsc'), '--project', path.join(cwd, 'tsconfig.json')], 90_000);
       } catch (error) {
-        if (error instanceof Error && 'stderr' in error && typeof error.stderr === 'string') error.message += `\n${error.stderr}`;
+        const stderr = error && typeof error === 'object' ? (error as { stderr?: unknown }).stderr : undefined;
+        if (error instanceof Error && stderr !== undefined) error.message += `\n${String(stderr)}`;
         throw error;
       }
     };
@@ -81,7 +82,8 @@ for (const message of runner.messages) {
       try {
         await runRealSdkNode(cwd, [path.join(process.cwd(), 'node_modules/typescript/bin/tsc'), '--project', path.join(cwd, 'tsconfig.json')]);
       } catch (error) {
-        if (error instanceof Error && 'stderr' in error && typeof error.stderr === 'string') error.message += `\n${error.stderr}`;
+        const stderr = error && typeof error === 'object' ? (error as { stderr?: unknown }).stderr : undefined;
+        if (error instanceof Error && stderr !== undefined) error.message += `\n${String(stderr)}`;
         throw error;
       }
     };
