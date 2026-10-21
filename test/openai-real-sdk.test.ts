@@ -31,7 +31,14 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
     ]);
     for (const [name, source] of files) await writeFile(path.join(cwd, name), source);
     const install = (version: string) => runRealSdkNpm(cwd, ['install', '--ignore-scripts', '--no-save', '--package-lock=false', '--no-audit', '--no-fund', `openai@${version}`, '@types/node@22']);
-    const check = () => runRealSdkNode(cwd, [path.join(process.cwd(), 'node_modules/typescript/bin/tsc'), '--project', path.join(cwd, 'tsconfig.json')], 90_000);
+    const check = async () => {
+      try {
+        await runRealSdkNode(cwd, [path.join(process.cwd(), 'node_modules/typescript/bin/tsc'), '--project', path.join(cwd, 'tsconfig.json')], 90_000);
+      } catch (error) {
+        if (error instanceof Error && 'stderr' in error && typeof error.stderr === 'string') error.message += `\n${error.stderr}`;
+        throw error;
+      }
+    };
     await install('4.104.0');
     await check();
     const project = new Project({ skipAddingFilesFromTsConfig: true });
@@ -70,7 +77,14 @@ for (const message of runner.messages) {
 }
 `);
     const install = (version: string) => runRealSdkNpm(cwd, ['install', '--ignore-scripts', '--no-save', '--package-lock=false', '--no-audit', '--no-fund', `openai@${version}`, '@types/node@22']);
-    const check = () => runRealSdkNode(cwd, [path.join(process.cwd(), 'node_modules/typescript/bin/tsc'), '--project', path.join(cwd, 'tsconfig.json')]);
+    const check = async () => {
+      try {
+        await runRealSdkNode(cwd, [path.join(process.cwd(), 'node_modules/typescript/bin/tsc'), '--project', path.join(cwd, 'tsconfig.json')]);
+      } catch (error) {
+        if (error instanceof Error && 'stderr' in error && typeof error.stderr === 'string') error.message += `\n${error.stderr}`;
+        throw error;
+      }
+    };
     await install('4.104.0');
     await check();
     await install('5.0.0');
