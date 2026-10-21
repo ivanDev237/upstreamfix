@@ -26,6 +26,9 @@ const NODE_ONLY_GLOBALS = new Set([
   'Buffer', '__dirname', '__filename', 'clearImmediate', 'exports', 'global', 'module', 'process', 'require',
   'setImmediate', 'NodeJS',
 ]);
+const NODE_BUILTIN_PATTERN = [...NODE_BUILTIN_MODULES].sort((a, b) => b.length - a.length)
+  .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+const NODE_GLOBAL_PATTERN = new RegExp(`\\b(?:${[...NODE_ONLY_GLOBALS].join('|')})\\b`);
 
 export function loadProject(cwd: string, packageName = 'firebase-admin'): Project {
   const project = new Project({
@@ -461,7 +464,7 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
       if (!/\.[cm]?tsx?$/.test(sourcePath) && !(compilerOptions?.checkJs === true && /\.[cm]?jsx?$/.test(sourcePath))) continue;
       if (statSync(sourcePath).size > MAX_SOURCE_BYTES) continue;
       const source = readFileSync(sourcePath, 'utf8');
-      const usage = findNodeTypeUsage(source, sourcePath);
+      const usage = findNodeTypeUsage(source);
       if (!usage) continue;
       findings.push({ file: path.relative(root, sourcePath), line: usage.line,
         reason: 'OpenAI v4 may have supplied @types/node transitively; v5 does not. This file uses a Node built-in or global, but Node declarations are not visible to the compiler. Add a compatible @types/node devDependency, include "node" in compilerOptions.types when restricted, and run typecheck; otherwise review this runtime-specific use manually.',
@@ -472,27 +475,21 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
   return findings;
 }
 
-function findNodeTypeUsage(source: string, filePath: string): { line: number; name: string } | undefined {
-  const scriptKind = /\.tsx?$/.test(filePath) ? ts.ScriptKind.TS : ts.ScriptKind.JS;
-  const parsed = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true, scriptKind);
-  let usage: { line: number; name: string } | undefined;
-  const inspectModule = (specifier: ts.Expression | undefined, at: ts.Node): void => {
-    if (!specifier || !ts.isStringLiteralLike(specifier)) return;
-    const name = specifier.text.replace(/^node:/, '');
-    if (specifier.text.startsWith('node:') || NODE_BUILTIN_MODULES.has(name))
-      usage ??= { line: parsed.getLineAndCharacterOfPosition(at.getStart(parsed)).line + 1, name: specifier.text };
-  };
-  const visit = (node: ts.Node): void => {
-    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) inspectModule(node.moduleSpecifier, node);
-    if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) inspectModule(node.argument.literal, node);
-    if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword
-      || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) inspectModule(node.arguments[0], node);
-    if (ts.isIdentifier(node) && NODE_ONLY_GLOBALS.has(node.text))
-      usage ??= { line: parsed.getLineAndCharacterOfPosition(node.getStart(parsed)).line + 1, name: node.text };
-    if (!usage) ts.forEachChild(node, visit);
-  };
-  visit(parsed);
-  return usage;
+function findNodeTypeUsage(source: string): { line: number; name: string } | undefined {
+  const patterns = [
+    new RegExp(`(?:\\b(?:from|import)\\s*|\\b(?:import|require)\\s*\\(\\s*)['"](?:node:)?(?:${NODE_BUILTIN_PATTERN})(?:/[^'"]*)?['"]`),
+    NODE_GLOBAL_PATTERN,
+  ];
+  const matches = patterns.map((pattern) => {
+    const match = pattern.exec(source);
+    return match?.index === undefined ? undefined : { index: match.index, text: match[0] };
+  }).filter((match): match is { index: number; text: string } => Boolean(match));
+  const first = matches.sort((a, b) => a.index - b.index)[0];
+  if (!first) return undefined;
+  const name = NODE_GLOBAL_PATTERN.exec(first.text)?.[0]
+    ?? /['"]([^'"]+)['"]/.exec(first.text)?.[1]
+    ?? 'Node API';
+  return { line: source.slice(0, first.index).split('\n').length, name };
 }
 
 async function inspectManifests(migration: Migration, cwd: string, excludedDirectories: readonly string[] = []): Promise<string[]> {
