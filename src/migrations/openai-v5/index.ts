@@ -27,15 +27,9 @@ const DELETED_METHODS = new Set([
   'beta.assistants.del', 'beta.threads.del', 'beta.threads.messages.del',
   'responses.del', 'evals.del', 'evals.runs.del', 'containers.del', 'containers.files.del',
 ]);
-const MOVED_IMPORTS = new Map([
-  ['openai/error', 'openai/core/error'],
-  ['openai/pagination', 'openai/core/pagination'],
-  ['openai/resource', 'openai/core/resource'],
-  ['openai/streaming', 'openai/core/streaming'],
-  ['openai/uploads', 'openai/core/uploads'],
-  ['openai/resources/beta/chat/completions', 'openai/resources/chat/completions'],
-  ['openai/resources/beta/threads/messages/messages', 'openai/resources/beta/threads/messages'],
-]);
+// v5 keeps these public subpaths as deprecated re-exports. Moving them is
+// cosmetic and can silently detach test mocks, declaration shims and type imports.
+const MOVED_IMPORTS = new Map<string, string>();
 const MOVED_MESSAGE_TYPES = new Map([
   ['MessageContentText', 'TextContentBlock'],
   ['ThreadMessage', 'Message'],
@@ -59,6 +53,14 @@ const REQUEST_OPTION_OVERLOADS = new Set([
   'containers.list', 'containers.files.list',
 ]);
 const REQUEST_OPTION_KEYS = new Set(['headers', 'timeout', 'maxRetries', 'signal', 'idempotencyKey']);
+const VECTOR_STORE_POLLING_METHODS = new Set([
+  'vectorStores.files.poll', 'vectorStores.fileBatches.poll',
+  'vectorStores.files.uploadAndPoll', 'vectorStores.fileBatches.uploadAndPoll',
+]);
+const REMOVED_RUNNER_TYPES = new Set([
+  'RunnableFunction', 'RunnableFunctionWithParse', 'RunnableFunctionWithoutParse',
+  'ChatCompletionRunFunctionsParams',
+]);
 const REMOVED_UPLOAD_EXPORTS = new Set([
   'fileFromPath', 'BlobPart', 'BlobLike', 'FileLike', 'ResponseLike',
   'isResponseLike', 'isBlobLike', 'isFileLike', 'isUploadable',
@@ -99,6 +101,54 @@ function unwrapTransparentExpression(node: Node): Node {
 
 function isAffectedMethod(method: string): boolean {
   return DELETED_METHODS.has(method) || CHANGED_PATH_METHODS.has(method) || SAFE_NAMED_PATH_REWRITES.has(method);
+}
+
+function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+function mentionsIdentifier(text: string, identifier: string): boolean {
+  return new RegExp(`(^|[^A-Za-z0-9_$])${escapeRegExp(identifier)}($|[^A-Za-z0-9_$])`).test(text);
+}
+
+function isOpenAiSpecifier(specifier: string): boolean {
+  return specifier === 'openai' || specifier.startsWith('openai/');
+}
+
+function isLocalOpenAiAlias(specifier: string): boolean {
+  return !['@langchain/openai', '@ai-sdk/openai', 'openai-edge'].includes(specifier)
+    && (specifier.startsWith('.') || specifier.startsWith('@/') || specifier.startsWith('#'))
+    && /(?:^|\/)openai$/.test(specifier);
+}
+
+function hasOpenAiSpecifierEvidence(file: SourceFile): boolean {
+  return file.getImportDeclarations().some((declaration) => isOpenAiSpecifier(declaration.getModuleSpecifierValue()))
+    || file.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) => {
+      const argument = call.getArguments()[0];
+      return (call.getExpression().getText() === 'require' || call.getExpression().getKind() === SyntaxKind.ImportKeyword)
+        && argument && Node.isStringLiteral(argument) && isOpenAiSpecifier(argument.getLiteralValue());
+    });
+}
+
+function affectedSuffix(parts: readonly string[]): string | undefined {
+  for (let start = 0; start < parts.length; start++) {
+    const suffix = parts.slice(start).join('.');
+    if (isAffectedMethod(suffix)) return suffix;
+  }
+  return undefined;
+}
+
+function partsAfterLastComputedAccess(node: Node): string[] {
+  const expression = unwrapTransparentExpression(node);
+  if (expression !== node) return partsAfterLastComputedAccess(expression);
+  if (Node.isIdentifier(expression)) return [];
+  if (Node.isPropertyAccessExpression(expression))
+    return [...partsAfterLastComputedAccess(expression.getExpression()), expression.getName()];
+  if (Node.isElementAccessExpression(expression)) {
+    const argument = expression.getArgumentExpression();
+    if (argument && Node.isStringLiteral(argument))
+      return [...partsAfterLastComputedAccess(expression.getExpression()), argument.getLiteralValue()];
+    return [];
+  }
+  return [];
 }
 
 function addManual(result: MigrationResult, file: SourceFile, node: Node, reason: string): void {
@@ -168,6 +218,7 @@ function isStablePathArgument(node: Node): boolean {
 
 function transformFile(file: SourceFile, result: MigrationResult, exportedClients: Map<string, Set<string>>): void {
   const imported = new Set<string>();
+  const maybeClientImports: MorphSymbol[] = [];
   const messageNamespaceImports = new Set<MorphSymbol>();
   const edits: Edit[] = [];
   const typedSource = /\.[cm]?tsx?$/.test(file.getFilePath());
@@ -181,38 +232,51 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
           imported.add(named.getAliasNode()?.getText() ?? named.getName());
       }
     }
+    if (isLocalOpenAiAlias(declaration.getModuleSpecifierValue())) {
+      for (const named of declaration.getNamedImports()) {
+        const symbol = (named.getAliasNode() ?? named.getNameNode()).getSymbol();
+        if (symbol) maybeClientImports.push(symbol);
+      }
+    }
+  }
+  for (const declaration of file.getDescendantsOfKind(SyntaxKind.ImportEqualsDeclaration)) {
+    const moduleReference = declaration.getModuleReference();
+    if (!Node.isExternalModuleReference(moduleReference)) continue;
+    const expression = moduleReference.getExpression();
+    if (!expression || !Node.isStringLiteral(expression)) continue;
+    const specifier = expression.getLiteralValue();
+    if (!isOpenAiSpecifier(specifier)) continue;
+    imported.add(declaration.getNameNode().getText());
+    addManual(result, file, declaration, 'CommonJS import-equals bindings for OpenAI need a deliberate v5 module interop review.');
   }
   for (const declaration of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const initializer = declaration.getInitializer();
     if (initializer && Node.isCallExpression(initializer) && initializer.getExpression().getText() === 'require'
-      && initializer.getArguments()[0]?.getText().replace(/['"]/g, '') === 'openai') {
+      && initializer.getArguments()[0] && Node.isStringLiteral(initializer.getArguments()[0]!)
+      && isOpenAiSpecifier(initializer.getArguments()[0]!.asKindOrThrow(SyntaxKind.StringLiteral).getLiteralValue())) {
       if (Node.isIdentifier(declaration.getNameNode())) imported.add(declaration.getName());
       else addManual(result, file, declaration, 'Destructured require of openai needs manual binding review.');
     }
   }
-  if (!file.getFullText().includes('openai')) return;
   if (file.getProject().getProgram().getSyntacticDiagnostics(file).some((item) => item.getCategory() === 1)) {
     result.manual.push({ file: file.getFilePath(), line: 1, reason: 'The source contains syntax errors; no OpenAI edits were applied.', snippet: '' });
     return;
   }
-  const hasOpenAiModuleEvidence = file.getImportDeclarations().some((declaration) => declaration.getModuleSpecifierValue().includes('openai'))
-    || file.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) => {
-      const argument = call.getArguments()[0];
-      return (call.getExpression().getText() === 'require' || call.getExpression().getKind() === SyntaxKind.ImportKeyword)
-        && argument && Node.isStringLiteral(argument) && argument.getLiteralValue().includes('openai');
-    });
+  const hasOpenAiModuleEvidence = hasOpenAiSpecifierEvidence(file);
   // v5 removes this helper. It may be imported, re-exported, destructured from
   // require(), or accessed through a namespace/computed property. Never move
   // the module path while a reference remains: the new module has no export.
-  const removedUploadHelper = file.getDescendants().find((node) =>
+  const removedUploadHelperCandidate = file.getDescendants().find((node) =>
     (Node.isIdentifier(node) || Node.isStringLiteral(node)) &&
     (Node.isStringLiteral(node) ? node.getLiteralText() : node.getText()) === 'fileFromPath');
+  const removedUploadHelper = hasOpenAiSpecifierEvidence(file) ? removedUploadHelperCandidate : undefined;
   if (removedUploadHelper) {
     addManual(result, file, removedUploadHelper,
-      'OpenAI v5 removed fileFromPath; choose a supported upload helper manually. No edits were applied to this file.');
+      'OpenAI v5 removed fileFromPath; choose a supported upload helper manually.');
   }
   const clients = new Set<MorphSymbol>();
   const complexClients = new Set<MorphSymbol>();
+  for (const symbol of maybeClientImports) complexClients.add(symbol);
   const narrowedClientScopes = new Map<MorphSymbol, Node>();
   const clientPrefixes = new Map<MorphSymbol, string[]>();
   const variableInitializers = new Map<MorphSymbol, Node>();
@@ -241,12 +305,42 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
   const clientFactorySymbols = new Set<MorphSymbol>();
   const isClientType = (type: Node | undefined): boolean => {
     if (!type) return false;
-    const parts = type.getText().replace(/\s/g, '').split('|');
-    return parts.some((part) => imported.has(part))
-      && parts.every((part) => imported.has(part) || part === 'undefined' || part === 'null');
+    const knownClientType = (candidate: Node, visited = new Set<Node>()): boolean => {
+      if (visited.has(candidate)) return false;
+      visited.add(candidate);
+      if (Node.isParenthesizedTypeNode(candidate)) return knownClientType(candidate.getTypeNode(), visited);
+      if (Node.isUnionTypeNode(candidate)) return candidate.getTypeNodes().every((part) =>
+        (Node.isLiteralTypeNode(part) && [SyntaxKind.NullKeyword, SyntaxKind.UndefinedKeyword].includes(part.getLiteral().getKind()))
+        || part.getKind() === SyntaxKind.UndefinedKeyword || part.getKind() === SyntaxKind.NullKeyword
+        || knownClientType(part, visited));
+      if (!Node.isTypeReference(candidate)) return false;
+      const typeName = candidate.getTypeName().getText();
+      if ([...imported].some((name) => typeName === name)) return true;
+      const symbol = candidate.getTypeName().getSymbol();
+      // A named alias may hide a union or conditional client shape. Keep it in
+      // the manual-review set instead of treating it as a certain SDK client.
+      return Boolean(symbol?.getDeclarations().some((declaration) =>
+        Node.isInterfaceDeclaration(declaration) && [...imported].includes(declaration.getName())));
+    };
+    return knownClientType(type);
+  };
+  const mentionsOpenAiType = (type: Node): boolean => {
+    const inspect = (candidate: Node, visited = new Set<string>()): boolean => {
+      if ([...imported].some((name) => mentionsIdentifier(candidate.getText(), name))) return true;
+      return candidate.getDescendantsOfKind(SyntaxKind.Identifier).some((identifier) => {
+        const aliasName = identifier.getText();
+        if (visited.has(aliasName)) return false;
+        visited.add(aliasName);
+        const declaration = identifier.getSymbol()?.getDeclarations().find(Node.isTypeAliasDeclaration)
+          ?? file.getTypeAliases().find((alias) => alias.getName() === aliasName);
+        const aliasType = declaration && Node.isTypeAliasDeclaration(declaration) ? declaration.getTypeNode() : undefined;
+        return Boolean(aliasType && inspect(aliasType, visited));
+      });
+    };
+    return inspect(type);
   };
   const isRunsSubresourceType = (type: Node | undefined): boolean => Boolean(type
-    && [...imported].some((name) => new RegExp(`\\b${name}\\.Beta\\.Threads\\.Runs\\b`).test(type.getText())));
+    && [...imported].some((name) => new RegExp(`(?:^|[^A-Za-z0-9_$])${escapeRegExp(name)}\\.Beta\\.Threads\\.Runs(?:$|[^A-Za-z0-9_$])`).test(type.getType().getText())));
   // Trace the repository's explicit OpenAI observation factory shape without
   // trusting arbitrary calls that happen to return a similarly named value.
   for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
@@ -296,7 +390,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
         if (parameter.getFirstAncestorByKind(SyntaxKind.Constructor) && parameter.getModifiers().length > 0)
           rememberField(parameter, parameter.getName());
       } else addManual(result, file, parameter, 'valeur OpenAI non suivie : déstructuration d’un paramètre client à revoir manuellement.');
-    } else if (type && [...imported].some((name) => new RegExp(`\\b${name}\\b`).test(type.getText()))) {
+    } else if (type && mentionsOpenAiType(type)) {
       const symbol = parameter.getNameNode().getSymbol();
       if (symbol) complexClients.add(symbol);
     }
@@ -308,7 +402,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     else if (typedSource && Node.isIdentifier(property.getNameNode()) && initializer && Node.isNewExpression(initializer)
       && imported.has(initializer.getExpression().getText()))
       rememberField(property, property.getName());
-    else if (type && [...imported].some((name) => new RegExp(`\\b${name}\\b`).test(type.getText()))) {
+    else if (type && mentionsOpenAiType(type)) {
       // Keep the field untracked; only an affected use below needs review.
     }
   }
@@ -333,7 +427,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       if (symbol) clients.add(symbol);
     }
     if (Node.isIdentifier(variable.getNameNode()) && variable.getTypeNode()
-      && [...imported].some((name) => new RegExp(`\\b${name}\\b`).test(variable.getTypeNode()!.getText()))) {
+      && mentionsOpenAiType(variable.getTypeNode()!)) {
       const symbol = variable.getNameNode().getSymbol();
       if (symbol) complexClients.add(symbol);
     }
@@ -357,13 +451,61 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     narrowedClientScopes.set(symbol, statement.getThenStatement());
   }
   const assignments = new Map<MorphSymbol, Node[]>();
+  const unsafeAliases = new Set<MorphSymbol>();
+  const unsafeAliasNames = new Set<string>();
+  const markAssignmentTarget = (target: Node): void => {
+    const expression = unwrapTransparentExpression(target);
+    if (Node.isIdentifier(expression)) {
+      unsafeAliasNames.add(expression.getText());
+      const symbol = expression.getSymbol();
+      if (symbol) unsafeAliases.add(symbol);
+      return;
+    }
+    if (Node.isArrayLiteralExpression(expression) || Node.isArrayBindingPattern(expression)) {
+      for (const element of expression.getElements()) {
+        if (Node.isOmittedExpression(element)) continue;
+        markAssignmentTarget(Node.isSpreadElement(element) ? element.getExpression() : Node.isBindingElement(element) ? element.getNameNode() : element);
+      }
+      return;
+    }
+    if (Node.isObjectLiteralExpression(expression)) {
+      for (const property of expression.getProperties()) {
+        if (Node.isShorthandPropertyAssignment(property)) markAssignmentTarget(property.getNameNode());
+        else if (Node.isPropertyAssignment(property)) {
+          const initializer = property.getInitializer();
+          if (initializer) markAssignmentTarget(initializer);
+        }
+        else if (Node.isSpreadAssignment(property)) markAssignmentTarget(property.getExpression());
+      }
+      return;
+    }
+    if (Node.isObjectBindingPattern(expression)) {
+      for (const element of expression.getElements()) markAssignmentTarget(element.getNameNode());
+    }
+  };
   for (const assignment of file.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
-    if (assignment.getOperatorToken().getKind() !== SyntaxKind.EqualsToken || !Node.isIdentifier(assignment.getLeft())) continue;
-    const symbol = assignment.getLeft().getSymbol();
-    if (!symbol) continue;
-    const values = assignments.get(symbol) ?? [];
-    values.push(assignment.getRight());
-    assignments.set(symbol, values);
+    const left = unwrapTransparentExpression(assignment.getLeft());
+    if (Node.isIdentifier(left) && assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken) {
+      const symbol = left.getSymbol();
+      if (symbol) {
+        const values = assignments.get(symbol) ?? [];
+        values.push(assignment.getRight());
+        assignments.set(symbol, values);
+      }
+    } else {
+      markAssignmentTarget(left);
+      for (const identifier of left.getDescendantsOfKind(SyntaxKind.Identifier)) {
+        unsafeAliasNames.add(identifier.getText());
+        const symbol = identifier.getSymbol();
+        if (symbol) unsafeAliases.add(symbol);
+      }
+    }
+  }
+  for (const loop of [...file.getDescendantsOfKind(SyntaxKind.ForOfStatement), ...file.getDescendantsOfKind(SyntaxKind.ForInStatement)]) {
+    const initializer = loop.getInitializer();
+    markAssignmentTarget(Node.isVariableDeclarationList(initializer)
+      ? initializer.getDeclarations()[0]?.getNameNode() ?? initializer
+      : initializer);
   }
   // A separately declared alias remains safe when every observed initializer
   // and assignment is itself a tracked client. Iterate to support short alias
@@ -373,7 +515,8 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
       const initializer = variable.getInitializer();
       const symbol = variable.getNameNode().getSymbol();
-      if (!symbol || clients.has(symbol)) continue;
+      if (!symbol || clients.has(symbol) || unsafeAliases.has(symbol)
+        || (Node.isIdentifier(variable.getNameNode()) && unsafeAliasNames.has(variable.getName()))) continue;
       const values = [...(initializer ? [initializer] : []), ...(assignments.get(symbol) ?? [])];
       if (values.length === 0) continue;
       const onlyTrackedClients = values.every((value) => {
@@ -394,7 +537,10 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     if (Node.isIdentifier(node)) {
       const symbol = node.getSymbol();
       const scope = symbol ? narrowedClientScopes.get(symbol) : undefined;
-      const narrowedHere = Boolean(scope && (node === scope || node.getParent() === scope || scope.getDescendants().includes(node)));
+      let narrowedHere = false;
+      for (let ancestor: Node | undefined = node; scope && ancestor; ancestor = ancestor.getParent()) {
+        if (ancestor === scope) { narrowedHere = true; break; }
+      }
       return symbol && (clients.has(symbol) || narrowedHere)
       ? clientPrefixes.get(node.getSymbol()!) ?? [] : undefined;
     }
@@ -420,6 +566,17 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       if (symbol) runners.add(symbol);
     }
   }
+  const isTrackedRunner = (node: Node): boolean => {
+    const unwrapped = unwrapTransparentExpression(node);
+    if (Node.isIdentifier(unwrapped)) {
+      const symbol = unwrapped.getSymbol();
+      return Boolean(symbol && runners.has(symbol));
+    }
+    if (!Node.isCallExpression(unwrapped)) return false;
+    const callee = unwrapped.getExpression();
+    return Node.isPropertyAccessExpression(callee) && callee.getName() === 'runTools'
+      && Boolean(clientParts(callee));
+  };
   for (const constructor of file.getDescendantsOfKind(SyntaxKind.NewExpression)) {
     if (imported.has(constructor.getExpression().getText())) {
       const option = constructor.getArguments()[0];
@@ -484,20 +641,20 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       }
     }
     const moved = MOVED_IMPORTS.get(specifier);
+    const isMessageModule = specifier === 'openai/resources/beta/threads/messages/messages';
     if (moved && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper)) {
       addEdit(edits, file, declaration.getModuleSpecifier(), `'${moved}'`, 'moved-import');
-      if (specifier === 'openai/resources/beta/threads/messages/messages') {
-        const namespace = declaration.getNamespaceImport();
-        const namespaceSymbol = namespace?.getSymbol();
-        if (namespaceSymbol) messageNamespaceImports.add(namespaceSymbol);
-        for (const entry of declaration.getNamedImports()) {
-          const renamed = MOVED_MESSAGE_TYPES.get(entry.getName());
-          if (!renamed) continue;
-          const localName = entry.getAliasNode()?.getText() ?? entry.getName();
-          const typePrefix = declaration.isTypeOnly() ? '' : 'type ';
-          const alias = localName === renamed ? '' : ` as ${localName}`;
-          addEdit(edits, file, entry, `${typePrefix}${renamed}${alias}`, 'moved-import');
-        }
+    }
+    if (isMessageModule) {
+      const namespaceSymbol = declaration.getNamespaceImport()?.getSymbol();
+      if (namespaceSymbol) messageNamespaceImports.add(namespaceSymbol);
+      for (const entry of declaration.getNamedImports()) {
+        const renamed = MOVED_MESSAGE_TYPES.get(entry.getName());
+        if (!renamed) continue;
+        const localName = entry.getAliasNode()?.getText() ?? entry.getName();
+        const typePrefix = declaration.isTypeOnly() ? '' : 'type ';
+        const alias = localName === renamed ? '' : ` as ${localName}`;
+        addEdit(edits, file, entry, `${typePrefix}${renamed}${alias}`, 'moved-import');
       }
     } else if (specifier === 'openai/shims' || specifier === 'openai/src' || specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
       addManual(result, file, declaration, 'OpenAI v5 removes this private or shim import; review the replacement and runtime configuration.');
@@ -549,15 +706,15 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     const moved = specifier ? MOVED_IMPORTS.get(specifier) : undefined;
     if (moved && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper) && declaration.getModuleSpecifier()) {
       addEdit(edits, file, declaration.getModuleSpecifier()!, `'${moved}'`, 'moved-import');
-      if (specifier === 'openai/resources/beta/threads/messages/messages') {
-        for (const entry of declaration.getNamedExports()) {
-          const renamed = MOVED_MESSAGE_TYPES.get(entry.getName());
-          if (!renamed) continue;
-          const typePrefix = declaration.isTypeOnly() ? '' : 'type ';
-          const aliasName = entry.getAliasNode()?.getText() ?? entry.getName();
-          const alias = aliasName === renamed ? '' : ` as ${aliasName}`;
-          addEdit(edits, file, entry, `${typePrefix}${renamed}${alias}`, 'moved-import');
-        }
+    }
+    if (specifier === 'openai/resources/beta/threads/messages/messages') {
+      for (const entry of declaration.getNamedExports()) {
+        const renamed = MOVED_MESSAGE_TYPES.get(entry.getName());
+        if (!renamed) continue;
+        const typePrefix = declaration.isTypeOnly() ? '' : 'type ';
+        const aliasName = entry.getAliasNode()?.getText() ?? entry.getName();
+        const alias = aliasName === renamed ? '' : ` as ${aliasName}`;
+        addEdit(edits, file, entry, `${typePrefix}${renamed}${alias}`, 'moved-import');
       }
     }
   }
@@ -578,8 +735,47 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     const renamed = MOVED_MESSAGE_TYPES.get(leaf.getText());
     if (renamed) addEdit(edits, file, leaf, renamed, 'moved-import');
   }
+  if (hasOpenAiModuleEvidence) {
+    for (const identifier of file.getDescendantsOfKind(SyntaxKind.Identifier)) {
+      if (REMOVED_RUNNER_TYPES.has(identifier.getText()))
+        addManual(result, file, identifier, `OpenAI v5 removes ${identifier.getText()}; review the replacement type manually.`);
+    }
+    for (const qualified of file.getDescendantsOfKind(SyntaxKind.QualifiedName)) {
+      if (Node.isTypeReference(qualified.getParent()!) && /(?:^|\.)Beta\.Chat\.Completions\./.test(qualified.getText()))
+        addManual(result, file, qualified, 'OpenAI v5 changes the Beta Chat Completions type namespace; select the v5 public type manually.');
+    }
+  }
+  const apiErrorInstanceScopes = new Map<MorphSymbol, Node[]>();
+  for (const statement of file.getDescendantsOfKind(SyntaxKind.IfStatement)) {
+    const condition = statement.getExpression();
+    if (!Node.isBinaryExpression(condition) || condition.getOperatorToken().getKind() !== SyntaxKind.InstanceOfKeyword
+      || !Node.isIdentifier(condition.getLeft())) continue;
+    const right = condition.getRight().getText();
+    if (![...imported].some((name) => right === `${name}.APIError`) && !apiErrorNames.has(right)) continue;
+    const symbol = condition.getLeft().getSymbol();
+    if (!symbol) continue;
+    const scopes = apiErrorInstanceScopes.get(symbol) ?? [];
+    scopes.push(statement.getThenStatement());
+    apiErrorInstanceScopes.set(symbol, scopes);
+  }
   for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
     const expression = call.getExpression();
+    const callPath = Node.isPropertyAccessExpression(expression) ? pathParts(expression).join('.') : '';
+    const pollMethod = [...VECTOR_STORE_POLLING_METHODS].find((method) => callPath === method || callPath.endsWith(`.${method}`));
+    if (pollMethod)
+      addManual(result, file, call, 'OpenAI v5 vector store polling helpers have changed signatures; verify both resource identifiers and arguments manually.');
+    if (callPath === 'beta.chat.completions.stream' || callPath.endsWith('.beta.chat.completions.stream')) {
+      let chained: Node = call;
+      let parent = chained.getParent();
+      while (parent && (Node.isPropertyAccessExpression(parent) || Node.isCallExpression(parent))) {
+        chained = parent;
+        parent = chained.getParent();
+      }
+      const chainText = chained.getText();
+      if (/\.on\s*\(\s*['"](?:functionCall|functionCallResult|finalFunctionCall|finalFunctionCallResult)['"]/.test(chainText)
+        || /\.finalFunctionCall(?:Result)?\s*\(/.test(chainText))
+        addManual(result, file, call, 'OpenAI v5 changes the Beta Chat streaming function-call events and final methods; migrate the stream event handling manually.');
+    }
     if (Node.isPropertyAccessExpression(expression) && ['nextPageParams', 'nextPageInfo'].includes(expression.getName()))
       addManual(result, file, call, 'OpenAI v5 pagination uses nextPageRequestOptions; review manual pagination logic.');
     if (Node.isPropertyAccessExpression(expression) && expression.getName() === 'pipe'
@@ -616,18 +812,20 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     if (Node.isPropertyAccessExpression(wrapped) && ['call', 'apply', 'bind'].includes(wrapped.getName()))
       wrappedTarget = wrapped.getExpression();
     if (wrappedTarget) {
-      const targetMethod = clientParts(wrappedTarget)?.join('.') ?? pathParts(wrappedTarget).slice(1).join('.');
+      const targetMethod = clientParts(wrappedTarget)?.join('.') ?? affectedSuffix(partsAfterLastComputedAccess(wrappedTarget));
       const computedTarget = Node.isElementAccessExpression(wrappedTarget)
         || wrappedTarget.getDescendantsOfKind(SyntaxKind.ElementAccessExpression).length > 0;
       const targetRoot = rootIdentifier(wrappedTarget)?.getSymbol();
-      if (isAffectedMethod(targetMethod) || (computedTarget && (Boolean(targetRoot && clients.has(targetRoot)) || hasOpenAiModuleEvidence)))
+      if ((targetMethod && isAffectedMethod(targetMethod)) || (computedTarget && Boolean(targetRoot && (clients.has(targetRoot) || complexClients.has(targetRoot))))
+        || (computedTarget && rootIdentifier(wrappedTarget)?.getText() === 'openai' && hasOpenAiModuleEvidence))
         addManual(result, file, call, 'OpenAI v5 changes this method, but .call/.apply/.bind obscures its receiver and arguments; review it manually.');
       continue;
     }
     if (Node.isElementAccessExpression(expression)) {
-      const possibleMethod = pathParts(expression).slice(1).join('.');
+      const possibleMethod = affectedSuffix(partsAfterLastComputedAccess(expression));
       const root = rootIdentifier(expression)?.getSymbol();
-      if (isAffectedMethod(possibleMethod) || Boolean(root && clients.has(root)) || hasOpenAiModuleEvidence)
+      if ((possibleMethod && isAffectedMethod(possibleMethod)) || Boolean(root && (clients.has(root) || complexClients.has(root)))
+        || (rootIdentifier(expression)?.getText() === 'openai' && hasOpenAiModuleEvidence && partsAfterLastComputedAccess(expression).join('.') === 'chat.completions.create'))
         addManual(result, file, call, 'OpenAI v5 changes this method, but computed receiver access requires manual review.');
       continue;
     }
@@ -635,8 +833,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     if (expression.getName() === 'withResponse' || expression.getName() === 'asResponse') {
       addManual(result, file, call, 'OpenAI v5 Web response helpers return standard Web response types; review Headers and ReadableStream handling.');
     }
-    const receiver = rootIdentifier(expression);
-    const onRunner = Boolean(receiver?.getSymbol() && runners.has(receiver.getSymbol()!)) || expression.getText().includes('.runTools(');
+    const onRunner = expression.getName() === 'on' && isTrackedRunner(expression.getExpression());
     if (onRunner && expression.getName() === 'on') {
       const eventNode = call.getArguments()[0];
       const replacement = eventNode && Node.isStringLiteral(eventNode)
@@ -649,21 +846,23 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     }
     const parts = clientParts(expression);
     if (!parts || parts.length < 2) {
-      const possibleMethod = pathParts(expression).slice(1).join('.');
+      const possibleMethod = affectedSuffix(partsAfterLastComputedAccess(expression)) ?? affectedSuffix(pathParts(expression));
       const root = rootIdentifier(expression);
-      const declarations = root?.getSymbol()?.getDeclarations() ?? [];
-      const definitelyOtherReceiver = declarations.length > 0 && declarations.every((declaration) => {
-        const type = Node.isParameterDeclaration(declaration) || Node.isVariableDeclaration(declaration)
-          ? declaration.getTypeNode() : undefined;
-        return Boolean(type && ![...imported].some((name) => new RegExp(`\\b${name}\\b`).test(type.getText())));
-      });
       const hasComputedPath = Node.isElementAccessExpression(expression)
         || expression.getDescendantsOfKind(SyntaxKind.ElementAccessExpression).length > 0;
       const rootSymbol = root?.getSymbol();
-      if ((isAffectedMethod(possibleMethod) || (hasComputedPath
-        && (Boolean(rootSymbol && clients.has(rootSymbol)) || hasOpenAiModuleEvidence))) && !definitelyOtherReceiver)
+      const definitelyStructuredOther = Boolean(root?.getSymbol()?.getDeclarations().length
+        && root.getSymbol()!.getDeclarations().every((declaration) => {
+          const type = Node.isParameterDeclaration(declaration) || Node.isVariableDeclaration(declaration)
+            ? declaration.getTypeNode() : undefined;
+          return Boolean(type && Node.isTypeLiteral(type) && ![...imported].some((name) => mentionsIdentifier(type.getText(), name)));
+        }));
+      if ((Boolean(possibleMethod && isAffectedMethod(possibleMethod)) && !definitelyStructuredOther || (hasComputedPath
+        && Boolean(rootSymbol && (clients.has(rootSymbol) || complexClients.has(rootSymbol))))
+        || (hasComputedPath && root?.getText() === 'openai' && hasOpenAiModuleEvidence
+          && partsAfterLastComputedAccess(expression).join('.') === 'chat.completions.create')))
         addManual(result, file, call, 'OpenAI v5 changes this method, but its client receiver is not tracked safely; review the receiver and arguments manually.');
-      if (root?.getSymbol() && complexClients.has(root.getSymbol()!) && isAffectedMethod(possibleMethod))
+      if (root?.getSymbol() && complexClients.has(root.getSymbol()!) && possibleMethod && isAffectedMethod(possibleMethod))
         addManual(result, file, call, 'valeur OpenAI non suivie : vérifier la variante de ce client avant la migration.');
       continue;
     }
@@ -674,8 +873,13 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       const safeShape = args.length === 2 && args.every(isStablePathArgument)
         && /^,\s*$/.test(file.getFullText().slice(args[0]!.getEnd(), args[1]!.getStart()));
       if (safeShape) {
+        const leadingComments = args.flatMap((argument) =>
+          [...file.getFullText().slice(argument.getFullStart(), argument.getStart()).matchAll(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g)].map(([comment]) => comment));
+        const optionalCall = call.getQuestionDotTokenNode()?.getText() ?? '';
+        const typeArguments = call.getTypeArguments().map((argument) => argument.getText()).join(', ');
+        const typeArgumentText = typeArguments ? `<${typeArguments}>` : '';
         addEdit(edits, file, call,
-          `${expression.getText()}(${args[1]!.getText()}, { ${namedPathKey}: ${args[0]!.getText()} })`,
+          `${expression.getText()}${optionalCall}${typeArgumentText}(${leadingComments.length ? `${leadingComments.join(' ')} ` : ''}${args[1]!.getText()}, { ${namedPathKey}: ${args[0]!.getText()} })`,
           'named-path-parameters');
       } else if (method === 'beta.threads.runs.submitToolOutputs' && args.length === 3
         && isStablePathArgument(args[0]!) && isStablePathArgument(args[1]!)
@@ -720,6 +924,16 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     }
   }
   for (const property of file.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)) {
+    if (property.getName() === 'headers' && Node.isIdentifier(property.getExpression())) {
+      const receiver = property.getExpression();
+      const symbol = receiver.getSymbol();
+      const inApiErrorScope = Boolean(symbol && apiErrorInstanceScopes.get(symbol)?.some((scope) => {
+        for (let ancestor: Node | undefined = property; ancestor; ancestor = ancestor.getParent()) if (ancestor === scope) return true;
+        return false;
+      }));
+      if (inApiErrorScope)
+        addManual(result, file, property, 'OpenAI v5 APIError.headers is a Web Headers object, not a string record; use Headers.get() after review.');
+    }
     if (property.getName() === 'headers' && apiErrorNames.size > 0 && Node.isIdentifier(property.getExpression())) {
       const receiver = property.getExpression();
       const declaration = receiver.getSymbol()?.getDeclarations()[0];
@@ -730,9 +944,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     }
     const renamedRunnerMethod = RUN_TOOLS_METHODS.get(property.getName());
     if (renamedRunnerMethod) {
-      const runner = rootIdentifier(property);
-      const tracked = Boolean(runner?.getSymbol() && runners.has(runner.getSymbol()!))
-        || property.getText().includes('.runTools(');
+      const tracked = isTrackedRunner(property.getExpression());
       if (tracked) {
         const parent = property.getParent();
         if (parent && Node.isCallExpression(parent) && parent.getExpression() === property)

@@ -452,10 +452,10 @@ export const result = openai.beta.chat.completions.parse({ model: 'gpt-4o', mess
     expect(outcome.manual.some((item) => item.reason.includes('fileFromPath'))).toBe(true);
   });
 
-  it('moves the removed deep beta resource import to its unique public v5 module', () => {
+  it('keeps the deprecated deep beta resource subpath and renames its moved type', () => {
     const outcome = migrate("import type { Message } from 'openai/resources/beta/threads/messages/messages';\nexport type Saved = Message;\n");
     expect(outcome.manual).toEqual([]);
-    expect(outcome.fileUpdates?.[0]?.contents).toContain("from 'openai/resources/beta/threads/messages'");
+    expect(outcome.fileUpdates).toEqual([]);
   });
 
   it('renames the moved MessageContentText type while preserving its local binding', () => {
@@ -469,7 +469,7 @@ export const result = openai.beta.chat.completions.parse({ model: 'gpt-4o', mess
     const outcome = migrate("import { type MessageContentText as TextPart, type ThreadMessage as LegacyMessage, type MessageContentImageFile as ImagePart } from 'openai/resources/beta/threads/messages/messages';\nexport type Saved = [TextPart, LegacyMessage, ImagePart];\n");
     const output = outcome.fileUpdates?.[0]?.contents ?? '';
     expect(outcome.manual).toEqual([]);
-    expect(output).toContain("import { type TextContentBlock as TextPart, type Message as LegacyMessage, type ImageFileContentBlock as ImagePart } from 'openai/resources/beta/threads/messages'");
+    expect(output).toContain("import { type TextContentBlock as TextPart, type Message as LegacyMessage, type ImageFileContentBlock as ImagePart } from 'openai/resources/beta/threads/messages/messages'");
   });
 
   it('renames moved message types referenced through a namespace import', () => {
@@ -487,13 +487,13 @@ export const result = openai.beta.chat.completions.parse({ model: 'gpt-4o', mess
     expect(output).toContain('export type { TextContentBlock as MessageContentText');
     expect(output).toContain('Message as ThreadMessage');
     expect(output).toContain('ImageFileContentBlock as MessageContentImageFile');
-    expect(output).toContain("from 'openai/resources/beta/threads/messages'");
+    expect(output).toContain("from 'openai/resources/beta/threads/messages/messages'");
   });
 
   it('renames message types in import type queries', () => {
     const outcome = migrate("export type Saved = import('openai/resources/beta/threads/messages/messages').ThreadMessage;\n");
     const output = outcome.fileUpdates?.[0]?.contents ?? '';
-    expect(output).toContain("import('openai/resources/beta/threads/messages').Message");
+    expect(output).toContain("import('openai/resources/beta/threads/messages/messages').Message");
     expect(output).not.toContain('ThreadMessage');
   });
 
@@ -720,11 +720,10 @@ client.files.del('file_1');
     expect(outcome.fileUpdates).toEqual([]);
   });
 
-  it('updates moved re-exports and CommonJS module paths', () => {
+  it('keeps deprecated re-export and CommonJS module paths stable', () => {
     const outcome = migrate("export { OpenAIError } from 'openai/error';\nconst errors = require('openai/error');\n");
     expect(outcome.manual).toEqual([]);
-    expect(outcome.fileUpdates?.[0]?.contents).toContain("from 'openai/core/error'");
-    expect(outcome.fileUpdates?.[0]?.contents).toContain("require('openai/core/error')");
+    expect(outcome.fileUpdates).toEqual([]);
   });
 
   it('rewrites literal v4 runTools event and final method names from the official guide', () => {
@@ -764,5 +763,124 @@ runner.finalFunctionCall();
     const bound = migrate("import OpenAI from 'openai'; const client = new OpenAI(); const runner = client.chat.completions.runTools({tools: []}); const fn = runner.finalFunctionCall.bind(runner);\n");
     expect(bound.fileUpdates).toEqual([]);
     expect(bound.manual.some((item) => item.reason.includes('bound or aliased'))).toBe(true);
+  });
+
+  it('does not rename runTools-shaped methods on unrelated receivers', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+const client = new OpenAI();
+const agent = { runTools() { return { on() {}, finalFunctionCall() {} }; } };
+agent.runTools({}).on('functionCall');
+agent.runTools({}).finalFunctionCall();
+client.chat.completions.runTools({tools: []}).on('functionCall');
+`);
+    const output = outcome.fileUpdates?.[0]?.contents ?? '';
+    expect(output).toContain("agent.runTools({}).on('functionCall')");
+    expect(output).toContain('agent.runTools({}).finalFunctionCall()');
+    expect(output).toContain(".on('functionToolCall')");
+  });
+
+  it.each(['vi.mock', 'jest.mock', 'declare module', 'import'])('keeps deprecated openai subpath %s references in place', (kind) => {
+    const source = kind === 'import' ? "import type { Stream } from 'openai/streaming';" : `${kind}('openai/streaming');`;
+    const outcome = migrate(`${source}\n`);
+    expect(outcome.fileUpdates).toEqual([]);
+  });
+
+  it.each([
+    '[client] = [other];',
+    '({ client } = other);',
+    'client ??= other;',
+    'client ||= other;',
+    'client &&= other;',
+    'for (client of clients) { client.files.del("x"); }',
+  ])('invalidates client aliases after complex assignment: %s', (assignment) => {
+    const outcome = migrate(`import OpenAI from 'openai'; const original = new OpenAI(); let client = original; declare const other: any; ${assignment}\nclient.files.del('x');`);
+    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual.some((item) => item.reason.includes('receiver is not tracked safely'))).toBe(true);
+  });
+
+  it.each([
+    "chunk.choices[0]?.delta?.content?.toLowerCase()",
+    "message.tool_calls[0].function.name.startsWith('x')",
+    "models.records[0].get('m').split(';').filter(Boolean)",
+    'args[0].toString()',
+    'decorator.getArguments()[0].toString()',
+    "completion.choices[0]?.message?.content?.trim()",
+    "headers.map((h) => String(row[h])).join(', ')",
+    'expect(response.choices[0].message).toBeTruthy()',
+    "handlers['x']()",
+  ])('does not flag unrelated computed access: %s', (snippet) => {
+    const outcome = migrate(`import OpenAI from 'openai'; const client = new OpenAI(); const value = ${snippet}; client.models.list();`);
+    expect(outcome.manual).toEqual([]);
+  });
+
+  it.each([
+    "list[0].files.del('x')",
+    "client[key].beta.threads.runs.retrieve('a', 'b')",
+    "openai['chat'].completions.create({model:'x', messages:[]})",
+    "deps.openai.files.del('id')",
+    "S.client.files.del('id')",
+    "this.services.openai.files.del('id')",
+  ])('flags affected method suffixes behind dynamic and aliased paths: %s', (snippet) => {
+    const outcome = migrate(`import OpenAI from 'openai'; const client = new OpenAI(); declare const deps: any; declare const S: any; declare const key: string; ${snippet};`);
+    expect(outcome.manual.length).toBeGreaterThan(0);
+  });
+
+  it('tracks OpenAI clients imported from another local module without the openai token', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('/lib.ts', "import OpenAI from 'openai'; export const client = new OpenAI();");
+    project.createSourceFile('/consumer.ts', "import { client } from './lib'; client.files.del('f');");
+    const outcome = openaiV5.transform(project);
+    expect(outcome.fileUpdates?.some((file) => file.file === '/consumer.ts' && file.contents.includes("client.files.delete('f')"))).toBe(true);
+  });
+
+  it.each(['Client = OpenAI', 'any', 'ReturnType<typeof makeClient>', 'Array<$OpenAI>'])('does not classify uncertain receiver type %s as unrelated', (type) => {
+    const outcome = migrate(`import OpenAI from 'openai'; type Client = OpenAI; declare const receiver: ${type === 'Client = OpenAI' ? 'Client' : type}; receiver.files.del('f');`);
+    expect(outcome.manual.length).toBeGreaterThan(0);
+  });
+
+  it('preserves optional call, type arguments, and comments in named path rewrites', () => {
+    const outcome = migrate(`import OpenAI from 'openai'; const client = new OpenAI();
+client.beta.threads.runs.retrieve?.<string>(/* thread */ threadId, runId);`);
+    const output = outcome.fileUpdates?.[0]?.contents ?? '';
+    expect(output).toContain('retrieve?.<string>(/* thread */ runId, { thread_id: threadId })');
+  });
+
+  it.each([
+    "client.vectorStores.files.poll('store', 'file')",
+    "client.vectorStores.fileBatches.poll('store', 'batch')",
+    "client.vectorStores.fileBatches.uploadAndPoll('store', files)",
+    "client.vectorStores.files.uploadAndPoll('store', files)",
+  ])('flags vector store polling helpers pending v5 signature review: %s', (call) => {
+    const outcome = migrate(`import OpenAI from 'openai'; const client = new OpenAI(); ${call};`);
+    expect(outcome.manual.length).toBeGreaterThan(0);
+    expect(outcome.fileUpdates).toEqual([]);
+  });
+
+  it.each(['RunnableFunction', 'RunnableFunctionWithParse', 'RunnableFunctionWithoutParse', 'ChatCompletionRunFunctionsParams'])
+    ('flags removed v4 type %s for manual review', (name) => {
+      const outcome = migrate(`import OpenAI from 'openai'; type Legacy = OpenAI.${name};`);
+      expect(outcome.manual.length).toBeGreaterThan(0);
+      expect(outcome.fileUpdates).toEqual([]);
+    });
+
+  it('flags Web Headers access after an OpenAI.APIError instance check', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+function read(error: unknown) { if (error instanceof OpenAI.APIError) return error.headers['x-request-id']; }
+`);
+    expect(outcome.manual.some((item) => item.reason.includes('Headers.get'))).toBe(true);
+  });
+
+  it('flags OpenAI Beta Chat Completions type paths and function-call stream events', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+type Legacy = OpenAI.Beta.Chat.Completions.ChatCompletionMessageParam;
+const client = new OpenAI(); client.beta.chat.completions.stream({model:'gpt-4o', messages:[]}).on('functionCall', () => {}).finalFunctionCall();
+`);
+    expect(outcome.manual.some((item) => item.reason.includes('type'))).toBe(true);
+    expect(outcome.manual.some((item) => item.reason.includes('function-call'))).toBe(true);
+  });
+
+  it('flags TypeScript import-equals OpenAI interop for manual review', () => {
+    const outcome = migrate("import OpenAI = require('openai'); const client = new OpenAI(); client.files.del('f');");
+    expect(outcome.manual.some((item) => item.reason.includes('import-equals'))).toBe(true);
   });
 });
