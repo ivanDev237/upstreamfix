@@ -98,6 +98,44 @@ describe('openai v4 to v5', () => {
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
+  it('proposes @types/node itself only when a project typecheck is configured', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-node-repair-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{\n  "dependencies": { "openai": "^4.28.0" },\n  "scripts": { "typecheck": "tsc --noEmit" },\n  "engines": { "node": ">=20" }\n}\n');
+      await writeFile(path.join(cwd, 'tsconfig.json'), '{ "compilerOptions": { "lib": ["ES2022"] } }');
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'server.ts'), "import { readFile } from 'node:fs'; console.log(readFile, process.env.NODE_ENV);\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true, nodeRuntime: 20 });
+      expect(outcome.proposedFiles.find((file) => file.relativePath === 'package.json')?.after).toContain('"@types/node"');
+      expect(outcome.proposedFiles.find((file) => file.relativePath === 'package.json')?.after).toMatch(/"devDependencies"\s*:\s*\{\s*"@types\/node"\s*:\s*"\^20\./);
+      expect(outcome.manual.some((item) => item.file === 'server.ts' && item.reason.includes('@types/node'))).toBe(false);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('does not auto-add Node types when no typecheck is configured', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-node-no-check-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.28.0"},"engines":{"node":">=20"}}');
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'server.ts'), "console.log(process.env.NODE_ENV);\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true, nodeRuntime: 20 });
+      expect(outcome.proposedFiles.some((file) => file.relativePath === 'package.json' && file.after.includes('@types/node'))).toBe(false);
+      expect(outcome.manual.some((item) => item.file === 'server.ts' && item.reason.includes('@types/node'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('tracks a union client only inside its OpenAI instanceof branch', () => {
+    const outcome = migrate(`import OpenAI, { type ClientOptions } from 'openai';
+function remove(client: ClientOptions | OpenAI) {
+  if (client instanceof OpenAI) client.files.del('f');
+  else client.files.del('not-openai');
+}`);
+    const next = outcome.fileUpdates?.[0]?.contents ?? '';
+    expect(next).toContain("client.files.delete('f')");
+    expect(next).toContain("client.files.del('not-openai')");
+    expect(outcome.manual.some((item) => item.snippet.includes("client.files.del('f')"))).toBe(false);
+  });
+
   it('follows JSONC tsconfig extends and detects Node types excluded by compilerOptions.types', async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-node-extends-'));
     try {

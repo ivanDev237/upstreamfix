@@ -121,13 +121,18 @@ describe('public repository benchmark helpers', () => {
   });
   it('reports the automatic rate using migration changes and manual items', () => {
     const report = renderBenchmarkReport([
-      { name: 'sample', commit: 'a'.repeat(40), status: 'completed', usages: 3, migrated: 2, manual: 1, typecheck: { before: 'pass', after: 'fail: TS error' }, tests: { before: 'fail: existing test', after: 'pass' }, details: '' },
+      { name: 'sample', commit: 'a'.repeat(40), status: 'completed', usages: 3, migrated: 1, manual: 2, typecheck: { before: 'pass', after: 'fail: TS error' }, tests: { before: 'fail: existing test', after: 'pass' }, details: '',
+        manualFindings: [
+          { file: 'src/a.ts', line: 1, reason: 'Human choice', classification: 'legitimate' },
+          { file: 'src/b.ts', line: 2, reason: 'Still automatable', classification: 'not automated' },
+        ] },
     ]);
 
-    expect(report).toContain('66.7%');
+    expect(report).toContain('33.3%');
     expect(report).toContain('2 of 3 detected migration items');
-    expect(report).toContain('Automatic rate excluding manual-review items: **100.0%** (2 of 2 eligible items).');
-    expect(report).toContain('| sample | `aaaaaaaaaaaa` | completed | 3 | 2 | 1 | pass | fail: TS error | fail: existing test | pass |  |');
+    expect(report).toContain('Criterion rate excluding legitimate manual items: **50.0%** (1 of 2 eligible items).');
+    expect(report).toContain('| sample | src/a.ts | 1 | legitimate | Human choice |');
+    expect(report).toContain('| sample | src/b.ts | 2 | not automated | Still automatable |');
   });
   it('Z3 shows the file, line and reason for each benchmark manual finding', () => {
     const report = renderBenchmarkReport([{
