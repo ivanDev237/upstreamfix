@@ -288,6 +288,13 @@ export const result = openai.beta.chat.completions.parse({ model: 'gpt-4o', mess
     expect(outcome.fileUpdates?.[0]?.contents).toContain("from 'openai/resources/beta/threads/messages'");
   });
 
+  it('renames the moved MessageContentText type while preserving its local binding', () => {
+    const outcome = migrate("import type { MessageContentText } from 'openai/resources/beta/threads/messages/messages';\nexport type Saved = MessageContentText;\n");
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('TextContentBlock as MessageContentText');
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('export type Saved = MessageContentText');
+  });
+
   it.each([
     "export { fileFromPath } from 'openai/uploads';\n",
     "const { fileFromPath: upload } = require('openai/uploads');\nupload('/tmp/x');\n",
