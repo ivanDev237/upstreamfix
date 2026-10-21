@@ -63,13 +63,15 @@ describe('public repository benchmark helpers', () => {
   });
   it('T34 commits the latest measured OpenAI report with exact gross and eligible rates', async () => {
     const report = await readFile(new URL('../benchmark/openai-5-results.md', import.meta.url), 'utf8');
-    expect(report).toContain('Automatic migration rate: **46.7%** (28 of 60 detected migration items).');
-    expect(report).toContain('Criterion rate excluding legitimate manual items: **53.8%** (28 of 52 eligible items; 8 legitimate manual items excluded).');
-    expect(report).toContain('Run ID: `39581519263`');
-    expect(report).toContain('Tool SHA: `10704e8c10a2649dc1b093e77a2552836ab2628e`');
+    expect(report).toContain('Automatic migration rate: **57.1%** (32 of 56 detected migration items).');
+    expect(report).toContain('Criterion rate excluding legitimate manual items: **66.7%** (32 of 48 eligible items; 8 legitimate manual items excluded).');
+    expect(report).toContain('Run ID: `39591178352`');
+    expect(report).toContain('Tool SHA: `1a3e7fd36cd6ef721a58190963fd99f1f67a8ec2`');
     expect(report).toContain('Run status: **complete** (20 of 20 repositories recorded).');
-    expect(report).toContain('| convex-title-generator | `f77f2d452bc7` | manual review required | 6 | 3 | 3 |');
+    expect(report).toContain('| convex-title-generator | `f77f2d452bc7` | manual review required | 7 | 3 | 4 |');
     expect(report).toContain('| stackwise | `c49a192df253` | manual review required |');
+    expect(report).toContain('| is-even-ai | src/IsEvenAiOpenAi.ts | 45 | not automated |');
+    expect(report).toContain('| rowfill | src/core/extractTable.ts | 58 | legitimate |');
   });
   it('declares Node 20 only in a disposable OpenAI benchmark manifest', () => {
     const manifest = { dependencies: { openai: '^4.0.0' } } as { dependencies: { openai: string }; engines?: { node: string } };
