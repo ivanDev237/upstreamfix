@@ -702,8 +702,12 @@ export function compilerRegressionFindings(before: string, after: string): Array
     const key = `${file}\0${diagnostic.code}\0${diagnostic.message}`;
     if (seen.has(key) || seen.size >= 5) return [];
     seen.add(key);
+    const toolContentWidening = [2339, 2345].includes(diagnostic.code)
+      && diagnostic.message.includes('ChatCompletionContentPartText[]');
     return [{ file, line: diagnostic.line,
-      reason: `New compiler diagnostic TS${diagnostic.code} after installing the exact target SDK: ${diagnostic.message}. The cause is not attributed automatically; review this line before accepting the migration.` }];
+      reason: toolContentWidening
+        ? `OpenAI v5 tool message content may be a ChatCompletionContentPartText[] as well as a string; extract or narrow text parts before calling string methods or adding content to string collections.`
+        : `New compiler diagnostic TS${diagnostic.code} after installing the exact target SDK: ${diagnostic.message}. The cause is not attributed automatically; review this line before accepting the migration.` }];
   });
 }
 
