@@ -356,16 +356,35 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     if (!symbol || !complexClients.has(symbol) || !Node.isIdentifier(right) || !imported.has(right.getText())) continue;
     narrowedClientScopes.set(symbol, statement.getThenStatement());
   }
+  const assignments = new Map<MorphSymbol, Node[]>();
+  for (const assignment of file.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
+    if (assignment.getOperatorToken().getKind() !== SyntaxKind.EqualsToken || !Node.isIdentifier(assignment.getLeft())) continue;
+    const symbol = assignment.getLeft().getSymbol();
+    if (!symbol) continue;
+    const values = assignments.get(symbol) ?? [];
+    values.push(assignment.getRight());
+    assignments.set(symbol, values);
+  }
   // A separately declared alias remains safe when every observed initializer
-  // is itself a tracked client. Iterate to support short alias chains.
+  // and assignment is itself a tracked client. Iterate to support short alias
+  // chains while leaving mixed-source variables untracked.
   for (let pass = 0; pass < file.getDescendantsOfKind(SyntaxKind.VariableDeclaration).length; pass++) {
     let changed = false;
     for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
       const initializer = variable.getInitializer();
       const symbol = variable.getNameNode().getSymbol();
-      if (!symbol || clients.has(symbol) || !initializer || !Node.isIdentifier(initializer)) continue;
-      const source = initializer.getSymbol();
-      if (source && clients.has(source)) { clients.add(symbol); changed = true; }
+      if (!symbol || clients.has(symbol)) continue;
+      const values = [...(initializer ? [initializer] : []), ...(assignments.get(symbol) ?? [])];
+      if (values.length === 0) continue;
+      const onlyTrackedClients = values.every((value) => {
+        const unwrapped = unwrapTransparentExpression(value);
+        if (Node.isIdentifier(unwrapped)) {
+          const source = unwrapped.getSymbol();
+          return Boolean(source && clients.has(source));
+        }
+        return Node.isNewExpression(unwrapped) && imported.has(unwrapped.getExpression().getText());
+      });
+      if (onlyTrackedClients) { clients.add(symbol); changed = true; }
     }
     if (!changed) break;
   }
