@@ -10,6 +10,11 @@ it('P3.4 marks the LUMEN pass-to-fail typecheck as needing review', () => {
   expect(hasVerificationRegression('pass', 'fail: src/components/ErrorBoundary.tsx TS2580')).toBe(true);
   expect(hasVerificationRegression('fail: existing', 'fail: existing')).toBe(false);
 });
+it('does not count a benchmark-only Node types repair as an automatic migration', async () => {
+  const source = await readFile(new URL('../scripts/benchmark.ts', import.meta.url), 'utf8');
+  expect(source).not.toMatch(/tryNodeTypesRepair|acceptedNodeTypesRepair/);
+  expect(source).not.toMatch(/result\.migrated\s*\+=\s*1/);
+});
 it('records a newly failing typecheck at its source line without claiming the SDK caused it', () => {
   const findings = compilerRegressionFindings('pass', "fail: src/conversation.ts(49,32): error TS2339: Property 'chat' does not exist on type 'Beta'.");
   expect(findings).toEqual([{ file: 'src/conversation.ts', line: 49,
