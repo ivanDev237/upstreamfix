@@ -65,8 +65,11 @@ interface Edit { start: number; end: number; replacement: string; rule: string; 
 function pathParts(node: Node): string[] {
   if (Node.isIdentifier(node)) return [node.getText()];
   if (Node.isPropertyAccessExpression(node)) return [...pathParts(node.getExpression()), node.getName()];
-  if (Node.isElementAccessExpression(node) && node.getArgumentExpression() && Node.isStringLiteral(node.getArgumentExpression()!))
-    return [...pathParts(node.getExpression()), node.getArgumentExpression()!.getLiteralText()];
+  if (Node.isElementAccessExpression(node)) {
+    const argument = node.getArgumentExpression();
+    if (argument && Node.isStringLiteral(argument))
+      return [...pathParts(node.getExpression()), argument.getText().slice(1, -1)];
+  }
   return [];
 }
 
@@ -458,8 +461,11 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     }
     let wrappedTarget: Node | undefined;
     let wrapped = expression;
-    while (Node.isCallExpression(wrapped) && Node.isPropertyAccessExpression(wrapped.getExpression())
-      && ['call', 'apply', 'bind'].includes(wrapped.getExpression().getName())) wrapped = wrapped.getExpression();
+    while (Node.isCallExpression(wrapped)) {
+      const wrappedExpression = wrapped.getExpression();
+      if (!Node.isPropertyAccessExpression(wrappedExpression) || !['call', 'apply', 'bind'].includes(wrappedExpression.getName())) break;
+      wrapped = wrappedExpression;
+    }
     if (Node.isPropertyAccessExpression(wrapped) && ['call', 'apply', 'bind'].includes(wrapped.getName()))
       wrappedTarget = wrapped.getExpression();
     if (wrappedTarget) {
