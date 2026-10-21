@@ -2,7 +2,7 @@ import { maskSecrets, sanitizeTerminalText } from '../core/report.js';
 import { migrations } from '../migrations/index.js';
 import type { ActionConfig } from './config.js';
 import { isDeepStrictEqual } from 'node:util';
-import { Project } from 'ts-morph';
+import { Project, ts } from 'ts-morph';
 
 export interface Proposal {
   schema: 1;
@@ -202,6 +202,7 @@ export function validatePublishableBundle(proposal: Proposal, blobs: Record<stri
       continue;
     }
     if (/(?:^|\/)package\.json$/.test(file)) validateManifestDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
+    else if (/(?:^|\/)tsconfig\.json$/.test(file)) validateNodeTypesTsconfigDelta(blob.before, blob.after, migration.packageName, migration.toMajor);
     else if (/(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json)$/.test(file)) {
       const lock = parseJsonObject(blob.after, file);
       if (![2, 3].includes(lock.lockfileVersion as number) || !record(lock.packages)) throw new Error('Bundle npm lockfile format is unsupported.');
@@ -296,7 +297,46 @@ function validateManifestDelta(beforeText: string, afterText: string, packageNam
     if (beforeEngines) delete record(normalized.engines)!.node;
     else delete normalized.engines;
   }
+  const dependencySections = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'];
+  const beforeNodeTypes = dependencySections.map((section) => record(before[section])?.['@types/node']);
+  const afterNodeTypes = dependencySections.map((section) => record(after[section])?.['@types/node']);
+  if (JSON.stringify(beforeNodeTypes) !== JSON.stringify(afterNodeTypes)) {
+    const runtime = typeof afterEngines?.node === 'string' ? /^\s*>=\s*(\d+)(?:\.0(?:\.0)?)?\s*$/.exec(afterEngines.node) : null;
+    const added = afterNodeTypes[1];
+    if (packageName !== 'openai' || targetMajor !== 5 || beforeNodeTypes.some((value) => value !== undefined)
+      || typeof added !== 'string' || !runtime || Number(runtime[1]) < 20 || added !== `^${runtime[1]}.0.0`
+      || afterNodeTypes.some((value, index) => index !== 1 && value !== undefined)) {
+      throw new Error('Bundle package.json adds or changes @types/node outside the deterministic Node runtime repair.');
+    }
+    const normalizedDevDependencies = record(normalized.devDependencies);
+    if (normalizedDevDependencies) {
+      delete normalizedDevDependencies['@types/node'];
+      if (!record(before.devDependencies)) delete normalized.devDependencies;
+    }
+  }
   if (!isDeepStrictEqual(normalized, before)) throw new Error('Bundle package.json changes fields beyond the SDK version or approved Node.js requirement.');
+}
+
+function validateNodeTypesTsconfigDelta(beforeText: string, afterText: string, packageName: string, targetMajor: number): void {
+  if (packageName !== 'openai' || targetMajor !== 5) throw new Error('Bundle tsconfig changes are only allowed for the OpenAI Node type repair.');
+  const beforeParsed = ts.parseConfigFileTextToJson('tsconfig.json', beforeText);
+  const afterParsed = ts.parseConfigFileTextToJson('tsconfig.json', afterText);
+  if (beforeParsed.error || afterParsed.error || !record(beforeParsed.config) || !record(afterParsed.config))
+    throw new Error('Bundle tsconfig is invalid JSONC.');
+  const before = structuredClone(beforeParsed.config) as Record<string, unknown>;
+  const after = structuredClone(afterParsed.config) as Record<string, unknown>;
+  const beforeOptions = record(before.compilerOptions);
+  const afterOptions = record(after.compilerOptions);
+  const beforeTypes = beforeOptions?.types;
+  const afterTypes = afterOptions?.types;
+  if (!beforeOptions || !afterOptions || !Array.isArray(beforeTypes) || !beforeTypes.every((item) => typeof item === 'string')
+    || beforeTypes.includes('node') || !Array.isArray(afterTypes)
+    || !afterTypes.every((item) => typeof item === 'string')
+    || !isDeepStrictEqual(afterTypes, [...beforeTypes, 'node'])) {
+    throw new Error('Bundle tsconfig may only append "node" to an existing compilerOptions.types array.');
+  }
+  afterOptions.types = [...beforeTypes];
+  if (!isDeepStrictEqual(after, before)) throw new Error('Bundle tsconfig changes fields beyond the deterministic node types addition.');
 }
 
 function sameList(left: string[], right: string[]): boolean {

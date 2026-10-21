@@ -1,4 +1,4 @@
-import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
+import { closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { builtinModules } from 'node:module';
 import { execFile as execFileCallback } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -14,6 +14,15 @@ import { parseManifest } from './manifest.js';
 import { guaranteesNodeMajor } from './node-range.js';
 
 const execFile = promisify(execFileCallback);
+
+function projectPath(root: string, candidate: string): string {
+  const absoluteRoot = path.resolve(root);
+  const absolute = path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(absoluteRoot, candidate);
+  const relative = path.relative(absoluteRoot, absolute);
+  if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`))
+    throw new Error('Migration produced a path outside the project root; no file content was included in the report.');
+  return relative.split(path.sep).join('/') || '.';
+}
 
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs']);
 const MAX_DIFF_INPUT_BYTES = 1024 * 1024;
@@ -52,7 +61,7 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
     skipAddingFilesFromTsConfig: true,
     compilerOptions: { allowJs: true },
   });
-  const manifests = findPackageManifests(root, excludedDirectories).map((file) => {
+  const manifests = findPackageManifests(root, excludedDirectories).filter((file) => isSafeProjectFile(root, file)).map((file) => {
     let parsed: PackageManifest | undefined;
     let invalid = false;
     try {
@@ -321,17 +330,15 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     ? await prepareNodeTypesRepair(options)
     : { notes: [], changes: [], manual: [] } satisfies ManifestOutcome;
   if (nodeTypesRepair.changes.length > 0) {
+    const packagePaths = findPackageManifests(options.cwd, options.excludedDirectories);
     const repairedManifestPaths = new Set(nodeTypesRepair.changes
       .filter((change) => path.basename(change.absolutePath) === 'package.json')
       .map((change) => change.absolutePath));
     for (let index = result.manual.length - 1; index >= 0; index--) {
       const finding = result.manual[index]!;
       if (/OpenAI v4 may have supplied @types\/node|OpenAI v5 requires Web fetch types/.test(finding.reason)
-        && [...repairedManifestPaths].some((manifestPath) => {
-          const packageDirectory = path.dirname(manifestPath);
-          const findingPath = path.resolve(options.cwd, finding.file);
-          return findingPath === packageDirectory || findingPath.startsWith(packageDirectory + path.sep);
-        })) {
+        && [...repairedManifestPaths].some((manifestPath) =>
+          closestManifest(path.resolve(options.cwd, finding.file), packagePaths) === manifestPath)) {
         result.manual.splice(index, 1);
       }
     }
@@ -396,14 +403,15 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     const before = originalSources.get(filePath);
     const after = sourceUpdates.get(filePath);
     if (before === undefined || after === undefined) return [];
-    const relativePath = path.relative(options.cwd, filePath);
+    const relativePath = projectPath(options.cwd, filePath);
     proposedFiles.push({ relativePath, before, after });
     const diff = unifiedDiff(relativePath, before, after);
     return diff ? [diff] : [];
   });
   for (const change of manifest.changes) {
-    proposedFiles.push({ relativePath: change.relativePath, before: change.before, after: change.after });
-    const diff = unifiedDiff(change.relativePath, change.before, change.after);
+    const relativePath = projectPath(options.cwd, change.absolutePath);
+    proposedFiles.push({ relativePath, before: change.before, after: change.after });
+    const diff = unifiedDiff(relativePath, change.before, change.after);
     if (diff) proposedDiff.push(diff);
   }
   let reportedCharacters = 0;
@@ -419,11 +427,11 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   return {
     ...result,
     filesChanged: [...new Set([
-      ...result.filesChanged.map((file) => path.relative(options.cwd, file)),
-      ...manifest.changes.map((change) => change.relativePath),
+      ...result.filesChanged.map((file) => projectPath(options.cwd, file)),
+      ...manifest.changes.map((change) => projectPath(options.cwd, change.absolutePath)),
     ])],
-    changes: result.changes.map((c) => ({ ...c, file: path.relative(options.cwd, c.file) })),
-    manual: [...result.manual, ...manifest.manual].map((m) => ({ ...m, file: path.relative(options.cwd, m.file) })),
+    changes: result.changes.map((c) => ({ ...c, file: projectPath(options.cwd, c.file) })),
+    manual: [...result.manual, ...manifest.manual].map((m) => ({ ...m, file: projectPath(options.cwd, m.file) })),
     manifestNotes: [...new Set([...compatibilityNotes, ...manifest.notes])],
     proposedDiff,
     proposedFiles,
@@ -433,7 +441,8 @@ export async function runMigration(migration: Migration, options: RunOptions): P
 function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonly string[] = []): ManualItem[] {
   const findings: ManualItem[] = [];
   const sourceFiles = findAllSourceFiles(root, excludedDirectories);
-  for (const manifestPath of findPackageManifests(root, excludedDirectories)) {
+  const manifestPaths = findPackageManifests(root, excludedDirectories);
+  for (const manifestPath of manifestPaths) {
     let manifest: PackageManifest;
     try { manifest = parseManifest<PackageManifest>(readFileSync(manifestPath, 'utf8')); }
     catch { continue; }
@@ -458,11 +467,21 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
     const tsconfigPath = path.join(directory, 'tsconfig.json');
     let compilerOptions: Record<string, unknown> | undefined;
     try {
+      let configExists = false;
+      try { configExists = statSync(tsconfigPath).isFile(); } catch { /* no local tsconfig */ }
+      const unsafeConfig = configExists && unsafeTsconfigReference(root, tsconfigPath);
+      if (unsafeConfig) {
+        findings.push({ file: tsconfigPath, line: 1,
+          reason: 'The OpenAI type environment includes a symlinked or out-of-project tsconfig; it was not read. Review the configuration manually.',
+          snippet: 'tsconfig path withheld' });
+        compilerOptions = undefined;
+      } else {
       const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, {}, {
         ...ts.sys,
         onUnRecoverableConfigFileDiagnostic: () => undefined,
       });
       if (parsed) compilerOptions = parsed.options as unknown as Record<string, unknown>;
+      }
     } catch { /* Missing or invalid configuration cannot establish the active compiler environment. */ }
     const nodeTypes = manifest.devDependencies?.['@types/node'] ?? manifest.dependencies?.['@types/node'];
     const nodeTypesMajor = /^\s*[~^]?(\d+)/.exec(nodeTypes ?? '');
@@ -511,7 +530,8 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
     }
     if (nodeTypesVisible) continue;
     for (const sourcePath of sourceFiles) {
-      if (!(sourcePath === directory || sourcePath.startsWith(directory + path.sep))) continue;
+      const owner = closestManifest(sourcePath, manifestPaths);
+      if (owner !== manifestPath) continue;
       if (!/\.[cm]?tsx?$/.test(sourcePath) && !(compilerOptions?.checkJs === true && /\.[cm]?jsx?$/.test(sourcePath))) continue;
       if (statSync(sourcePath).size > MAX_SOURCE_BYTES) continue;
       const source = readFileSync(sourcePath, 'utf8');
@@ -540,10 +560,8 @@ async function prepareNodeTypesRepair(options: RunOptions): Promise<ManifestOutc
     if (!(['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
       .some((section) => isSupportedSourceMajor(manifest[section]?.openai ?? '', 4))) continue;
     const packageDirectory = path.dirname(manifestPath);
-    const relevant = findings.some((finding) => {
-      const findingPath = path.resolve(options.cwd, finding.file);
-      return findingPath === packageDirectory || findingPath.startsWith(packageDirectory + path.sep);
-    });
+    const packageManifests = findPackageManifests(options.cwd, options.excludedDirectories);
+    const relevant = findings.some((finding) => closestManifest(path.resolve(options.cwd, finding.file), packageManifests) === manifestPath);
     if (!relevant) continue;
     if ((['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
       .some((section) => typeof manifest[section]?.['@types/node'] === 'string')) continue;
@@ -556,6 +574,12 @@ async function prepareNodeTypesRepair(options: RunOptions): Promise<ManifestOutc
     const tsconfigPath = path.join(packageDirectory, 'tsconfig.json');
     let tsconfigChange: ManifestFileChange | undefined;
     try {
+      if (await exists(tsconfigPath) && unsafeTsconfigReference(options.cwd, tsconfigPath)) {
+        manual.push({ file: tsconfigPath, line: 1,
+          reason: 'The Node type repair was withheld because tsconfig.json or an extends target is symlinked or outside the project.',
+          snippet: 'tsconfig repair withheld' });
+        continue;
+      }
       const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, {}, {
         ...ts.sys,
         onUnRecoverableConfigFileDiagnostic: () => undefined,
@@ -574,6 +598,13 @@ async function prepareNodeTypesRepair(options: RunOptions): Promise<ManifestOutc
     let lockChange: ManifestFileChange | undefined;
     if (locks.length > 0) {
       const lockPath = path.resolve(options.cwd, locks[0]!);
+      const unsafeLock = locks.find((lock) => !isSafeProjectFile(options.cwd, path.resolve(options.cwd, lock)));
+      if (unsafeLock) {
+        manual.push({ file: path.resolve(options.cwd, unsafeLock), line: 1,
+          reason: 'The Node type repair was withheld because the lockfile is symlinked or resolves outside the project.',
+          snippet: 'lockfile repair withheld' });
+        continue;
+      }
       const lockResult = locks.length !== 1 ? { reason: `Unsupported lockfile set: ${locks.join(', ')}.` }
         : path.basename(lockPath) === 'package-lock.json'
           ? await regeneratePackageLock(manifestPath, lockPath, updated, options.cwd, options.registryBefore)
@@ -818,6 +849,14 @@ async function migrateManifests(
     const existingLocks = await findLockfiles(options.cwd, path.dirname(manifestPath));
     let lockChange: ManifestFileChange | undefined;
     if (existingLocks.length > 0) {
+      const unsafeLock = existingLocks.find((lock) => !isSafeProjectFile(options.cwd, path.resolve(options.cwd, lock)));
+      if (unsafeLock) {
+        notes.push(...fileNotes.filter((note) => !note.includes(' → ')));
+        manual.push({ file: path.resolve(options.cwd, unsafeLock), line: 1,
+          reason: 'This package lockfile is symlinked or resolves outside the project; it was not read or regenerated.',
+          snippet: 'lockfile update withheld' });
+        continue;
+      }
       const lockResult = existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'package-lock.json'
         ? await regeneratePackageLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd, options.registryBefore)
         : existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'pnpm-lock.yaml'
@@ -1152,6 +1191,8 @@ async function exists(file: string): Promise<boolean> {
 }
 
 async function findLockfiles(root: string, packageDirectory: string): Promise<string[]> {
+  root = path.resolve(root);
+  packageDirectory = path.resolve(packageDirectory);
   const names = ['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock'];
   const found: string[] = [];
   let directory = packageDirectory;
@@ -1189,6 +1230,68 @@ function findPackageManifests(root: string, excludedDirectories: readonly string
   };
   visit(root);
   return found;
+}
+
+function closestManifest(sourcePath: string, manifests: readonly string[]): string | undefined {
+  const source = path.resolve(sourcePath);
+  return manifests
+    .filter((manifest) => {
+      const directory = path.dirname(path.resolve(manifest));
+      return source === directory || source.startsWith(directory + path.sep);
+    })
+    .sort((left, right) => path.dirname(path.resolve(right)).length - path.dirname(path.resolve(left)).length)[0];
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`);
+}
+
+function isSafeProjectFile(root: string, candidate: string): boolean {
+  const absoluteRoot = path.resolve(root);
+  const absolute = path.resolve(candidate);
+  if (!isPathWithin(absoluteRoot, absolute)) return false;
+  try {
+    let current = absoluteRoot;
+    for (const part of path.relative(absoluteRoot, absolute).split(path.sep).filter(Boolean)) {
+      current = path.join(current, part);
+      const metadata = lstatSync(current);
+      if (metadata.isSymbolicLink()) return false;
+    }
+    return statSync(absolute).isFile() && isPathWithin(realpathSync(absoluteRoot), realpathSync(absolute));
+  } catch { return false; }
+}
+
+function unsafeTsconfigReference(root: string, initialConfig: string): boolean {
+  const visited = new Set<string>();
+  const visit = (configPath: string): boolean => {
+    const absolute = path.resolve(configPath);
+    if (!isPathWithin(root, absolute) || !isSafeProjectFile(root, absolute)) return true;
+    const canonical = realpathSync(absolute);
+    if (visited.has(canonical)) return true;
+    visited.add(canonical);
+    let parsed: ReturnType<typeof ts.parseConfigFileTextToJson>;
+    try { parsed = ts.parseConfigFileTextToJson(absolute, readFileSync(absolute, 'utf8')); }
+    catch { return false; }
+    if (parsed.error || !parsed.config || typeof parsed.config !== 'object') return false;
+    const extendsValue: unknown = parsed.config.extends;
+    const references = typeof extendsValue === 'string' ? [extendsValue]
+      : Array.isArray(extendsValue) ? extendsValue.filter((entry): entry is string => typeof entry === 'string') : [];
+    for (const reference of references) {
+      let base: string | undefined;
+      if (reference.startsWith('.') || path.isAbsolute(reference)) {
+        const target = path.resolve(path.dirname(absolute), reference);
+        const candidates = path.extname(target) ? [target] : [target, `${target}.json`, path.join(target, 'tsconfig.json')];
+        base = candidates.find((candidate) => { try { return statSync(candidate).isFile(); } catch { return false; } }) ?? target;
+      } else {
+        base = ts.resolveModuleName(reference, absolute, {}, ts.sys).resolvedModule?.resolvedFileName;
+        if (!base) return true;
+      }
+      if (visit(base)) return true;
+    }
+    return false;
+  };
+  return visit(initialConfig);
 }
 
 function addNodeEngineToManifest(raw: string, major: number): string | undefined {

@@ -191,6 +191,22 @@ describe('Action publication boundary', () => {
     const before = "import * as admin from 'firebase-admin';\nadmin.initializeApp();\n";
     expect(() => validatePublishableBundle({ ...proposal, files: ['server.ts'] }, { 'server.ts': { before, after: 'require(\"evil\")\n' } }, identity)).toThrow(/migration|source/i);
   });
+  it('allows only deterministic OpenAI @types/node and tsconfig node type additions', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply openai@5 migration with UpstreamFix' };
+    const beforePackage = '{"dependencies":{"openai":"^4.28.0"},"engines":{"node":">=20"}}';
+    const afterPackage = '{"dependencies":{"openai":"^5.0.0"},"engines":{"node":">=20"},"devDependencies":{"@types/node":"^20.0.0"}}';
+    const beforeConfig = '{\n  "compilerOptions": {\n    "types": ["jest"]\n  }\n}\n';
+    const afterConfig = '{\n  "compilerOptions": {\n    "types": ["jest", "node"]\n  }\n}\n';
+    expect(() => validatePublishableBundle({ ...proposal, migration: 'openai@5', files: ['package.json', 'tsconfig.json'], commit, verification: 'passed' }, {
+      'package.json': { before: beforePackage, after: afterPackage }, 'tsconfig.json': { before: beforeConfig, after: afterConfig },
+    }, identity)).not.toThrow();
+    expect(() => validatePublishableBundle({ ...proposal, migration: 'openai@5', files: ['package.json'], commit, verification: 'passed' }, {
+      'package.json': { before: beforePackage, after: afterPackage.replace('^20.0.0', '^18.0.0') },
+    }, identity)).toThrow(/@types\/node|package.json/i);
+    expect(() => validatePublishableBundle({ ...proposal, migration: 'openai@5', files: ['package.json', 'tsconfig.json'], commit, verification: 'passed' }, {
+      'package.json': { before: beforePackage, after: afterPackage }, 'tsconfig.json': { before: beforeConfig, after: afterConfig.replace('"jest"', '"jest", "unsafe"') },
+    }, identity)).toThrow(/tsconfig|deterministic/i);
+  });
   it('X4 accepts the exact bytes of a normal Firebase source migration', () => {
     const before = "import * as admin from 'firebase-admin';\nadmin.initializeApp();\n";
     const project = new Project({ useInMemoryFileSystem: true, skipAddingFilesFromTsConfig: true, compilerOptions: { allowJs: true } });
