@@ -353,7 +353,8 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     return inspect(type);
   };
   const isRunsSubresourceType = (type: Node | undefined): boolean => Boolean(type
-    && [...imported].some((name) => new RegExp(`(?:^|[|&()<>,\\s])${escapeRegExp(name)}\\.Beta\\.Threads\\.Runs(?:$|[|&)>?,\\s])`).test(type.getType().getText())));
+    && [...imported].some((name) => new RegExp(`(?:^|[|&()<>,\\s])${escapeRegExp(name)}\\.Beta\\.Threads\\.Runs(?:$|[|&)>?,\\s])`)
+      .test(`${type.getText()} ${type.getType().getText()}`)));
   // Trace the repository's explicit OpenAI observation factory shape without
   // trusting arbitrary calls that happen to return a similarly named value.
   for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
@@ -661,7 +662,8 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     }
     if (!initializer || !Node.isPropertyAccessExpression(initializer)) continue;
     const root = rootIdentifier(initializer);
-    if (root?.getSymbol() && clients.has(root.getSymbol()!) && pathParts(initializer).length >= 2) {
+    if (root?.getSymbol() && clients.has(root.getSymbol()!) && pathParts(initializer).length >= 2
+      && !isRunsSubresourceType(variable.getTypeNode())) {
       addManual(result, file, variable, 'A destructured or aliased OpenAI subclient needs manual review of its v5 methods.');
     }
   }
