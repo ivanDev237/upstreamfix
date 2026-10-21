@@ -1,4 +1,5 @@
 import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
+import { builtinModules } from 'node:module';
 import { execFile as execFileCallback } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { registerTemporaryCleanup } from './process-cleanup.js';
@@ -20,6 +21,11 @@ const MAX_DIFF_OUTPUT_CHARS = 64 * 1024;
 const MAX_REPORT_DIFF_CHARS = 256 * 1024;
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const LOCKFILE_NAMES = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock']);
+const NODE_BUILTIN_MODULES = new Set(builtinModules.map((name) => name.replace(/^node:/, '')));
+const NODE_ONLY_GLOBALS = new Set([
+  'Buffer', '__dirname', '__filename', 'clearImmediate', 'exports', 'global', 'module', 'process', 'require',
+  'setImmediate', 'NodeJS',
+]);
 
 export function loadProject(cwd: string, packageName = 'firebase-admin'): Project {
   const project = new Project({
@@ -205,11 +211,11 @@ function findSourceFiles(root: string, packageName: string, excludedDirectories:
       if (!entry.isFile() || entry.name.endsWith('.d.ts')) continue;
       if (!SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
       if (statSync(absolutePath).size > MAX_SOURCE_BYTES) {
-        if (largeFileContainsPackage(absolutePath, packageName)) found.push(absolutePath);
+        if (packageName === '' || largeFileContainsPackage(absolutePath, packageName)) found.push(absolutePath);
       }
       else {
         const source = readFileSync(absolutePath, 'utf8');
-        if (source.includes(packageName) || (packageName === 'stripe' && /\bstripe\b/i.test(source))) found.push(absolutePath);
+        if (packageName === '' || source.includes(packageName) || (packageName === 'stripe' && /\bstripe\b/i.test(source))) found.push(absolutePath);
       }
     }
   };
@@ -366,7 +372,7 @@ export async function runMigration(migration: Migration, options: RunOptions): P
 
 function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonly string[] = []): ManualItem[] {
   const findings: ManualItem[] = [];
-  const sourceFiles = findSourceFiles(root, 'process', excludedDirectories);
+  const sourceFiles = findSourceFiles(root, '', excludedDirectories);
   for (const manifestPath of findPackageManifests(root, excludedDirectories)) {
     let manifest: PackageManifest;
     try { manifest = parseManifest<PackageManifest>(readFileSync(manifestPath, 'utf8')); }
@@ -392,10 +398,12 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
     const tsconfigPath = path.join(directory, 'tsconfig.json');
     let compilerOptions: Record<string, unknown> | undefined;
     try {
-      const config = ts.parseConfigFileTextToJson(tsconfigPath, readFileSync(tsconfigPath, 'utf8'));
-      if (!config.error && config.config && typeof config.config.compilerOptions === 'object')
-        compilerOptions = config.config.compilerOptions as Record<string, unknown>;
-    } catch { /* A missing tsconfig cannot establish the active compiler environment. */ }
+      const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, {}, {
+        ...ts.sys,
+        onUnRecoverableConfigFileDiagnostic: () => undefined,
+      });
+      if (parsed) compilerOptions = parsed.options as unknown as Record<string, unknown>;
+    } catch { /* Missing or invalid configuration cannot establish the active compiler environment. */ }
     const nodeTypes = manifest.devDependencies?.['@types/node'] ?? manifest.dependencies?.['@types/node'];
     const nodeTypesMajor = /^\s*[~^]?(\d+)/.exec(nodeTypes ?? '');
     const workersTypes = manifest.devDependencies?.['@cloudflare/workers-types'] ?? manifest.dependencies?.['@cloudflare/workers-types'];
@@ -435,21 +443,56 @@ function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonl
         reason: 'OpenAI v5 requires Web fetch types (RequestInit, Headers, Blob, File). This tsconfig excludes DOM and the package lacks @types/node; choose a compatible DOM lib or @types/node >=20, then typecheck. The correct runtime target cannot be inferred safely.',
         snippet: `compilerOptions.lib: ${JSON.stringify(compilerOptions.lib)}` });
     }
-    if (manifest.dependencies?.['@types/node'] || manifest.devDependencies?.['@types/node']) continue;
+    const explicitlyLoadedTypes = Array.isArray(compilerOptions?.types)
+      ? (compilerOptions.types as unknown[]).filter((value): value is string => typeof value === 'string')
+      : undefined;
+    const nodeTypesVisible = Boolean(nodeTypes) && (!explicitlyLoadedTypes || explicitlyLoadedTypes.includes('node'));
+    const nodeTypesExcluded = Boolean(nodeTypes) && explicitlyLoadedTypes !== undefined && !explicitlyLoadedTypes.includes('node');
+    if (nodeTypesExcluded) {
+      const sourcePath = sourceFiles.find((candidate) => candidate === directory || candidate.startsWith(directory + path.sep))
+        ?? tsconfigPath;
+      findings.push({ file: path.relative(root, sourcePath), line: 1,
+        reason: 'compilerOptions.types excludes @types/node, so Node built-ins and globals are unavailable despite the package dependency; include "node" and run typecheck.',
+        snippet: 'compilerOptions.types excludes node' });
+    }
+    if (nodeTypesVisible) continue;
     for (const sourcePath of sourceFiles) {
       if (!(sourcePath === directory || sourcePath.startsWith(directory + path.sep))) continue;
       if (!/\.[cm]?tsx?$/.test(sourcePath) && !(compilerOptions?.checkJs === true && /\.[cm]?jsx?$/.test(sourcePath))) continue;
+      if (statSync(sourcePath).size > MAX_SOURCE_BYTES) continue;
       const source = readFileSync(sourcePath, 'utf8');
-      const match = /\bprocess\s*[.[]/.exec(source);
-      if (!match) continue;
-      const line = source.slice(0, match.index).split('\n').length;
-      findings.push({ file: sourcePath, line,
-        reason: 'OpenAI v4 may have supplied @types/node transitively; v5 does not. This file uses process but @types/node is not declared. Add a Node >=20 @types/node devDependency and typecheck, or review this runtime-specific global manually.',
-        snippet: source.split('\n')[line - 1]?.trim().slice(0, 500) ?? 'process' });
+      const usage = findNodeTypeUsage(source, sourcePath);
+      if (!usage) continue;
+      findings.push({ file: path.relative(root, sourcePath), line: usage.line,
+        reason: 'OpenAI v4 may have supplied @types/node transitively; v5 does not. This file uses a Node built-in or global, but Node declarations are not visible to the compiler. Add a compatible @types/node devDependency, include "node" in compilerOptions.types when restricted, and run typecheck; otherwise review this runtime-specific use manually.',
+        snippet: source.split('\n')[usage.line - 1]?.trim().slice(0, 500) ?? usage.name });
       break;
     }
   }
   return findings;
+}
+
+function findNodeTypeUsage(source: string, filePath: string): { line: number; name: string } | undefined {
+  const scriptKind = /\.tsx?$/.test(filePath) ? ts.ScriptKind.TS : ts.ScriptKind.JS;
+  const parsed = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true, scriptKind);
+  let usage: { line: number; name: string } | undefined;
+  const inspectModule = (specifier: ts.Expression | undefined, at: ts.Node): void => {
+    if (!specifier || !ts.isStringLiteralLike(specifier)) return;
+    const name = specifier.text.replace(/^node:/, '');
+    if (specifier.text.startsWith('node:') || NODE_BUILTIN_MODULES.has(name))
+      usage ??= { line: parsed.getLineAndCharacterOfPosition(at.getStart(parsed)).line + 1, name: specifier.text };
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) inspectModule(node.moduleSpecifier, node);
+    if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) inspectModule(node.argument.literal, node);
+    if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+      || (ts.isIdentifier(node.expression) && node.expression.text === 'require'))) inspectModule(node.arguments[0], node);
+    if (ts.isIdentifier(node) && NODE_ONLY_GLOBALS.has(node.text))
+      usage ??= { line: parsed.getLineAndCharacterOfPosition(node.getStart(parsed)).line + 1, name: node.text };
+    if (!usage) ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  return usage;
 }
 
 async function inspectManifests(migration: Migration, cwd: string, excludedDirectories: readonly string[] = []): Promise<string[]> {
