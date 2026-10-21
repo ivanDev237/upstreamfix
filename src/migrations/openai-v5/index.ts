@@ -247,6 +247,18 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     fields.add(name);
     classFields.set(owner, fields);
   };
+  const isClassThisBinding = (node: Node): boolean => {
+    const isClassOwner = (owner: Node | undefined): boolean => Boolean(owner
+      && (Node.isClassDeclaration(owner) || Node.isClassExpression(owner)));
+    for (let ancestor = node.getParent(); ancestor; ancestor = ancestor.getParent()) {
+      if (Node.isArrowFunction(ancestor)) continue;
+      if (Node.isFunctionDeclaration(ancestor) || Node.isFunctionExpression(ancestor)) return false;
+      if (Node.isMethodDeclaration(ancestor) || Node.isConstructorDeclaration(ancestor)
+        || Node.isGetAccessorDeclaration(ancestor) || Node.isSetAccessorDeclaration(ancestor)
+        || Node.isPropertyDeclaration(ancestor)) return isClassOwner(ancestor.getParent());
+    }
+    return false;
+  };
   for (const parameter of file.getDescendantsOfKind(SyntaxKind.Parameter)) {
     const type = parameter.getTypeNode();
     if (isClientType(type)) {
@@ -309,6 +321,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     if (Node.isElementAccessExpression(node)) return undefined;
     if (!Node.isPropertyAccessExpression(node)) return undefined;
     if (node.getExpression().getKind() === SyntaxKind.ThisKeyword) {
+      if (!isClassThisBinding(node)) return undefined;
       const owner = node.getFirstAncestor((ancestor) => Node.isClassDeclaration(ancestor) || Node.isClassExpression(ancestor));
       return owner && classFields.get(owner)?.has(node.getName()) ? [] : undefined;
     }
@@ -499,9 +512,15 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     const parts = clientParts(expression);
     if (!parts || parts.length < 2) {
       const possibleMethod = pathParts(expression).slice(1).join('.');
-      if (isAffectedMethod(possibleMethod))
-        addManual(result, file, call, 'OpenAI v5 changes this method, but its client receiver is not tracked safely; review the receiver and arguments manually.');
       const root = rootIdentifier(expression);
+      const declarations = root?.getSymbol()?.getDeclarations() ?? [];
+      const definitelyOtherReceiver = declarations.length > 0 && declarations.every((declaration) => {
+        const type = Node.isParameterDeclaration(declaration) || Node.isVariableDeclaration(declaration)
+          ? declaration.getTypeNode() : undefined;
+        return Boolean(type && ![...imported].some((name) => new RegExp(`\\b${name}\\b`).test(type.getText())));
+      });
+      if (isAffectedMethod(possibleMethod) && !definitelyOtherReceiver)
+        addManual(result, file, call, 'OpenAI v5 changes this method, but its client receiver is not tracked safely; review the receiver and arguments manually.');
       if (root?.getSymbol() && complexClients.has(root.getSymbol()!) && isAffectedMethod(possibleMethod))
         addManual(result, file, call, 'valeur OpenAI non suivie : vérifier la variante de ce client avant la migration.');
       continue;

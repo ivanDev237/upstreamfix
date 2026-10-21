@@ -396,7 +396,7 @@ const client = createClient();
 client.beta.threads.runs.retrieve(threadId, runId);
 `);
     expect(outcome.fileUpdates).toEqual([]);
-    expect(outcome.manual.some((item) => item.reason.includes('path parameters'))).toBe(true);
+    expect(outcome.manual.some((item) => item.reason.includes('receiver'))).toBe(true);
   });
 
   it.each([
