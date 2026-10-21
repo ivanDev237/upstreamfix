@@ -445,6 +445,8 @@ client.beta.threads.runs.retrieve(threadId, runId);
 
   it.each([
     ['a tsconfig path alias', "import { client } from '@/lib/openai'; client.files.del('f');"],
+    ['a computed OpenAI method name', "import OpenAI from 'openai'; const client = new OpenAI(); client['files'][method]('f');"],
+    ['a computed method name on an aliased client', "import { client } from '@/lib/openai'; client['files'][method]('f');"],
     ['computed method access', "import OpenAI from 'openai'; const client = new OpenAI(); client['files']['del']('f');"],
     ['a bound deleted method', "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del.call(client.files, 'f');"],
     ['an applied changed method', "import OpenAI from 'openai'; const client = new OpenAI(); client.beta.threads.runs.retrieve.apply(client.beta.threads.runs, [threadId, runId]);"],
