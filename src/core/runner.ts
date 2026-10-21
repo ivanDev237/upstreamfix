@@ -570,9 +570,29 @@ async function prepareNodeTypesRepair(options: RunOptions): Promise<ManifestOutc
     } catch { continue; }
     const updated = addNodeTypesDependency(raw, runtimeMajor);
     if (!updated) continue;
+    const locks = options.analysisOnly ? await findLockfiles(options.cwd, packageDirectory) : [];
+    let lockChange: ManifestFileChange | undefined;
+    if (locks.length > 0) {
+      const lockPath = path.resolve(options.cwd, locks[0]!);
+      const lockResult = locks.length !== 1 ? { reason: `Unsupported lockfile set: ${locks.join(', ')}.` }
+        : path.basename(lockPath) === 'package-lock.json'
+          ? await regeneratePackageLock(manifestPath, lockPath, updated, options.cwd, options.registryBefore)
+          : path.basename(lockPath) === 'pnpm-lock.yaml'
+            ? await regeneratePnpmLock(manifestPath, lockPath, updated, options.cwd)
+            : path.basename(lockPath) === 'yarn.lock' && options.allowYarnLockInstall
+              ? await regenerateYarnLock(manifestPath, lockPath, updated, options.cwd)
+              : { reason: 'The project lockfile cannot be regenerated safely for the @types/node addition.' };
+      if (!lockResult.contents) {
+        manual.push({ file: path.relative(options.cwd, manifestPath), line: 1,
+          reason: `${lockResult.reason ?? 'Lockfile regeneration failed.'} The Node type dependency was left unchanged.`, snippet: '@types/node repair withheld' });
+        continue;
+      }
+      lockChange = { absolutePath: lockPath, relativePath: path.relative(options.cwd, lockPath), before: lockResult.before ?? '', after: lockResult.contents };
+    }
     if (tsconfigChange) changes.push(tsconfigChange);
     changes.push({ absolutePath: manifestPath, relativePath: path.relative(options.cwd, manifestPath), before: raw, after: updated });
-    notes.push(`Added @types/node ^${runtimeMajor}.0.0 to ${path.relative(options.cwd, manifestPath)}; lockfile changes and typecheck acceptance are handled in the isolated verifier.`);
+    if (lockChange) changes.push(lockChange);
+    notes.push(`Added @types/node ^${runtimeMajor}.0.0 to ${path.relative(options.cwd, manifestPath)}; the isolated verifier must pass its typecheck before the change can be committed.`);
   }
   return { notes, changes, manual };
 }
