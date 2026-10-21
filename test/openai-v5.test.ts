@@ -242,6 +242,19 @@ function make(obj: ClientOptions | OpenAI) {
     expect(outcome.fileUpdates?.[0]?.contents).toContain('this.client.chat.completions.runTools(');
   });
 
+  it('tracks an OpenAI instance returned through a local observation factory', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+function observeOpenAI<T extends OpenAI>(client: T): T { return client; }
+const createOpenAIClient = async () => observeOpenAI(new OpenAI());
+async function run() {
+  const openai = await createOpenAIClient();
+  return openai.beta.chat.completions.parse({model: 'gpt-4o', messages: []});
+}
+`);
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('openai.chat.completions.parse(');
+  });
+
   it('T33 reports destructured typed clients and bound runner methods instead of silently upgrading', () => {
     const outcome = migrate("import OpenAI from 'openai';\nfunction run({ files }: OpenAI) { files.del('f'); }\nconst client = new OpenAI();\nconst runner = client.chat.completions.runTools({tools: []});\nrunner.finalFunctionCall.bind(runner);\nconst { finalFunctionCall } = runner;\n");
     expect(outcome.fileUpdates).toEqual([]);
