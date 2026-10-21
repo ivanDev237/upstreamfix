@@ -153,6 +153,18 @@ function remove(client: ClientOptions | OpenAI) {
     expect(outcome.manual.some((item) => item.snippet.includes("client.files.del('f')"))).toBe(false);
   });
 
+  it('follows an explicitly typed OpenAI receiver through non-null and parenthesized access', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+let openAi: OpenAI;
+const existing: OpenAI | undefined = undefined;
+if (existing instanceof OpenAI) openAi = existing;
+else openAi = new OpenAI();
+(openAi!).beta.chat.completions.stream({model: 'gpt-4o', messages: []});
+`);
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain('(openAi!).chat.completions.stream(');
+  });
+
   it('follows JSONC tsconfig extends and detects Node types excluded by compilerOptions.types', async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-node-extends-'));
     try {
