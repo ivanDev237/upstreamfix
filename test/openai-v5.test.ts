@@ -181,6 +181,30 @@ else openAi = new OpenAI();
     expect(outcome.fileUpdates?.[0]?.contents).toContain('(openAi!).chat.completions.stream(');
   });
 
+  it('tracks an untyped variable assigned only from known OpenAI clients', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+const client = new OpenAI();
+let alias;
+alias = client;
+alias.files.del('f');
+`);
+    expect(outcome.manual).toEqual([]);
+    expect(outcome.fileUpdates?.[0]?.contents).toContain("alias.files.delete('f')");
+  });
+
+  it('keeps an alias manual when any assignment comes from an untracked value', () => {
+    const outcome = migrate(`import OpenAI from 'openai';
+const client = new OpenAI();
+declare const other: { files: { del(id: string): void } };
+let alias;
+alias = client;
+alias = other;
+alias.files.del('f');
+`);
+    expect(outcome.manual.some((item) => item.reason.includes('receiver is not tracked safely'))).toBe(true);
+    expect(outcome.fileUpdates).toEqual([]);
+  });
+
   it('follows JSONC tsconfig extends and detects Node types excluded by compilerOptions.types', async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-node-extends-'));
     try {
