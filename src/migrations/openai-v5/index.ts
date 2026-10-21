@@ -97,7 +97,6 @@ function isStablePathArgument(node: Node): boolean {
 function transformFile(file: SourceFile, result: MigrationResult): void {
   const imported = new Set<string>();
   const edits: Edit[] = [];
-  const manualStart = result.manual.length;
   const typedSource = /\.[cm]?tsx?$/.test(file.getFilePath());
   for (const declaration of file.getImportDeclarations()) {
     if (declaration.getModuleSpecifierValue() === 'openai') {
@@ -481,13 +480,6 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     const constructor = parent?.getParent();
     if (constructor && Node.isNewExpression(constructor) && imported.has(constructor.getExpression().getText()))
       addManual(result, file, property, 'httpAgent uses a different transport from fetchOptions in OpenAI v5; configure it manually.');
-  }
-  if (result.manual.length !== manualStart) {
-    for (const edit of edits) {
-      result.manual.push({ file: file.getFilePath(), line: edit.line,
-        reason: `Potential ${edit.rule} transformation withheld because this file also contains manual findings.`, snippet: edit.before });
-    }
-    return;
   }
   if (edits.length === 0) return;
   const ascending = [...edits].sort((a, b) => a.start - b.start);
