@@ -33,6 +33,32 @@ const MOVED_IMPORTS = new Map<string, string>([
   ['openai/resources/beta/threads/messages/messages', 'openai/resources/beta/threads/messages'],
   ['openai/resources/beta/chat/completions', 'openai/resources/chat/completions'],
 ]);
+// These names are checked against the published openai@5.0.0 declarations.
+// Unknown names are kept for manual review instead of being moved speculatively.
+const V5_BETA_CHAT_COMPLETION_EXPORTS = new Set([
+  'ChatCompletion', 'ChatCompletionChunk', 'ChatCompletionStream', 'ChatCompletionStreamParams',
+  'ChatCompletionRunner', 'ChatCompletionStreamingRunner', 'ChatCompletionToolRunnerParams',
+  'ChatCompletionToolRunnerParamsWithContext', 'ChatCompletionToolRunnerParamsWithoutContext',
+  'ChatCompletionStreamingToolRunnerParams', 'ChatCompletionStreamingToolRunnerParamsWithContext',
+  'ChatCompletionStreamingToolRunnerParamsWithoutContext', 'Completions', 'ParsedChatCompletion',
+  'ParsedChatCompletionMessage', 'ParsedChoice', 'ParsedFunction', 'ParsedFunctionToolCall',
+  'ChatCompletionParseParams', 'ChatCompletionCreateParams', 'ChatCompletionCreateParamsBase',
+  'ChatCompletionCreateParamsNonStreaming', 'ChatCompletionCreateParamsStreaming',
+  'ChatCompletionMessageParam', 'ChatCompletionMessage', 'ChatCompletionStreamOptions',
+  'ChatCompletionAssistantMessageParam', 'ChatCompletionSystemMessageParam',
+  'ChatCompletionUserMessageParam', 'ChatCompletionDeveloperMessageParam',
+  'ChatCompletionToolMessageParam', 'ChatCompletionFunctionMessageParam',
+  'ChatCompletionContentPart', 'ChatCompletionContentPartText', 'ChatCompletionContentPartImage',
+  'ChatCompletionContentPartRefusal', 'ChatCompletionContentPartInputAudio',
+  'ChatCompletionContentPartAudio', 'ChatCompletionContentPartVideo', 'ChatCompletionAudio',
+  'ChatCompletionAudioTranscript', 'ChatCompletionAudioTranslation', 'ChatCompletionTokenLogprob',
+  'ChatCompletionMessageToolCall', 'ChatCompletionMessageFunctionToolCall',
+  'ChatCompletionMessageCustomToolCall', 'ChatCompletionTool', 'ChatCompletionToolChoiceOption',
+  'ChatCompletionAllowedToolChoice', 'ChatCompletionAllowedTools', 'ChatCompletionNamedToolChoice',
+  'ChatCompletionFunctionTool', 'ChatCompletionUpdateParams', 'ChatCompletionListParams',
+  'ChatCompletionDeleted', 'ChatCompletionStoreMessage', 'ChatCompletionAudioParam',
+  'ChatCompletionAudioContentPart', 'ChatCompletionVideoContentPart', 'ChatCompletionImageContentPart',
+]);
 const MOVED_MESSAGE_TYPES = new Map([
   ['MessageContentText', 'TextContentBlock'],
   ['ThreadMessage', 'Message'],
@@ -125,6 +151,12 @@ function isOpenAiSpecifier(specifier: string): boolean {
   return specifier === 'openai' || specifier.startsWith('openai/');
 }
 
+function moduleSpecifierLiteral(node: Node | undefined): string | undefined {
+  if (node && Node.isStringLiteral(node)) return node.getLiteralValue();
+  if (node && Node.isNoSubstitutionTemplateLiteral(node)) return node.getLiteralText();
+  return undefined;
+}
+
 function isLocalOpenAiAlias(specifier: string): boolean {
   return !['@langchain/openai', '@ai-sdk/openai', 'openai-edge'].includes(specifier)
     && (specifier.startsWith('.') || specifier.startsWith('@/') || specifier.startsWith('#'))
@@ -135,8 +167,9 @@ function hasOpenAiSpecifierEvidence(file: SourceFile): boolean {
   return file.getImportDeclarations().some((declaration) => isOpenAiSpecifier(declaration.getModuleSpecifierValue()))
     || file.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) => {
       const argument = call.getArguments()[0];
+      const specifier = moduleSpecifierLiteral(argument);
       return (call.getExpression().getText() === 'require' || call.getExpression().getKind() === SyntaxKind.ImportKeyword)
-        && argument && Node.isStringLiteral(argument) && isOpenAiSpecifier(argument.getLiteralValue());
+        && specifier !== undefined && isOpenAiSpecifier(specifier);
     });
 }
 
@@ -265,8 +298,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
   for (const declaration of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
     const initializer = declaration.getInitializer();
     if (initializer && Node.isCallExpression(initializer) && initializer.getExpression().getText() === 'require'
-      && initializer.getArguments()[0] && Node.isStringLiteral(initializer.getArguments()[0]!)
-      && isOpenAiSpecifier(initializer.getArguments()[0]!.asKindOrThrow(SyntaxKind.StringLiteral).getLiteralValue())) {
+      && isOpenAiSpecifier(moduleSpecifierLiteral(initializer.getArguments()[0]) ?? '')) {
       if (Node.isIdentifier(declaration.getNameNode())) imported.add(declaration.getName());
       else addManual(result, file, declaration, 'Destructured require of openai needs manual binding review.');
     }
@@ -506,14 +538,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
         values.push(assignment.getRight());
         assignments.set(symbol, values);
       }
-    } else {
-      markAssignmentTarget(left);
-      for (const identifier of left.getDescendantsOfKind(SyntaxKind.Identifier)) {
-        unsafeAliasNames.add(identifier.getText());
-        const symbol = identifier.getSymbol();
-        if (symbol) unsafeAliases.add(symbol);
-      }
-    }
+    } else markAssignmentTarget(left);
   }
   for (const loop of [...file.getDescendantsOfKind(SyntaxKind.ForOfStatement), ...file.getDescendantsOfKind(SyntaxKind.ForInStatement)]) {
     const initializer = loop.getInitializer();
@@ -669,6 +694,15 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
   }
   for (const declaration of file.getImportDeclarations()) {
     const specifier = declaration.getModuleSpecifierValue();
+    if (specifier === 'openai/resources/beta/chat/completions') {
+      const unknown = declaration.getNamedImports().map((entry) => entry.getName())
+        .filter((name) => !V5_BETA_CHAT_COMPLETION_EXPORTS.has(name));
+      if (declaration.getNamespaceImport() || unknown.length > 0) {
+        const names = declaration.getNamespaceImport() ? 'namespace import' : unknown.join(', ');
+        addManual(result, file, declaration, `OpenAI v5 chat completion export(s) could not be confirmed: ${names}; review this import against the v5 declarations.`);
+        continue;
+      }
+    }
     let hasRemovedUploadsExport = false;
     if (specifier === 'openai/uploads') {
       for (const entry of declaration.getNamedImports()) {
@@ -736,6 +770,15 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
   }
   for (const declaration of file.getExportDeclarations()) {
     const specifier = declaration.getModuleSpecifierValue();
+    if (specifier === 'openai/resources/beta/chat/completions') {
+      const unknown = declaration.getNamedExports().map((entry) => entry.getName())
+        .filter((name) => !V5_BETA_CHAT_COMPLETION_EXPORTS.has(name));
+      if (declaration.getNamespaceExport() || unknown.length > 0) {
+        const names = declaration.getNamespaceExport() ? 'namespace re-export' : unknown.join(', ');
+        addManual(result, file, declaration, `OpenAI v5 chat completion export(s) could not be confirmed: ${names}; review this re-export against the v5 declarations.`);
+        continue;
+      }
+    }
     let hasRemovedUploadsExport = false;
     if (specifier === 'openai/uploads') {
       for (const entry of declaration.getNamedExports()) {
@@ -769,6 +812,14 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     const rawSpecifier = argument.getText();
     if (!/^(['"]).*\1$/.test(rawSpecifier)) continue;
     const specifier = rawSpecifier.slice(1, -1);
+    if (specifier === 'openai/resources/beta/chat/completions') {
+      const qualifier = importType.getQualifier();
+      const leaf = qualifier && Node.isQualifiedName(qualifier) ? qualifier.getRight() : qualifier;
+      if (!leaf || !Node.isIdentifier(leaf) || !V5_BETA_CHAT_COMPLETION_EXPORTS.has(leaf.getText())) {
+        addManual(result, file, importType, 'OpenAI v5 chat completion type export could not be confirmed from this import type; review it manually.');
+        continue;
+      }
+    }
     const moved = MOVED_IMPORTS.get(specifier);
     if (moved) {
       if (hasDuplicateMovedSpecifier(file, specifier)) {
@@ -868,7 +919,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       const computedTarget = Node.isElementAccessExpression(wrappedTarget)
         || wrappedTarget.getDescendantsOfKind(SyntaxKind.ElementAccessExpression).length > 0;
       const targetRoot = rootIdentifier(wrappedTarget)?.getSymbol();
-      if ((targetMethod && isAffectedMethod(targetMethod)) || (computedTarget && Boolean(targetRoot && (clients.has(targetRoot) || complexClients.has(targetRoot))))
+      if ((targetMethod && (isAffectedMethod(targetMethod) || affectedSuffix(targetMethod.split('.')) !== undefined)) || (computedTarget && Boolean(targetRoot && (clients.has(targetRoot) || complexClients.has(targetRoot))))
         || (computedTarget && rootIdentifier(wrappedTarget)?.getText() === 'openai' && hasOpenAiModuleEvidence))
         addManual(result, file, call, 'OpenAI v5 changes this method, but .call/.apply/.bind obscures its receiver and arguments; review it manually.');
       continue;
@@ -876,14 +927,24 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     if (Node.isElementAccessExpression(expression)) {
       const possibleMethod = affectedSuffix(partsAfterLastComputedAccess(expression));
       const root = rootIdentifier(expression)?.getSymbol();
-      if ((possibleMethod && isAffectedMethod(possibleMethod)) || Boolean(root && (clients.has(root) || complexClients.has(root)))
+      if (Boolean(possibleMethod) || Boolean(root && (clients.has(root) || complexClients.has(root)))
         || (rootIdentifier(expression)?.getText() === 'openai' && hasOpenAiModuleEvidence && partsAfterLastComputedAccess(expression).join('.') === 'chat.completions.create'))
         addManual(result, file, call, 'OpenAI v5 changes this method, but computed receiver access requires manual review.');
       continue;
     }
     if (!Node.isPropertyAccessExpression(expression)) continue;
+    const isTrackedOpenAiChain = (candidate: Node): boolean => {
+      const value = unwrapTransparentExpression(candidate);
+      if (Node.isIdentifier(value)) {
+        const symbol = value.getSymbol();
+        return Boolean(symbol && (clients.has(symbol) || complexClients.has(symbol)));
+      }
+      if (Node.isPropertyAccessExpression(value) || Node.isElementAccessExpression(value)) return isTrackedOpenAiChain(value.getExpression());
+      if (Node.isCallExpression(value)) return isTrackedOpenAiChain(value.getExpression());
+      return false;
+    };
     if ((expression.getName() === 'withResponse' || expression.getName() === 'asResponse')
-      && (clientParts(expression.getExpression()) !== undefined || hasOpenAiModuleEvidence)) {
+      && isTrackedOpenAiChain(expression.getExpression())) {
       addManual(result, file, call, 'OpenAI v5 Web response helpers return standard Web response types; review Headers and ReadableStream handling.');
     }
     const onRunner = expression.getName() === 'on' && isTrackedRunner(expression.getExpression());
@@ -898,7 +959,12 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       } else if (eventNode && !Node.isStringLiteral(eventNode))
         addManual(result, file, eventNode, 'A runTools event name passed indirectly needs manual review against the v5 event names.');
     }
-    if (onStream) addManual(result, file, call, 'OpenAI v5 changes Beta Chat stream event names; review this stream listener against the v5 event API.');
+    if (onStream) {
+      const eventNode = call.getArguments()[0];
+      const changedEvents = new Set(['functionCall', 'functionCallResult', 'finalFunctionCall', 'finalFunctionCallResult']);
+      if (!eventNode || !Node.isStringLiteral(eventNode) || changedEvents.has(eventNode.getLiteralText()))
+        addManual(result, file, call, 'OpenAI v5 changes Beta Chat stream event names; review this stream listener against the v5 event API.');
+    }
     const parts = clientParts(expression);
     if (!parts || parts.length < 2) {
       const possibleMethod = affectedSuffix(partsAfterLastComputedAccess(expression)) ?? affectedSuffix(pathParts(expression));
@@ -912,12 +978,12 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
             ? declaration.getTypeNode() : undefined;
           return Boolean(type && Node.isTypeLiteral(type) && ![...imported].some((name) => mentionsIdentifier(type.getText(), name)));
         }));
-      if ((Boolean(possibleMethod && isAffectedMethod(possibleMethod)) && (Boolean(rootSymbol && (clients.has(rootSymbol) || complexClients.has(rootSymbol))) || hasOpenAiModuleEvidence) && !definitelyStructuredOther || (hasComputedPath
+      if ((Boolean(possibleMethod) && (Boolean(rootSymbol) || hasOpenAiModuleEvidence) && !definitelyStructuredOther || (hasComputedPath
         && Boolean(rootSymbol && (clients.has(rootSymbol) || complexClients.has(rootSymbol))))
         || (hasComputedPath && root?.getText() === 'openai' && hasOpenAiModuleEvidence
           && partsAfterLastComputedAccess(expression).join('.') === 'chat.completions.create')))
         addManual(result, file, call, 'OpenAI v5 changes this method, but its client receiver is not tracked safely; review the receiver and arguments manually.');
-      if (root?.getSymbol() && complexClients.has(root.getSymbol()!) && possibleMethod && isAffectedMethod(possibleMethod))
+      if (root?.getSymbol() && complexClients.has(root.getSymbol()!) && possibleMethod)
         addManual(result, file, call, 'valeur OpenAI non suivie : vérifier la variante de ce client avant la migration.');
       continue;
     }

@@ -45,6 +45,25 @@ describe('openai v4 to v5', () => {
     expect(runners.fileUpdates?.[0]?.contents).toContain(".on('functionToolCallResult'");
     const stream = migrate(`import OpenAI from 'openai'; const client = new OpenAI(); const stream = client.beta.chat.completions.stream({}); stream.on('functionCall', () => {});`);
     expect(stream.manual.some((item) => /stream event names/.test(item.reason))).toBe(true);
+    const content = migrate(`import OpenAI from 'openai'; const client = new OpenAI(); const stream = client.beta.chat.completions.stream({}); stream.on('content', () => {});`);
+    expect(content.manual.some((item) => /stream event names/.test(item.reason))).toBe(false);
+  });
+
+  it('holds ambiguous affected method suffixes and ignores unrelated property assignments', () => {
+    for (const source of [
+      `import OpenAI from 'openai'; const client = new OpenAI(); client[key].threads.runs.retrieve('a', 'b');`,
+      `function f(ctx: any) { ctx.api.threads.runs.retrieve('a', 'b'); }`,
+    ]) expect(migrate(source).manual.length).toBeGreaterThan(0);
+    const safe = migrate(`import OpenAI from 'openai'; const client = new OpenAI(); client.maxRetries = 3; client.chat.completions.create = vi.fn(); client.files.del('f');`);
+    expect(safe.manual).toEqual([]);
+    expect(safe.fileUpdates?.[0]?.contents).toContain("client.files.delete('f')");
+  });
+
+  it('counts no-substitution require templates as module evidence and scopes response helpers to the receiver', () => {
+    const openai = migrate("const OpenAI = require(`openai`); const client = new OpenAI(); client.files.list().withResponse();");
+    expect(openai.manual.some((item) => /Web response/.test(item.reason))).toBe(true);
+    const anthropic = migrate("import OpenAI from 'openai'; const other = new Anthropic(); other.messages.create().withResponse();");
+    expect(anthropic.manual.some((item) => /Web response/.test(item.reason))).toBe(false);
   });
 
   it('P10 moves beta chat completion type imports removed by OpenAI v5', () => {
@@ -52,16 +71,67 @@ describe('openai v4 to v5', () => {
     expect(outcome.manual).toEqual([]);
     expect(outcome.fileUpdates?.[0]?.contents).toContain("from 'openai/resources/chat/completions'");
   });
+  it('keeps beta chat imports manual when a named export cannot be confirmed in v5', () => {
+    const outcome = migrate(`import { DefinitelyNotExported } from 'openai/resources/beta/chat/completions';`);
+    expect(outcome.manual.some((item) => /DefinitelyNotExported/.test(item.reason))).toBe(true);
+    expect(outcome.fileUpdates).toEqual([]);
+  });
 
   it('P10 loads local modules that export a constructed OpenAI client end to end', async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-local-client-'));
     try {
       await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.28.0"},"engines":{"node":">=20"}}');
-      await writeFile(path.join(cwd, 'lib.ts'), "import OpenAI from 'openai'; export const client = new OpenAI();\n");
+      await writeFile(path.join(cwd, 'lib.ts'), "import { AzureOpenAI as Azure } from 'openai'; export const client = new Azure({ azureADTokenProvider: async () => 'token' });\n");
       await writeFile(path.join(cwd, 'app.ts'), "import { client } from './lib'; client.files.del('f');\n");
       const outcome = await runMigration(openaiV5, { cwd, dryRun: true });
       expect(outcome.manual).toEqual([]);
       expect(outcome.proposedFiles.find((file) => file.relativePath === 'app.ts')?.after).toContain("client.files.delete('f')");
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+  it('ignores unrelated packages and large bundles while following exported local clients', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-source-filter-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.28.0"},"engines":{"node":">=20"}}');
+      const unrelated = path.join(cwd, 'packages', 'plain');
+      await mkdir(unrelated, { recursive: true });
+      await writeFile(path.join(unrelated, 'package.json'), '{"name":"plain","dependencies":{"left-pad":"^1.0.0"}}');
+      await writeFile(path.join(unrelated, 'plain.ts'), 'export const plain = true;\n');
+      await writeFile(path.join(cwd, 'vendor.js'), ' '.repeat(2_400_000));
+      await writeFile(path.join(cwd, 'lib.ts'), "import OpenAI from 'openai'; export const client = new OpenAI();\n");
+      await writeFile(path.join(cwd, 'app.ts'), "import { client } from './lib'; client.files.del('f');\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true });
+      expect(outcome.manual.some((finding) => finding.file.includes('packages/plain'))).toBe(false);
+      expect(outcome.manual.some((finding) => finding.file === 'vendor.js')).toBe(false);
+      expect(outcome.proposedFiles.find((file) => file.relativePath === 'app.ts')?.after).toContain("client.files.delete('f')");
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+  it('surfaces path-alias imported clients for manual review when ownership cannot be followed', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-path-alias-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.28.0"},"engines":{"node":">=20"}}');
+      await writeFile(path.join(cwd, 'tsconfig.json'), '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}');
+      await mkdir(path.join(cwd, 'src'), { recursive: true });
+      await writeFile(path.join(cwd, 'src', 'lib.ts'), "import OpenAI from 'openai'; export const client = new OpenAI();\n");
+      await writeFile(path.join(cwd, 'src', 'app.ts'), "import { client } from '@/lib'; client.files.del('f');\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true });
+      expect(outcome.manual.some((finding) => finding.file === 'src/app.ts' && /receiver|récepteur/i.test(finding.reason))).toBe(true);
+      expect(outcome.proposedFiles.find((file) => file.relativePath === 'src/app.ts')?.after).toBeUndefined();
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('does not repair Node types unless code in the same package is upgraded with a configured typecheck', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-node-safe-scope-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.28.0"},"scripts":{"typecheck":"tsc --noEmit"},"engines":{"node":">=18"}}');
+      await writeFile(path.join(cwd, 'tsconfig.json'), '{"compilerOptions":{"types":[],"lib":["ES2022"]}}');
+      await writeFile(path.join(cwd, 'server.ts'), 'console.log(process.env.NODE_ENV);\n');
+      const untouched = await runMigration(openaiV5, { cwd, dryRun: true, nodeRuntime: 20 });
+      expect(untouched.proposedFiles.some((file) => file.relativePath.endsWith('package.json') || file.relativePath.endsWith('tsconfig.json'))).toBe(false);
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      const transformed = await runMigration(openaiV5, { cwd, dryRun: true, nodeRuntime: 20 });
+      expect(transformed.proposedFiles.some((file) => file.relativePath === 'package.json' || file.relativePath === 'tsconfig.json')).toBe(false);
+      expect(transformed.manual.some((finding) => finding.reason.includes('Node.js 20'))).toBe(true);
+      expect(new Set(transformed.proposedFiles.map((file) => file.relativePath)).size).toBe(transformed.proposedFiles.length);
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
   it('P3.4 requires explicit selection before discovering an experimental OpenAI migration', async () => {
@@ -130,9 +200,9 @@ describe('openai v4 to v5', () => {
       await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
       await writeFile(path.join(cwd, 'other.ts'), 'console.log(process.env.NODE_ENV);\n');
       const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
-      expect(outcome.manual.some((item) => item.file === 'other.ts' && item.reason.includes('@types/node'))).toBe(false);
-      expect(outcome.manual.some((item) => item.file === 'tsconfig.json' && item.reason.includes('Web'))).toBe(false);
-      expect(outcome.proposedFiles.find((item) => item.relativePath === 'package.json')?.after).toContain('"@types/node"');
+      expect(outcome.manual.some((item) => item.file === 'other.ts' && item.reason.includes('@types/node'))).toBe(true);
+      expect(outcome.manual.some((item) => item.file === 'tsconfig.json' && item.reason.includes('Web'))).toBe(true);
+      expect(outcome.proposedFiles.some((item) => item.relativePath === 'package.json')).toBe(false);
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
@@ -288,7 +358,7 @@ describe('openai v4 to v5', () => {
       const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true, nodeRuntime: 20 });
       const updated = outcome.proposedFiles.find((file) => file.relativePath === 'package.json')?.after;
       expect(updated).toContain('"devDependencies":{"@types/node":"^20.0.0"}');
-      expect(updated).toBe('{"dependencies":{"openai":"^4.28.0"},"scripts":{"typecheck":"tsc --noEmit"},"engines":{"node":">=20"}, "devDependencies":{"@types/node":"^20.0.0"}}\n');
+      expect(updated).toBe('{"dependencies":{"openai":"^5.0.0"},"scripts":{"typecheck":"tsc --noEmit"},"engines":{"node":">=20"}, "devDependencies":{"@types/node":"^20.0.0"}}\n');
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
