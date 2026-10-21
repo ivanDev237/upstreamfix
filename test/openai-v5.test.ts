@@ -87,6 +87,30 @@ describe('openai v4 to v5', () => {
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
+  it('reports Node built-ins and globals when their declarations are absent', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-node-builtins-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.28.0' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'server.ts'), "import { readFile } from 'node:fs'; const data = readFile; const bytes = Buffer.from('x'); console.log(__dirname, __filename, require, global, setImmediate);\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
+      expect(outcome.manual.some((item) => item.file === 'server.ts' && item.reason.includes('@types/node'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('follows JSONC tsconfig extends and detects Node types excluded by compilerOptions.types', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-node-extends-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { openai: '^4.28.0' }, devDependencies: { '@types/node': '^22.0.0' }, engines: { node: '>=20' } }));
+      await writeFile(path.join(cwd, 'base.json'), '{\n  // Keep only project supplied ambient types.\n  "compilerOptions": { "types": [], "lib": ["ES2022"] }\n}\n');
+      await writeFile(path.join(cwd, 'tsconfig.json'), '{ "extends": "./base.json", "include": ["**/*.ts"] }\n');
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'server.ts'), 'console.log(Buffer.from(__dirname));\n');
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true });
+      expect(outcome.manual.some((item) => item.file === 'server.ts' && item.reason.includes('compilerOptions.types'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
   it('does not infer a TypeScript type error from process in a JavaScript-only project', async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-js-process-'));
     try {
