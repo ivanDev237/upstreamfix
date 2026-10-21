@@ -309,7 +309,8 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       }
     }
     const moved = MOVED_IMPORTS.get(specifier);
-    if (moved && !hasRemovedUploadsExport) addEdit(edits, file, declaration.getModuleSpecifier(), `'${moved}'`, 'moved-import');
+    if (moved && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper))
+      addEdit(edits, file, declaration.getModuleSpecifier(), `'${moved}'`, 'moved-import');
     else if (specifier === 'openai/shims' || specifier === 'openai/src' || specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
       addManual(result, file, declaration, 'OpenAI v5 removes this private or shim import; review the replacement and runtime configuration.');
     if (specifier.startsWith('openai/resources/') && declaration.getNamedImports().some((entry) => /Page$/.test(entry.getName()) && !declaration.isTypeOnly() && !entry.isTypeOnly()))
@@ -338,7 +339,7 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       }
     }
     const moved = specifier ? MOVED_IMPORTS.get(specifier) : undefined;
-    if (moved && !hasRemovedUploadsExport && declaration.getModuleSpecifier())
+    if (moved && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper) && declaration.getModuleSpecifier())
       addEdit(edits, file, declaration.getModuleSpecifier()!, `'${moved}'`, 'moved-import');
   }
   for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
@@ -357,7 +358,8 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
       const hasRemovedUploadsExport = specifier === 'openai/uploads' && binding && Node.isObjectBindingPattern(binding)
         && binding.getElements().some((element) => REMOVED_UPLOAD_EXPORTS.has(
           element.getPropertyNameNode()?.getText() ?? element.getNameNode().getText()));
-      if (moved && argument && !hasRemovedUploadsExport) addEdit(edits, file, argument, `'${moved}'`, 'moved-import');
+      if (moved && argument && !hasRemovedUploadsExport && !(specifier === 'openai/uploads' && removedUploadHelper))
+        addEdit(edits, file, argument, `'${moved}'`, 'moved-import');
       if (specifier === 'openai/uploads') {
         if (binding && Node.isObjectBindingPattern(binding)) {
           for (const element of binding.getElements()) {
