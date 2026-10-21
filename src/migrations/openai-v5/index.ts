@@ -28,6 +28,7 @@ const MOVED_IMPORTS = new Map([
   ['openai/streaming', 'openai/core/streaming'],
   ['openai/uploads', 'openai/core/uploads'],
   ['openai/resources/beta/chat/completions', 'openai/resources/chat/completions'],
+  ['openai/resources/beta/threads/messages/messages', 'openai/resources/beta/threads/messages'],
 ]);
 const RUN_TOOLS_EVENTS = new Map([
   ['functionCall', 'functionToolCall'], ['functionCallResult', 'functionToolCallResult'],
@@ -263,8 +264,6 @@ function transformFile(file: SourceFile, result: MigrationResult): void {
     if (moved) addEdit(edits, file, declaration.getModuleSpecifier(), `'${moved}'`, 'moved-import');
     else if (specifier === 'openai/shims' || specifier === 'openai/src' || specifier.startsWith('openai/shims/') || specifier.startsWith('openai/src/'))
       addManual(result, file, declaration, 'OpenAI v5 removes this private or shim import; review the replacement and runtime configuration.');
-    if (specifier === 'openai/resources/beta/threads/messages/messages')
-      addManual(result, file, declaration, 'OpenAI v5 removes this deep beta resource import; review its public replacement before upgrading.');
     if (specifier.startsWith('openai/resources/') && declaration.getNamedImports().some((entry) => /Page$/.test(entry.getName()) && !declaration.isTypeOnly() && !entry.isTypeOnly()))
       addManual(result, file, declaration, 'OpenAI v5 converts resource-specific Page classes to type aliases; review runtime uses before upgrading.');
     if (specifier.startsWith('openai/') && declaration.getNamedImports().some((entry) => entry.getName() === 'APIClient'))
