@@ -49,7 +49,9 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
     for (const name of files.keys()) project.addSourceFileAtPath(path.join(cwd, name));
     const result = openaiV5.transform(project);
     expect(result.manual).toEqual([]);
-    expect(result.fileUpdates).toHaveLength(10);
+    // Deep import paths remain in place: openai v5 still exposes deprecated
+    // compatibility re-exports, and moving these can disconnect test mocks.
+    expect(result.fileUpdates).toHaveLength(9);
     for (const update of result.fileUpdates ?? []) await writeFile(update.file, update.contents);
     await writeFile(tsconfigPath, JSON.stringify({ ...tsconfig, include: ['*.ts'] }));
     await install('5.0.0');
@@ -60,7 +62,7 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
     expect(await readFile(path.join(cwd, 'class.ts'), 'utf8')).toContain('this.client.chat.completions.parse');
     expect(await readFile(path.join(cwd, 'events.ts'), 'utf8')).toContain("runner.on('functionToolCall'");
     expect(await readFile(path.join(cwd, 'events.ts'), 'utf8')).toContain('runner.finalFunctionToolCall()');
-    expect(await readFile(path.join(cwd, 'moved.ts'), 'utf8')).toContain("'openai/core/error'");
+    expect(await readFile(path.join(cwd, 'moved.ts'), 'utf8')).toContain("'openai/error'");
     expect(await readFile(path.join(cwd, 'deep.ts'), 'utf8')).toContain("'openai/resources/beta/threads/messages'");
     expect(await readFile(path.join(cwd, 'deep.ts'), 'utf8')).toContain('TextContentBlock as MessageContentText');
     expect(await readFile(path.join(cwd, 'paths.ts'), 'utf8')).toContain('runs.retrieve(runId, { thread_id: threadId })');
