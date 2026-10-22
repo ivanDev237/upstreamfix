@@ -111,15 +111,15 @@ describe('public repository benchmark helpers', () => {
   });
   it('T34 commits the latest measured OpenAI report with exact gross and eligible rates', async () => {
     const report = await readFile(new URL('../benchmark/openai-5-results.md', import.meta.url), 'utf8');
-    expect(report).toContain('Automatic migration rate: **57.1%** (32 of 56 detected migration items).');
-    expect(report).toContain('Criterion rate excluding legitimate manual items: **66.7%** (32 of 48 eligible items; 8 legitimate manual items excluded).');
-    expect(report).toContain('Run ID: `39591178352`');
-    expect(report).toContain('Tool SHA: `1a3e7fd36cd6ef721a58190963fd99f1f67a8ec2`');
+    expect(report).toContain('Automatic migration rate: **1.8%** (1 of 57 detected migration items).');
+    expect(report).toContain('Criterion rate excluding legitimate manual items: **1.8%** (1 of 55 eligible items; 2 legitimate manual items excluded).');
+    expect(report).toContain('Run ID: `39853877767`');
+    expect(report).toContain('Tool SHA: `e799fe238ffd6ad4bf6c4c674964cd30844b147f`');
     expect(report).toContain('Run status: **complete** (20 of 20 repositories recorded).');
-    expect(report).toContain('| convex-title-generator | `f77f2d452bc7` | manual review required | 7 | 3 | 4 |');
+    expect(report).toContain('| convex-title-generator | `f77f2d452bc7` | manual review required | 7 | 0 | 7 |');
     expect(report).toContain('| stackwise | `c49a192df253` | manual review required |');
-    expect(report).toContain('| is-even-ai | src/IsEvenAiOpenAi.ts | 45 | not automated |');
-    expect(report).toContain('| rowfill | src/core/extractTable.ts | 58 | legitimate |');
+    expect(report).toContain('| vector-sets-browser | `1147b7b561eb` | completed | 1 | 1 | 0 |');
+    expect(report).toContain('| is-even-ai | src/IsEvenAiOpenAi.ts | 35 | not automated |');
   });
   it('mirrors explicit CLI Node 20 confirmation in the disposable verification manifest', () => {
     const manifest = { dependencies: { openai: '^4.0.0' } } as { dependencies: { openai: string }; engines?: { node: string } };
