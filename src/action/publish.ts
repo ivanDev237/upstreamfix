@@ -390,6 +390,8 @@ function validateNodeTypesTsconfigDelta(beforeText: string, afterText: string, p
     || afterTypes.at(-1) !== 'node') {
     throw new Error('Bundle tsconfig must end the compilerOptions.types array with the Node type.');
   }
+  if (!Array.isArray(beforeTypes) && before.extends === undefined)
+    throw new Error('Bundle tsconfig adds compilerOptions.types even though the source config has no local types array or extends; the runner does not produce this change.');
   if (before.extends !== undefined && !Array.isArray(beforeTypes))
     throw new Error('Bundle tsconfig extends an unbundled config with inherited types; the exact deterministic Node types change cannot be independently established.');
   const effectiveTypes = Array.isArray(beforeTypes) ? beforeTypes : [];
