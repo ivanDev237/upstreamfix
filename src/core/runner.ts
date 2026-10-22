@@ -294,6 +294,9 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
         if (local && constructed.has(local)) exported.add(alias ?? local);
       }
     }
+    for (const match of source.matchAll(/\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/g)) {
+      if (constructed.has(match[1]!)) exported.add('default');
+    }
     return exported;
   };
   const imports = (source: string): Array<{ specifier: string; names: string[] }> => {

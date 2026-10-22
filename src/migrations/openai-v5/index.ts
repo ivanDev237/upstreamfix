@@ -114,6 +114,18 @@ function unwrapTransparentExpression(node: Node): Node {
   return node;
 }
 
+function canonicalClientSymbol(symbol: MorphSymbol): MorphSymbol {
+  let current = symbol;
+  const seen = new Set<MorphSymbol>();
+  while (!seen.has(current)) {
+    seen.add(current);
+    const target = current.getAliasedSymbol();
+    if (!target) break;
+    current = target;
+  }
+  return current.getExportSymbol();
+}
+
 function isAffectedMethod(method: string): boolean {
   return DELETED_METHODS.has(method) || CHANGED_PATH_METHODS.has(method) || SAFE_NAMED_PATH_REWRITES.has(method);
 }
@@ -226,8 +238,28 @@ function directlyConstructedOpenAIExports(project: Project): Map<string, Set<str
       if (declaration.getModuleSpecifierValue()) continue;
       for (const element of declaration.getNamedExports()) {
         const local = element.getNameNode().getText();
+        if (!locals.has(local)) continue;
         exportedLocals.add(local);
         exportAliases.add(element.getAliasNode()?.getText() ?? local);
+      }
+    }
+    for (const assignment of source.getExportAssignments()) {
+      if (!assignment.isExportEquals() && Node.isIdentifier(assignment.getExpression())
+        && locals.has(assignment.getExpression().getText())) {
+        exportedLocals.add(assignment.getExpression().getText());
+        exportAliases.add('default');
+      }
+    }
+    for (const assignment of source.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
+      if (assignment.getOperatorToken().getKind() !== SyntaxKind.EqualsToken
+        || assignment.getLeft().getText() !== 'module.exports') continue;
+      const right = assignment.getRight();
+      if (Node.isIdentifier(right) && locals.has(right.getText())) exportAliases.add('default');
+      if (Node.isObjectLiteralExpression(right)) {
+        for (const property of right.getProperties()) {
+          if (Node.isShorthandPropertyAssignment(property) && locals.has(property.getName()))
+            exportAliases.add(property.getName());
+        }
       }
     }
     const clients = new Set([...locals].filter((name) => exportedLocals.has(name)));
@@ -315,6 +347,25 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
         const symbol = (named.getAliasNode() ?? named.getNameNode()).getSymbol();
         if (symbol) maybeClientImports.push(symbol);
       }
+    }
+  }
+  for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+    const initializer = variable.getInitializer();
+    if (!initializer || !Node.isCallExpression(initializer) || initializer.getExpression().getText() !== 'require') continue;
+    const specifier = moduleSpecifierLiteral(initializer.getArguments()[0]);
+    const source = specifier ? resolveLocalImport(file, specifier) : undefined;
+    const known = source ? exportedClients.get(source.getFilePath()) : undefined;
+    if (!known) continue;
+    const name = variable.getNameNode();
+    if (Node.isObjectBindingPattern(name)) {
+      for (const element of name.getElements()) {
+        const exportedName = element.getPropertyNameNode()?.getText() ?? element.getName();
+        const symbol = element.getNameNode().getSymbol();
+        if (known.has(exportedName) && symbol) maybeClientImports.push(symbol);
+      }
+    } else if (Node.isIdentifier(name) && known.has('default')) {
+      const symbol = name.getSymbol();
+      if (symbol) maybeClientImports.push(symbol);
     }
   }
   for (const declaration of file.getDescendantsOfKind(SyntaxKind.ImportEqualsDeclaration)) {
@@ -719,7 +770,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     return false;
   };
   for (const symbol of new Set([...clients, ...complexClients])) {
-    const escapedReference = (referencesBySymbol.get(symbol) ?? []).find((reference) => !isAllowedClientReference(reference));
+    const escapedReference = (referencesBySymbol.get(canonicalClientSymbol(symbol)) ?? []).find((reference) => !isAllowedClientReference(reference));
     if (escapedReference) {
       escapedClients.add(symbol);
       const consumer = escapedReference.getFirstAncestor((ancestor) =>
@@ -1354,9 +1405,10 @@ export const openaiV5: Migration = {
           ? project.getTypeChecker().getShorthandAssignmentValueSymbol(shorthand) ?? identifier.getSymbol()
           : identifier.getSymbol();
         if (!symbol) continue;
-        const references = referencesBySymbol.get(symbol) ?? [];
+        const origin = canonicalClientSymbol(symbol);
+        const references = referencesBySymbol.get(origin) ?? [];
         references.push(identifier);
-        referencesBySymbol.set(symbol, references);
+        referencesBySymbol.set(origin, references);
       }
     }
     for (const file of project.getSourceFiles()) transformFile(file, result, exportedClients, referencesBySymbol);
