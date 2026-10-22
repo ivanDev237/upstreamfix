@@ -338,6 +338,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
   referencesBySymbol: Map<MorphSymbol, Node[]>): void {
   const imported = new Set<string>();
   const maybeClientImports: MorphSymbol[] = [];
+  const requiredClientNames = new Set<string>();
   const messageNamespaceImports = new Set<MorphSymbol>();
   const edits: Edit[] = [];
   const typedSource = /\.[cm]?tsx?$/.test(file.getFilePath());
@@ -370,10 +371,14 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       for (const element of name.getElements()) {
         const exportedName = element.getPropertyNameNode()?.getText() ?? element.getName();
         const symbol = element.getNameNode().getSymbol();
-        if (known.has(exportedName) && symbol) maybeClientImports.push(symbol);
+        if (known.has(exportedName)) {
+          requiredClientNames.add(element.getName());
+          if (symbol) maybeClientImports.push(symbol);
+        }
       }
     } else if (Node.isIdentifier(name) && known.has('default')) {
       const symbol = name.getSymbol();
+      requiredClientNames.add(name.getText());
       if (symbol) maybeClientImports.push(symbol);
     }
   }
@@ -452,13 +457,18 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       continue;
     }
     const exportedNames = exportedClients.get(source.getFilePath());
+    const commonJsExport = source.getDescendantsOfKind(SyntaxKind.BinaryExpression).some((assignment) =>
+      assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken
+      && assignment.getLeft().getText() === 'module.exports');
     const defaultImport = declaration.getDefaultImport();
-    if (defaultImport?.getSymbol() && exportedNames?.has('default')) clients.add(defaultImport.getSymbol()!);
+    if (defaultImport?.getSymbol() && exportedNames?.has('default')) {
+      (commonJsExport ? complexClients : clients).add(defaultImport.getSymbol()!);
+    }
     for (const named of declaration.getNamedImports()) {
       const symbol = (named.getAliasNode() ?? named.getNameNode()).getSymbol();
       if (!symbol) continue;
       if (exportedNames?.has(named.getName())) {
-        clients.add(symbol);
+        (commonJsExport ? complexClients : clients).add(symbol);
         continue;
       }
       const uncertainReexport = source.getExportDeclarations().some((exported) => {
@@ -1242,6 +1252,11 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
           ?? (CHANGED_PATH_METHODS.has(possibleMethod) || SAFE_NAMED_PATH_REWRITES.has(possibleMethod)
             ? 'OpenAI v5 uses named path parameters for this method, but its client receiver is not tracked safely because it escapes; review this affected call manually.'
             : 'The OpenAI client receiver is not tracked safely because it escapes; review this affected call manually.'));
+        continue;
+      }
+      if (Node.isIdentifier(root) && requiredClientNames.has(root.getText()) && possibleMethod) {
+        addManual(result, file, call,
+          'A client imported through local require/module.exports has an uncertain receiver; review this affected call manually.');
         continue;
       }
       const definitelyStructuredOther = Boolean(root?.getSymbol()?.getDeclarations().length
