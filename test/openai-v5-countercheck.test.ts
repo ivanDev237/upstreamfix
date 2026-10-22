@@ -170,6 +170,11 @@ describe('OpenAI v5 counter-verification', () => {
       expect(benchmark.runtimeConfirmationFindings(cwd, [{ directory: cwd, supported: false }], { changes: [], manual: [
         { file: 'one.ts', line: 1, reason: 'arbitrary wording', snippet: '', reasonCode: 'runtime-confirmation' },
       ] } as never)).toHaveLength(1);
+      const nested = path.join(cwd, 'packages', 'nested');
+      const nestedFindings = benchmark.runtimeConfirmationFindings(cwd, [
+        { directory: cwd, supported: false }, { directory: nested, supported: false },
+      ], { changes: [{ file: 'packages/nested/src/index.ts', line: 1, rule: 'del-to-delete', before: 'del', after: 'delete' }], manual: [] });
+      expect(nestedFindings.map((finding) => finding.file)).toEqual(['packages/nested/package.json']);
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 });
