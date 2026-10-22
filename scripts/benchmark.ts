@@ -109,6 +109,7 @@ export interface BenchResult {
   migrated: number;
   manual: number;
   runtimeConfirmationNeeded?: boolean;
+  runtimeConfirmationCount?: number;
   manualFindings?: Array<{ file: string; line: number; reason: string; classification: 'legitimate' | 'not automated' | 'benchmark regression' }>;
   typecheck: CheckResult;
   tests: CheckResult;
@@ -555,22 +556,26 @@ export async function benchmarkOne(
     await clearPackageManagerCredentialFiles(checkout);
 
     const outcome = await analyzeBenchmarkMigration(migration, checkout);
-    result.runtimeConfirmationNeeded = migration.id === 'openai@5' && (await Promise.all(migrationDirs.map(async (directory) => {
+    const runtimeManifests = migration.id === 'openai@5' ? await Promise.all(migrationDirs.map(async (directory) => {
       const manifest = await readBenchmarkManifest(path.join(directory, 'package.json'));
-      return typeof manifest.engines?.node !== 'string' || !guaranteesNodeMajor(manifest.engines.node, 20);
-    }))).some(Boolean);
-    const allNodeTypesGroups = countAllNodeTypesGroups(outcome);
-    const lockRefusals = outcome.manual.filter((finding) => /lockfile|\.npmrc|lockfile regeneration|dependency and lockfile were left unchanged|workspace-aware/i.test(finding.reason));
+      return { directory, supported: typeof manifest.engines?.node === 'string' && guaranteesNodeMajor(manifest.engines.node, 20) };
+    })) : [];
+    const runtimeFindings = runtimeConfirmationFindings(checkout, runtimeManifests, outcome);
+    result.runtimeConfirmationCount = runtimeFindings.length;
+    result.runtimeConfirmationNeeded = result.runtimeConfirmationCount > 0;
+    const allNodeTypesGroups = countAllNodeTypesGroups(outcome, checkout);
+    const lockRefusals = outcome.manual.filter((finding) => finding.reasonCode === 'lockfile-refusal');
     const blockedPackageDirectories = new Set(lockRefusals.map((finding) => path.dirname(path.resolve(checkout, finding.file))));
-    const withheldByCliChanges = outcome.changes.filter((change) => blockedPackageDirectories.has(path.dirname(path.resolve(change.file))));
+    const withheldByCliChanges = outcome.changes.filter((change) => blockedPackageDirectories.has(path.dirname(path.resolve(checkout, change.file))));
     const creditedOutcome = { ...outcome, changes: outcome.changes.filter((change) => !withheldByCliChanges.includes(change)) };
     const withheldByCliGroups = countLogicalMigrationGroups({ ...outcome, changes: withheldByCliChanges }, checkout);
     const eligibleNodeTypesGroups = countNodeTypesGroups(creditedOutcome, checkout);
     const withheldNodeTypesGroups = Math.max(0, allNodeTypesGroups - eligibleNodeTypesGroups);
     result.migrated = countLogicalMigrationGroups(creditedOutcome, checkout);
-    result.manual = outcome.manual.length + withheldNodeTypesGroups + withheldByCliGroups;
+    result.manual = outcome.manual.length + withheldNodeTypesGroups + withheldByCliGroups + runtimeFindings.length;
     result.manualFindings = [
       ...outcome.manual.slice(0, 500).map(({ file, line, reason }) => ({ file, line, reason, classification: classifyOpenAiManual(reason) })),
+      ...runtimeFindings.map(({ file, line, reason }) => ({ file, line, reason, classification: 'legitimate' as const })),
       ...(withheldNodeTypesGroups > 0 ? [{ file: 'package.json', line: 1,
         reason: `${withheldNodeTypesGroups} @types/node repair group(s) were not credited because the same CLI proposal did not upgrade that package.json to openai@5.`,
         classification: 'not automated' as const }] : []),
@@ -683,7 +688,7 @@ export function renderBenchmarkReport(
   const migrated = results.reduce((sum, row) => sum + row.migrated, 0);
   const legitimateManual = results.reduce((sum, row) => sum + (row.manualFindings ?? []).filter((finding) => finding.classification === 'legitimate').length, 0);
   const benchmarkRegressions = results.reduce((sum, row) => sum + (row.manualFindings ?? []).filter((finding) => finding.classification === 'benchmark regression').length, 0);
-  const runtimeConfirmations = results.filter((row) => row.runtimeConfirmationNeeded).length;
+  const runtimeConfirmations = results.reduce((sum, row) => sum + (row.runtimeConfirmationCount ?? Number(Boolean(row.runtimeConfirmationNeeded))), 0);
   const eligible = Math.max(0, detected - legitimateManual);
   const eligibleWithoutBenchRegressions = Math.max(0, eligible - benchmarkRegressions);
   const rate = detected === 0 ? 'N/A' : `${((migrated / detected) * 100).toFixed(1)}%`;
@@ -726,11 +731,39 @@ function classifyOpenAiManual(reason: string): 'legitimate' | 'not automated' {
 export function countNodeTypesGroups(outcome: Pick<RunOutcome, 'changes'> & Partial<Pick<RunOutcome, 'proposedFiles'>>, projectRoot?: string): number {
   const eligible = eligibleNodeTypesPackageDirectories(outcome, projectRoot);
   return new Set(outcome.changes.filter((change) => change.rule === 'node-types'
-    && eligible.has(path.dirname(path.resolve(change.file)))).map((change) => path.dirname(path.resolve(change.file)))).size;
+    && eligible.has(path.dirname(path.resolve(projectRoot ?? process.cwd(), change.file)))).map((change) => path.dirname(path.resolve(projectRoot ?? process.cwd(), change.file)))).size;
 }
 
-function countAllNodeTypesGroups(outcome: Pick<RunOutcome, 'changes'>): number {
-  return new Set(outcome.changes.filter((change) => change.rule === 'node-types').map((change) => path.dirname(path.resolve(change.file)))).size;
+export function runtimeConfirmationFindings(
+  projectRoot: string,
+  manifests: readonly { directory: string; supported: boolean }[],
+  outcome: Pick<RunOutcome, 'changes' | 'manual'>,
+): Array<{ file: string; line: 1; reason: string }> {
+  const relevantFiles = new Set<string>();
+  for (const change of outcome.changes) if (change.rule !== 'node-types')
+    relevantFiles.add(path.resolve(projectRoot, change.file));
+  for (const finding of outcome.manual) {
+    if (!/OpenAI v5 (?:changes|removes|renames|moved)|OpenAI receiver|OpenAI client escapes/i.test(finding.reason)) continue;
+    relevantFiles.add(path.resolve(projectRoot, finding.file));
+  }
+  return manifests.filter(({ directory, supported }) => !supported && [...relevantFiles].some((file) => {
+    const relative = path.relative(path.resolve(directory), file);
+    return relative !== '' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+      && /\.[cm]?[jt]sx?$/i.test(relative);
+  })).map(({ directory }) => ({ file: path.relative(projectRoot, path.join(directory, 'package.json')),
+    line: 1 as const, reason: 'OpenAI v5 requires Node.js 20 or later, but this package does not declare a compatible engines.node range; confirm the production runtime before upgrading.' }));
+}
+
+export function countRuntimeConfirmationFindings(
+  projectRoot: string,
+  manifests: readonly { directory: string; supported: boolean }[],
+  outcome: Pick<RunOutcome, 'changes' | 'manual'>,
+): number {
+  return runtimeConfirmationFindings(projectRoot, manifests, outcome).length;
+}
+
+function countAllNodeTypesGroups(outcome: Pick<RunOutcome, 'changes'>, projectRoot: string): number {
+  return new Set(outcome.changes.filter((change) => change.rule === 'node-types').map((change) => path.dirname(path.resolve(projectRoot, change.file)))).size;
 }
 
 function eligibleNodeTypesPackageDirectories(outcome: Pick<RunOutcome, 'changes'> & Partial<Pick<RunOutcome, 'proposedFiles'>>, projectRoot?: string): Set<string> {
@@ -749,7 +782,7 @@ function eligibleNodeTypesPackageDirectories(outcome: Pick<RunOutcome, 'changes'
         && typeof newVersion === 'string' && isSupportedSourceMajor(newVersion, 5)) {
         const manifestDirectory = path.dirname(path.resolve(projectRoot, file.relativePath));
         for (const change of outcome.changes.filter((candidate) => candidate.rule === 'node-types')) {
-          const changeDirectory = path.dirname(path.resolve(change.file));
+          const changeDirectory = path.dirname(path.resolve(projectRoot, change.file));
           if (manifestDirectory === changeDirectory) eligible.add(changeDirectory);
         }
       }

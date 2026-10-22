@@ -31,9 +31,9 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
       ['deep.ts', "import type { Message, MessageContentText } from 'openai/resources/beta/threads/messages/messages';\nexport type SavedMessage = Message;\nexport type SavedText = MessageContentText;\n"],
       ['paths.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nconst runs: OpenAI.Beta.Threads.Runs = client.beta.threads.runs;\nexport const retrieveSubresourceRun = (threadId: string, runId: string) => runs.retrieve(threadId, runId);\nexport const retrieveRun = (threadId: string, runId: string) => client.beta.threads.runs.retrieve(threadId, runId);\nexport const retrieveMessage = (threadId: string, messageId: string) => client.beta.threads.messages.retrieve(threadId, messageId);\n"],
       ['beta-chat-types.ts', `import { ChatCompletionStream, ChatCompletionRunner, ChatCompletionStreamingRunner, Completions,
-  type ParsedChoice, type ParsedChatCompletionMessage, type ParsedFunctionToolCall,
+  type ParsedChoice, type ParsedChatCompletion, type ParsedChatCompletionMessage, type ParsedFunctionToolCall,
   type ChatCompletionStreamParams, type ChatCompletionToolRunnerParams } from 'openai/resources/beta/chat/completions';
-export type SavedCompletion = ParsedChoice<ParsedChatCompletionMessage<ParsedFunctionToolCall>>;
+export type SavedCompletion = ParsedChatCompletion<ParsedChoice<ParsedChatCompletionMessage<ParsedFunctionToolCall>>>;
 export type StreamArgs = ChatCompletionStreamParams;
 export type ToolArgs = ChatCompletionToolRunnerParams<any>;
 export const runtimeTypes = [ChatCompletionStream, ChatCompletionRunner, ChatCompletionStreamingRunner, Completions];
@@ -56,13 +56,16 @@ export const runtimeTypes = [ChatCompletionStream, ChatCompletionRunner, ChatCom
     const project = new Project({ skipAddingFilesFromTsConfig: true });
     for (const name of files.keys()) project.addSourceFileAtPath(path.join(cwd, name));
     const result = openaiV5.transform(project);
-    expect(result.manual).toEqual([]);
+    expect(result.manual.some((finding) => finding.file.endsWith('class.ts') && finding.snippet.includes('this.client.beta.chat'))).toBe(true);
+    expect(result.fileUpdates?.some((update) => update.file.endsWith('class.ts'))).toBe(false);
     // Only the truly removed nested message module moves; openai/error remains
     // a deprecated v5 re-export and therefore does not add a changed file.
-    expect(result.fileUpdates).toHaveLength(10);
+    expect(result.fileUpdates).toHaveLength(9);
     for (const update of result.fileUpdates ?? []) await writeFile(update.file, update.contents);
-    await writeFile(tsconfigPath, JSON.stringify({ ...tsconfig, include: ['*.ts'] }));
+    await writeFile(tsconfigPath, JSON.stringify({ ...tsconfig, include: [...files.keys()].filter((name) => name !== 'class.ts') }));
     await install('5.0.0');
+    const v5Declarations = await readFile(path.join(cwd, 'node_modules/openai/resources/chat/completions.d.ts'), 'utf8');
+    expect(v5Declarations).toMatch(/export\s+(?:(?:declare\s+)?(?:interface|type)\s+ParsedChatCompletion\b|\{[^}]*\bParsedChatCompletion\b\})/s);
     await check();
     expect(await readFile(path.join(cwd, 'chat.ts'), 'utf8')).toContain('client.chat.completions.parse');
     expect(await readFile(path.join(cwd, 'stream.ts'), 'utf8')).toContain('client.chat.completions.stream');

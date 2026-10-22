@@ -16,6 +16,7 @@ export interface Change extends Location {
 export interface ManualItem extends Location {
   reason: string;
   snippet: string;
+  reasonCode?: 'lockfile-refusal';
 }
 
 export interface MigrationResult {

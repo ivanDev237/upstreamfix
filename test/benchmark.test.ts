@@ -4,7 +4,7 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
-import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, compilerRegressionFindings, confirmBenchmarkNodeRuntime, containerEnvArgs, countLogicalMigrationGroups, countNodeTypesGroups, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkManifest, readBenchmarkRepos, renderBenchmarkReport, requiresRuntimeReviewFromNotes, hasVerificationRegression, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
+import { analyzeBenchmarkMigration, assertPinnedCommitIsBranchAncestor, benchmarkOne, buildBenchmarkInstallDockerArgs, compilerRegressionFindings, confirmBenchmarkNodeRuntime, containerEnvArgs, countLogicalMigrationGroups, countNodeTypesGroups, countRuntimeConfirmationFindings, runtimeConfirmationFindings, installArgs, parseBenchmarkArgs, prepareBenchmarkCache, readBenchmarkManifest, readBenchmarkRepos, renderBenchmarkReport, requiresRuntimeReviewFromNotes, hasVerificationRegression, resolveBenchmarkConfig, resolveDockerLimits, validatePackageManagerField, validatePatchPaths, validateRepoEntry } from '../scripts/benchmark.js';
 
 it('P3.4 marks the LUMEN pass-to-fail typecheck as needing review', () => {
   expect(hasVerificationRegression('pass', 'fail: src/components/ErrorBoundary.tsx TS2580')).toBe(true);
@@ -30,6 +30,38 @@ it('counts Node type setup once per package, not once per edited file', () => {
   expect(countNodeTypesGroups(outcome, '/repo')).toBe(2);
   expect(countLogicalMigrationGroups(outcome, '/repo')).toBe(3);
   expect(countNodeTypesGroups({ changes }, '/repo')).toBe(0);
+});
+it('resolves benchmark change paths from the analyzed checkout, not process.cwd()', () => {
+  const root = path.join(os.tmpdir(), 'upstreamfix-bench-checkout');
+  const outcome = { changes: [
+    { file: 'package.json', rule: 'node-types', before: '', after: '', line: 1 },
+    { file: 'tsconfig.json', rule: 'node-types', before: '', after: '', line: 1 },
+  ], proposedFiles: [{ relativePath: 'package.json',
+    before: '{"dependencies":{"openai":"^4.0.0"}}', after: '{"dependencies":{"openai":"^5.0.0"}}' }] } as Parameters<typeof countNodeTypesGroups>[0];
+  expect(countNodeTypesGroups(outcome, root)).toBe(1);
+  expect(countLogicalMigrationGroups(outcome, root)).toBe(1);
+});
+it('counts one runtime decision per affected manifest and ignores comment-only files', () => {
+  const root = path.join(os.tmpdir(), 'upstreamfix-runtime-checkout');
+  const manifests = [
+    { directory: root, supported: false },
+    { directory: path.join(root, 'packages', 'other'), supported: false },
+  ];
+  const change = { file: 'src/client.ts', line: 1, rule: 'beta-chat', before: 'beta.chat', after: 'chat' };
+  expect(countRuntimeConfirmationFindings(root, manifests, { changes: [change], manual: [] } as never)).toBe(1);
+  expect(countRuntimeConfirmationFindings(root, manifests, { changes: [], manual: [] } as never)).toBe(0);
+  expect(runtimeConfirmationFindings(root, manifests, { changes: [change], manual: [] } as never)).toHaveLength(1);
+});
+it('counts a runtime decision once in the denominator and only reports it separately as a subtotal', () => {
+  const report = renderBenchmarkReport([{
+    name: 'sample', commit: 'a'.repeat(40), status: 'manual review required', usages: 2, migrated: 1, manual: 1,
+    runtimeConfirmationNeeded: true, runtimeConfirmationCount: 1,
+    typecheck: { before: 'pass', after: 'pass' }, tests: { before: 'pass', after: 'pass' }, details: '',
+    manualFindings: [{ file: 'package.json', line: 1, reason: 'Confirm Node runtime.', classification: 'legitimate' }],
+  }], 'complete', 1, openaiV5);
+  expect(report).toContain('Automatic migration rate: **50.0%** (1 of 2 detected migration items).');
+  expect(report).toContain('Criterion rate excluding legitimate manual items: **100.0%** (1 of 1 eligible items; 1 legitimate manual items excluded).');
+  expect(report).toContain('Repositories requiring explicit `--node-runtime 20` confirmation: **1**');
 });
 it('records a newly failing typecheck at its source line without claiming the SDK caused it', () => {
   const findings = compilerRegressionFindings('pass', "fail: src/conversation.ts(49,32): error TS2339: Property 'chat' does not exist on type 'Beta'.");
@@ -133,6 +165,7 @@ describe('public repository benchmark helpers', () => {
         for (const [name, content] of files) await writeFile(path.join(cwd, name), content);
         const outcome = await analyzeBenchmarkMigration(openaiV5, cwd);
         expect(outcome.manual.length, files.map(([name]) => name).join(',')).toBeGreaterThan(0);
+        expect(outcome.manual.some((finding) => finding.reasonCode === 'lockfile-refusal')).toBe(true);
         expect(outcome.proposedFiles.some((file) => file.relativePath === 'package.json')).toBe(false);
       }
     } finally { await rm(cwd, { recursive: true, force: true }); }

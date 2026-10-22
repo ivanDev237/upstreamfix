@@ -303,6 +303,8 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
       const clause = match[1] ?? '';
       const named = /\{([^}]+)\}/.exec(clause)?.[1];
       const names = named ? named.split(',').map((name) => name.trim().split(/\s+as\s+/)[0]!).filter(Boolean) : [];
+      const defaultName = /^\s*([A-Za-z_$][\w$]*)/.exec(clause)?.[1];
+      if (defaultName && defaultName !== 'type') names.push('default');
       found.push({ specifier: match[2]!, names });
     }
     return found;
@@ -363,6 +365,11 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
           const original = part.trim().split(/\s+as\s+/)[0];
           if (original && known?.has(original)) reexported.add(part.trim().split(/\s+as\s+/).at(-1)!);
         }
+      }
+      for (const match of source.matchAll(/\bexport\s+\*\s+from\s*['"]([^'"]+)['"]/g)) {
+        const dependency = resolveLocal(file, match[1]!);
+        const known = dependency ? exportedClients.get(dependency) : undefined;
+        if (known) for (const name of known) reexported.add(name);
       }
       if (reexported.size > 0) {
         const known = exportedClients.get(file) ?? new Set<string>();
@@ -718,7 +725,7 @@ async function prepareNodeTypesRepair(options: RunOptions, eligibleManifestPaths
     if (hasUnsafeDependencySpecs(manifest)) {
       manual.push({ file: path.relative(options.cwd, manifestPath), line: 1,
         reason: 'The Node type repair was withheld because Git, URL, local, aliased, override dependency specs require a manual lockfile update.',
-        snippet: 'Node type repair withheld' });
+        snippet: 'Node type repair withheld', reasonCode: 'lockfile-refusal' });
       continue;
     }
     const locks = await findLockfiles(options.cwd, packageDirectory);
@@ -726,7 +733,7 @@ async function prepareNodeTypesRepair(options: RunOptions, eligibleManifestPaths
     if (unsafeLock) {
       manual.push({ file: path.resolve(options.cwd, unsafeLock), line: 1,
         reason: 'The Node type repair was withheld because the lockfile is symlinked or resolves outside the project.',
-        snippet: 'lockfile repair withheld' });
+        snippet: 'lockfile repair withheld', reasonCode: 'lockfile-refusal' });
       continue;
     }
     if ((['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
@@ -1024,7 +1031,7 @@ async function migrateManifests(
     if (options.analysisOnly && hasUnsafeDependencySpecs(manifest)) {
       manual.push({ file: relativePath, line: 1,
         reason: 'This package uses Git, URL, local, aliased, or override dependency specs; the lockfile cannot be regenerated safely for this migration.',
-        snippet: 'dependency repair withheld' });
+        snippet: 'dependency repair withheld', reasonCode: 'lockfile-refusal' });
       continue;
     }
     if (options.analysisOnly) {
@@ -1042,7 +1049,7 @@ async function migrateManifests(
         notes.push(...fileNotes.filter((note) => !note.includes(' → ')));
         manual.push({ file: path.resolve(options.cwd, unsafeLock), line: 1,
           reason: 'This package lockfile is symlinked or resolves outside the project; it was not read or regenerated.',
-          snippet: 'lockfile update withheld' });
+          snippet: 'lockfile update withheld', reasonCode: 'lockfile-refusal' });
         continue;
       }
       const lockResult = existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'package-lock.json'
@@ -1061,6 +1068,7 @@ async function migrateManifests(
           line: 1,
           reason: `${lockResult.reason} The dependency and lockfile were left unchanged.`,
           snippet: `${migration.packageName} dependency update withheld`,
+          reasonCode: 'lockfile-refusal',
         });
         continue;
       }
