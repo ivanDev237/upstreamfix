@@ -136,6 +136,18 @@ describe('client migration workflow security boundary', () => {
     expect(publisher).toContain('if (pushed) await dispatchClientChecks');
   });
 
+  it('accepts App dispatch only for the installed repository and current default-branch head', () => {
+    const example = readFileSync(path.join(root, 'examples/action-test/.github/workflows/upstreamfix.yml'), 'utf8');
+    expect(example).toContain('repository_dispatch:');
+    expect(example).toContain('upstreamfix.migrate');
+    const source = workflow();
+    expect(source).toContain("github.event_name == 'repository_dispatch'");
+    expect(source).toContain('github.event.client_payload.head_sha == github.sha');
+    expect(source).toContain('github.event.client_payload.branch == github.event.repository.default_branch');
+    expect(source).toContain('github.event.client_payload.repository_id');
+    expect(source).toContain('github.event.repository.id');
+  });
+
   it('sets an unprivileged Git author for the read-only migration job', () => {
     const migrate = workflow().split('\n  migrate:')[1]!.split('\n  publish:')[0]!;
     expect(migrate).toContain('GIT_AUTHOR_NAME:');
