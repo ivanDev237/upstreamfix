@@ -113,6 +113,13 @@ describe('OpenAI v5 counter-verification', () => {
       expect(credited!(cwd, { changes, manual: [refusal] })).toEqual([]);
       expect(credited!(cwd, { changes, manual: [{ ...refusal, reasonCode: 'manifest-refusal' }] })).toEqual([]);
       expect(credited!(cwd, { changes, manual: [{ ...refusal, file: 'other.ts', reasonCode: undefined }] })).toEqual([]);
+      await mkdir(path.join(cwd, 'src'), { recursive: true });
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.0.0"},"engines":{"node":">=20"}}');
+      await writeFile(path.join(cwd, 'src', 'index.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('id');");
+      await writeFile(path.join(cwd, 'package-lock.json'), '{"lockfileVersion":2}');
+      const actual = await benchmark.analyzeBenchmarkMigration(openaiV5, cwd);
+      expect(actual.manual.some((finding) => finding.reasonCode === 'lockfile-refusal')).toBe(true);
+      expect(credited!(cwd, actual)).toEqual([]);
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
@@ -133,6 +140,16 @@ describe('OpenAI v5 counter-verification', () => {
         updateManifest: () => ['Could not safely update dependencies.openai'],
       }, { cwd, dryRun: true });
       expect(stalled.manual.some((finding) => finding.reasonCode === 'manifest-refusal')).toBe(true);
+      const silent = await runMigration({ ...openaiV5, id: 'silent-openai@5',
+        transform(project) {
+          const source = project.getSourceFiles()[0]!;
+          return { changes: [{ file: source.getFilePath(), line: 1, rule: 'fixture', before: 'del', after: 'delete' }],
+            manual: [], filesChanged: [source.getFilePath()],
+            fileUpdates: [{ file: source.getFilePath(), contents: `${source.getFullText()}\n// edited` }] };
+        },
+        updateManifest: () => [],
+      }, { cwd, dryRun: true });
+      expect(silent.manual.some((finding) => finding.reasonCode === 'manifest-refusal')).toBe(true);
       await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":');
       const invalid = await runMigration(openaiV5, { cwd, dryRun: true });
       expect(invalid.manual.some((finding) => finding.reasonCode === 'manifest-refusal')).toBe(true);
