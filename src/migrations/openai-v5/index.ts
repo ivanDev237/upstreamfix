@@ -180,6 +180,11 @@ function affectedSuffix(parts: readonly string[]): string | undefined {
   return undefined;
 }
 
+export function hasAffectedOpenAiV5Call(file: SourceFile): boolean {
+  return file.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) =>
+    Boolean(affectedSuffix(pathParts(call.getExpression()))));
+}
+
 function partsAfterLastComputedAccess(node: Node): string[] {
   const expression = unwrapTransparentExpression(node);
   if (expression !== node) return partsAfterLastComputedAccess(expression);
@@ -197,7 +202,8 @@ function partsAfterLastComputedAccess(node: Node): string[] {
 
 function addManual(result: MigrationResult, file: SourceFile, node: Node, reason: string): void {
   result.manual.push({ file: file.getFilePath(), line: file.getLineAndColumnAtPos(node.getStart()).line,
-    reason, snippet: node.getText().slice(0, 500) });
+    reason, snippet: node.getText().slice(0, 500),
+    ...(Node.isCallExpression(node) ? { reasonCode: 'openai-affected-call' as const } : {}) });
 }
 
 function addEdit(edits: Edit[], file: SourceFile, node: Node, replacement: string, rule: string): void {

@@ -16,7 +16,7 @@ export interface Change extends Location {
 export interface ManualItem extends Location {
   reason: string;
   snippet: string;
-  reasonCode?: 'lockfile-refusal';
+  reasonCode?: 'lockfile-refusal' | 'manifest-refusal' | 'runtime-confirmation' | 'openai-affected-call';
 }
 
 export interface MigrationResult {

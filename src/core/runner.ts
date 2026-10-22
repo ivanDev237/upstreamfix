@@ -12,6 +12,7 @@ import type { ManualItem, Migration, MigrationResult, PackageManifest, ProposedF
 import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from './project-discovery.js';
 import { parseManifest } from './manifest.js';
 import { guaranteesNodeMajor } from './node-range.js';
+import { hasAffectedOpenAiV5Call } from '../migrations/openai-v5/index.js';
 
 const execFile = promisify(execFileCallback);
 
@@ -72,6 +73,7 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
     return { file, parsed, invalid };
   });
   const manual: ManualItem[] = [];
+  const runtimeBlocked = new Map<string, ManualItem>();
   const manifestBySource = new Map<string, string>();
 
   for (const sourcePath of findSourceFiles(root, migration.packageName, excludedDirectories)) {
@@ -135,18 +137,24 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
     }
     if (!migration.declarativeRecipe && migration.id === 'openai@5' && !guaranteesNodeMajor(declaration.manifest.engines?.node ?? '', 20)
       && !(nodeRuntime === 20 && declaration.manifest.engines?.node === undefined)) {
-      manual.push({
-        file: sourcePath,
-        line: 1,
-        reason: `OpenAI SDK v5 requires Node.js 20 or later. Declare a compatible engines.node range in ${path.relative(root, declaration.file)} and confirm the deployed runtime before migrating; this source file was left unchanged.`,
-        snippet: `engines.node: ${declaration.manifest.engines?.node ?? 'not declared'}`,
-      });
+      const probe = new Project({ skipAddingFilesFromTsConfig: true, compilerOptions: { allowJs: true } });
+      if (hasAffectedOpenAiV5Call(probe.addSourceFileAtPath(sourcePath)) && !runtimeBlocked.has(declaration.file)) {
+        runtimeBlocked.set(declaration.file, {
+          file: declaration.file,
+          line: 1,
+          reason: `OpenAI SDK v5 requires Node.js 20 or later. Declare a compatible engines.node range in ${path.relative(root, declaration.file)} and confirm the deployed runtime before migrating; affected source files were left unchanged.`,
+          snippet: `engines.node: ${declaration.manifest.engines?.node ?? 'not declared'}`,
+          reasonCode: nodeRuntime === 20 && declaration.manifest.engines?.node !== undefined
+            ? 'manifest-refusal' : 'runtime-confirmation',
+        });
+      }
       continue;
     }
     project.addSourceFileAtPath(sourcePath);
     manifestBySource.set(sourcePath, declaration.file);
   }
 
+  manual.push(...runtimeBlocked.values());
   return { project, manual, manifestBySource };
 }
 
@@ -971,6 +979,7 @@ async function migrateManifests(
         line: 1,
         reason: 'This package.json is invalid JSON; its dependency version was left unchanged.',
         snippet: raw.split(/\r?\n/, 1)[0] ?? '',
+        reasonCode: 'manifest-refusal',
       });
       continue;
     }
@@ -987,6 +996,7 @@ async function migrateManifests(
           line: 1,
           reason: `engines must be an object in package.json before --node-runtime ${major} can add a Node.js range.`,
           snippet: 'engines',
+          reasonCode: 'manifest-refusal',
         });
         continue;
       }
@@ -997,6 +1007,7 @@ async function migrateManifests(
           line: 1,
           reason: `engines.node is already declared as ${JSON.stringify(declared)}. Review and update it manually for Node.js ${major} before migrating ${migration.id}; --node-runtime never overrides a declared range.`,
           snippet: `engines.node: ${declared}`,
+          reasonCode: 'manifest-refusal',
         });
         continue;
       }
@@ -1027,6 +1038,7 @@ async function migrateManifests(
         line: 1,
         reason: 'The dependency version could not be updated without rewriting or ambiguously editing package.json; update it manually.',
         snippet: `${migration.packageName} dependency update withheld`,
+        reasonCode: 'manifest-refusal',
       });
       continue;
     }

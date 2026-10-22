@@ -506,6 +506,12 @@ export async function analyzeBenchmarkMigration(migration: Migration, checkout: 
     nodeRuntime: migration.id === 'openai@5' ? 20 : undefined });
 }
 
+/** The CLI rejects an entire proposal if any manual finding blocks its write. */
+export function benchmarkCreditedChanges(_projectRoot: string,
+  outcome: Pick<RunOutcome, 'changes' | 'manual'>): RunOutcome['changes'] {
+  return outcome.manual.length > 0 ? [] : outcome.changes;
+}
+
 export async function benchmarkOne(
   repo: BenchRepo,
   root: string,
@@ -558,16 +564,17 @@ export async function benchmarkOne(
     const outcome = await analyzeBenchmarkMigration(migration, checkout);
     const runtimeManifests = migration.id === 'openai@5' ? await Promise.all(migrationDirs.map(async (directory) => {
       const manifest = await readBenchmarkManifest(path.join(directory, 'package.json'));
-      return { directory, supported: typeof manifest.engines?.node === 'string' && guaranteesNodeMajor(manifest.engines.node, 20) };
+      return { directory, supported: (typeof manifest.engines?.node === 'string' && guaranteesNodeMajor(manifest.engines.node, 20))
+        || manifest.engines?.node === undefined };
     })) : [];
     const runtimeFindings = runtimeConfirmationFindings(checkout, runtimeManifests, outcome);
     result.runtimeConfirmationCount = runtimeFindings.length;
     result.runtimeConfirmationNeeded = result.runtimeConfirmationCount > 0;
     const allNodeTypesGroups = countAllNodeTypesGroups(outcome, checkout);
-    const lockRefusals = outcome.manual.filter((finding) => finding.reasonCode === 'lockfile-refusal');
-    const blockedPackageDirectories = new Set(lockRefusals.map((finding) => path.dirname(path.resolve(checkout, finding.file))));
-    const withheldByCliChanges = outcome.changes.filter((change) => blockedPackageDirectories.has(path.dirname(path.resolve(checkout, change.file))));
-    const creditedOutcome = { ...outcome, changes: outcome.changes.filter((change) => !withheldByCliChanges.includes(change)) };
+    const creditedChanges = benchmarkCreditedChanges(checkout, outcome);
+    const creditedOutcome = { ...outcome, changes: creditedChanges };
+    const withheldByCliChanges = outcome.manual.length > 0
+      ? outcome.changes.filter((change) => change.rule !== 'node-types') : [];
     const withheldByCliGroups = countLogicalMigrationGroups({ ...outcome, changes: withheldByCliChanges }, checkout);
     const eligibleNodeTypesGroups = countNodeTypesGroups(creditedOutcome, checkout);
     const withheldNodeTypesGroups = Math.max(0, allNodeTypesGroups - eligibleNodeTypesGroups);
@@ -579,8 +586,8 @@ export async function benchmarkOne(
       ...(withheldNodeTypesGroups > 0 ? [{ file: 'package.json', line: 1,
         reason: `${withheldNodeTypesGroups} @types/node repair group(s) were not credited because the same CLI proposal did not upgrade that package.json to openai@5.`,
         classification: 'not automated' as const }] : []),
-      ...(withheldByCliGroups > 0 ? [{ file: lockRefusals[0]?.file ?? 'package.json', line: 1,
-        reason: `${withheldByCliGroups} source migration group(s) were withheld from the benchmark rate because the CLI refused the package migration under its lockfile safeguards.`,
+      ...(withheldByCliGroups > 0 ? [{ file: outcome.manual[0]?.file ?? 'package.json', line: 1,
+        reason: `${withheldByCliGroups} source migration group(s) were withheld from the benchmark rate because the CLI rejects the whole proposal when manual review is required.`,
         classification: 'not automated' as const }] : []),
     ];
     result.usages = result.migrated + result.manual;
@@ -704,7 +711,7 @@ export function renderBenchmarkReport(
     `Automatic migration rate: **${rate}** (${migrated} of ${detected} detected migration items).`,
     `Criterion rate excluding legitimate manual items: **${eligibleRate}** (${migrated} of ${eligible} eligible items; ${legitimateManual} legitimate manual items excluded).`,
     `Rate excluding benchmark-generated compiler regressions as well: **${eligibleWithoutBenchRegressionsRate}** (${migrated} of ${eligibleWithoutBenchRegressions} items; ${benchmarkRegressions} generated regressions excluded separately).`,
-    `Repositories requiring explicit \`--node-runtime 20\` confirmation: **${runtimeConfirmations}** (${runtimeConfirmations} had absent or insufficient \`engines.node\`).`,
+    `Packages requiring explicit \`--node-runtime 20\` confirmation: **${runtimeConfirmations}** (${runtimeConfirmations} affected packages had an insufficient \`engines.node\` range).`,
     'The denominator counts migration change groups plus manual findings, including potential edits withheld in files with manual findings and up to five new compiler diagnostics per previously passing project; it does not count individual API callsites. Runtime confirmation is an explicit user decision in the migration flow and is counted separately from migration success.', '',
     '| Repository | Pinned commit | Status | Detected items | Migrated | Manual | Types before | Types after | Tests before | Tests after | Details |',
     '|---|---|---:|---:|---:|---:|---|---|---|---|---|',
@@ -740,17 +747,21 @@ export function runtimeConfirmationFindings(
   outcome: Pick<RunOutcome, 'changes' | 'manual'>,
 ): Array<{ file: string; line: 1; reason: string }> {
   const relevantFiles = new Set<string>();
-  for (const change of outcome.changes) if (change.rule !== 'node-types')
+  const explicitRuntimeDirectories = new Set<string>();
+  const callRules = new Set(['del-to-delete', 'beta-chat', 'named-path-parameters', 'run-tools-event', 'run-tools-method']);
+  for (const change of outcome.changes) if (callRules.has(change.rule))
     relevantFiles.add(path.resolve(projectRoot, change.file));
   for (const finding of outcome.manual) {
-    if (!/OpenAI v5 (?:changes|removes|renames|moved)|OpenAI receiver|OpenAI client escapes/i.test(finding.reason)) continue;
+    if (finding.reasonCode !== 'runtime-confirmation' && finding.reasonCode !== 'openai-affected-call') continue;
+    if (finding.reasonCode === 'runtime-confirmation')
+      explicitRuntimeDirectories.add(path.dirname(path.resolve(projectRoot, finding.file)));
     relevantFiles.add(path.resolve(projectRoot, finding.file));
   }
-  return manifests.filter(({ directory, supported }) => !supported && [...relevantFiles].some((file) => {
+  return manifests.filter(({ directory, supported }) => !supported && (explicitRuntimeDirectories.has(path.resolve(directory)) || [...relevantFiles].some((file) => {
     const relative = path.relative(path.resolve(directory), file);
     return relative !== '' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
       && /\.[cm]?[jt]sx?$/i.test(relative);
-  })).map(({ directory }) => ({ file: path.relative(projectRoot, path.join(directory, 'package.json')),
+  }))).map(({ directory }) => ({ file: path.relative(projectRoot, path.join(directory, 'package.json')),
     line: 1 as const, reason: 'OpenAI v5 requires Node.js 20 or later, but this package does not declare a compatible engines.node range; confirm the production runtime before upgrading.' }));
 }
 

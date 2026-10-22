@@ -61,7 +61,7 @@ it('counts a runtime decision once in the denominator and only reports it separa
   }], 'complete', 1, openaiV5);
   expect(report).toContain('Automatic migration rate: **50.0%** (1 of 2 detected migration items).');
   expect(report).toContain('Criterion rate excluding legitimate manual items: **100.0%** (1 of 1 eligible items; 1 legitimate manual items excluded).');
-  expect(report).toContain('Repositories requiring explicit `--node-runtime 20` confirmation: **1**');
+  expect(report).toContain('Packages requiring explicit `--node-runtime 20` confirmation: **1**');
 });
 it('records a newly failing typecheck at its source line without claiming the SDK caused it', () => {
   const findings = compilerRegressionFindings('pass', "fail: src/conversation.ts(49,32): error TS2339: Property 'chat' does not exist on type 'Beta'.");
@@ -175,7 +175,7 @@ describe('public repository benchmark helpers', () => {
       { name: 'one', commit: 'a'.repeat(40), status: 'manual', usages: 1, migrated: 0, manual: 1,
         runtimeConfirmationNeeded: true, typecheck: { before: 'not run', after: 'not run' }, tests: { before: 'not run', after: 'not run' }, details: '' },
     ], 'complete', 1, openaiV5);
-    expect(report).toContain('Repositories requiring explicit `--node-runtime 20` confirmation: **1**');
+    expect(report).toContain('Packages requiring explicit `--node-runtime 20` confirmation: **1**');
   });
   it('uses CLI lockfile refusal rules without invoking host npm for unsupported inputs', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-benchmark-analysis-'));
