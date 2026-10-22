@@ -16,15 +16,20 @@ it('does not count a benchmark-only Node types repair as an automatic migration'
   expect(source).not.toMatch(/result\.migrated\s*\+=\s*1/);
 });
 it('counts Node type setup once per package, not once per edited file', () => {
-  const outcome = { changes: [
-    { file: '/repo/package.json', rule: 'node-types' },
-    { file: '/repo/tsconfig.json', rule: 'node-types' },
-    { file: '/repo/package-lock.json', rule: 'node-types' },
-    { file: '/repo/packages/worker/package.json', rule: 'node-types' },
-    { file: '/repo/src/a.ts', rule: 'rename' },
+  const changes = [
+    { file: '/repo/package.json', rule: 'node-types', before: '', after: '', line: 1 },
+    { file: '/repo/tsconfig.json', rule: 'node-types', before: '', after: '', line: 1 },
+    { file: '/repo/package-lock.json', rule: 'node-types', before: '', after: '', line: 1 },
+    { file: '/repo/packages/worker/package.json', rule: 'node-types', before: '', after: '', line: 1 },
+    { file: '/repo/src/a.ts', rule: 'rename', before: '', after: '', line: 1 },
+  ];
+  const outcome = { changes, proposedFiles: [
+    { relativePath: 'package.json', before: '{"dependencies":{"openai":"^4.0.0"}}', after: '{"dependencies":{"openai":"^5.0.0"}}' },
+    { relativePath: 'packages/worker/package.json', before: '{"dependencies":{"openai":"^4.0.0"}}', after: '{"dependencies":{"openai":"^5.0.0"}}' },
   ] } as Parameters<typeof countLogicalMigrationGroups>[0];
-  expect(countNodeTypesGroups(outcome)).toBe(2);
-  expect(countLogicalMigrationGroups(outcome)).toBe(3);
+  expect(countNodeTypesGroups(outcome, '/repo')).toBe(2);
+  expect(countLogicalMigrationGroups(outcome, '/repo')).toBe(3);
+  expect(countNodeTypesGroups({ changes }, '/repo')).toBe(0);
 });
 it('records a newly failing typecheck at its source line without claiming the SDK caused it', () => {
   const findings = compilerRegressionFindings('pass', "fail: src/conversation.ts(49,32): error TS2339: Property 'chat' does not exist on type 'Beta'.");
@@ -84,9 +89,9 @@ describe('public repository benchmark helpers', () => {
     expect(report).toContain('| is-even-ai | src/IsEvenAiOpenAi.ts | 45 | not automated |');
     expect(report).toContain('| rowfill | src/core/extractTable.ts | 58 | legitimate |');
   });
-  it('declares Node 20 only in a disposable OpenAI benchmark manifest', () => {
+  it('mirrors explicit CLI Node 20 confirmation in the disposable verification manifest', () => {
     const manifest = { dependencies: { openai: '^4.0.0' } } as { dependencies: { openai: string }; engines?: { node: string } };
-    expect(confirmBenchmarkNodeRuntime(manifest, openaiV5)).toContain('benchmark-only');
+    expect(confirmBenchmarkNodeRuntime(manifest, openaiV5)).toContain('--node-runtime 20 confirmation');
     expect(manifest.engines?.node).toBe('>=20');
   });
   it('confirms Node 20 only in the disposable OpenAI benchmark checkout', async () => {
@@ -98,23 +103,48 @@ describe('public repository benchmark helpers', () => {
       expect(outcome.changes.length).toBeGreaterThan(0);
       expect(outcome.manual.some((item) => item.reason.includes('Node.js 20'))).toBe(false);
       expect(outcome.manifestNotes.join(' ')).not.toContain('no safe source edit');
-      expect(outcome.manifestNotes.join(' ')).not.toContain('engines.node (not declared)');
+      expect(outcome.manifestNotes.join(' ')).toContain('--node-runtime 20 confirmation');
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
-  it('measures beta chat rewrites without counting one runtime warning per source file', async () => {
+  it('uses the CLI runtime confirmation and refuses a pre-existing incompatible engines range', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-benchmark-openai-runtime-'));
     try {
       await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.28.0"},"engines":{"node":">=18"}}\n');
       await writeFile(path.join(cwd, 'index.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.beta.chat.completions.stream({model:'gpt-4o',messages:[]});\n");
       const outcome = await analyzeBenchmarkMigration(openaiV5, cwd);
-      expect(outcome.changes.some((change) => change.rule === 'beta-chat')).toBe(true);
-      expect(outcome.runtimeOverrideFiles).toContain('index.ts');
-      expect(outcome.manual.some((item) => item.reason.includes('Node.js 20'))).toBe(false);
-      expect(outcome.manifestNotes.some((item) => item.includes('Node.js 20'))).toBe(true);
-      expect((await readFile(path.join(cwd, 'index.ts'), 'utf8'))).toContain('client.beta.chat');
+      expect(outcome.changes.some((change) => change.rule === 'beta-chat')).toBe(false);
+      expect(outcome.manual.some((item) => item.reason.includes('requires Node.js 20 or later'))).toBe(true);
+      expect(outcome.proposedFiles.some((file) => file.relativePath === 'package.json')).toBe(false);
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
-  it('analyzes source changes without invoking host lockfile regeneration', async () => {
+  it('does not credit OpenAI groups that the CLI lockfile safeguards reject', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-benchmark-openai-lock-gates-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.0.0"},"engines":{"node":">=20"}}');
+      await writeFile(path.join(cwd, 'index.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('id');\n");
+      const unsupportedLocks = [
+        [['package-lock.json', '{"lockfileVersion":2}']],
+        [['package-lock.json', '{"lockfileVersion":3}'], ['pnpm-lock.yaml', "lockfileVersion: '9.0'\n"]],
+        [['package-lock.json', '{"lockfileVersion":3}'], ['.npmrc', 'registry=https://registry.example.invalid/\n']],
+        [['pnpm-lock.yaml', "lockfileVersion: '9.0'\n"]],
+      ] as const;
+      for (const files of unsupportedLocks) {
+        for (const name of ['package-lock.json', 'pnpm-lock.yaml', '.npmrc']) await rm(path.join(cwd, name), { force: true });
+        for (const [name, content] of files) await writeFile(path.join(cwd, name), content);
+        const outcome = await analyzeBenchmarkMigration(openaiV5, cwd);
+        expect(outcome.manual.length, files.map(([name]) => name).join(',')).toBeGreaterThan(0);
+        expect(outcome.proposedFiles.some((file) => file.relativePath === 'package.json')).toBe(false);
+      }
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+  it('reports repositories that require explicit runtime confirmation as a separate count', () => {
+    const report = renderBenchmarkReport([
+      { name: 'one', commit: 'a'.repeat(40), status: 'manual', usages: 1, migrated: 0, manual: 1,
+        runtimeConfirmationNeeded: true, typecheck: { before: 'not run', after: 'not run' }, tests: { before: 'not run', after: 'not run' }, details: '' },
+    ], 'complete', 1, openaiV5);
+    expect(report).toContain('Repositories requiring explicit `--node-runtime 20` confirmation: **1**');
+  });
+  it('uses CLI lockfile refusal rules without invoking host npm for unsupported inputs', async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-benchmark-analysis-'));
     const originalPath = process.env.PATH;
     try {
@@ -126,10 +156,11 @@ describe('public repository benchmark helpers', () => {
       process.env.PATH = `${bin}${path.delimiter}${originalPath ?? ''}`;
       await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { 'firebase-admin': '^13.0.0' }, engines: { node: '>=22' } }));
       await writeFile(path.join(cwd, 'index.ts'), "import * as admin from 'firebase-admin';\nadmin.initializeApp();\n");
-      await writeFile(path.join(cwd, 'package-lock.json'), '{ invalid lock');
+      await writeFile(path.join(cwd, 'package-lock.json'), '{"lockfileVersion":2}');
       const result = await analyzeBenchmarkMigration(firebaseAdminV14, cwd);
       expect(result.proposedFiles.some((file) => file.relativePath === 'package-lock.json')).toBe(false);
-      expect(result.changes.length).toBeGreaterThan(0);
+      expect(result.proposedFiles.some((file) => file.relativePath === 'package.json')).toBe(false);
+      expect(result.manual.some((finding) => /lockfileVersion|v3|lockfile/i.test(finding.reason))).toBe(true);
       await expect(readFile(marker, 'utf8')).rejects.toThrow();
     } finally { process.env.PATH = originalPath; await rm(cwd, { recursive: true, force: true }); }
   });
