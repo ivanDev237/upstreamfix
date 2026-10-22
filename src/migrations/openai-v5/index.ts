@@ -120,10 +120,10 @@ function canonicalClientSymbol(symbol: MorphSymbol): MorphSymbol {
   while (!seen.has(current)) {
     seen.add(current);
     const target = current.getAliasedSymbol();
-    if (!target) break;
+    if (!target || target.getDeclarations().length === 0) break;
     current = target;
   }
-  return current.getExportSymbol();
+  return current;
 }
 
 function isAffectedMethod(method: string): boolean {
@@ -181,8 +181,11 @@ function affectedSuffix(parts: readonly string[]): string | undefined {
 }
 
 export function hasAffectedOpenAiV5Call(file: SourceFile): boolean {
-  return file.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) =>
-    Boolean(affectedSuffix(pathParts(call.getExpression()))));
+  return file.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) => {
+    const parts = pathParts(call.getExpression());
+    return Boolean(affectedSuffix(parts)) || parts.join('.').includes('beta.chat.completions')
+      || RUN_TOOLS_METHODS.has(parts.at(-1) ?? '');
+  });
 }
 
 function partsAfterLastComputedAccess(node: Node): string[] {
@@ -762,7 +765,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     if (Node.isExportSpecifier(parent)) {
       const declaration = parent.getFirstAncestorByKind(SyntaxKind.ExportDeclaration);
       const specifier = declaration?.getModuleSpecifierValue();
-      return Boolean(declaration && (!specifier || resolveLocalImport(file, specifier)));
+      return Boolean(declaration && (!specifier || resolveLocalImport(reference.getSourceFile(), specifier)));
     }
     if (Node.isExportAssignment(parent)) return !parent.isExportEquals();
     if (Node.isCallExpression(parent) && parent.getExpression() === current) return true;
@@ -1234,6 +1237,11 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       const possibleMethod = (receiverPrefix?.length
         ? affectedSuffix([...receiverPrefix, ...expressionParts.slice(1)]) : undefined)
         ?? affectedSuffix(partsAfterLastComputedAccess(expression)) ?? affectedSuffix(expressionParts);
+      if (rootSymbol && escapedClients.has(rootSymbol) && possibleMethod) {
+        addManual(result, file, call, escapeReasons.get(rootSymbol)
+          ?? 'The OpenAI client escapes through a use the migration cannot prove safe; review this affected call manually.');
+        continue;
+      }
       const definitelyStructuredOther = Boolean(root?.getSymbol()?.getDeclarations().length
         && root.getSymbol()!.getDeclarations().every((declaration) => {
           const type = Node.isParameterDeclaration(declaration) || Node.isVariableDeclaration(declaration)

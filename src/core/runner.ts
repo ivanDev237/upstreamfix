@@ -113,6 +113,7 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
         line: 1,
         reason: `The ${migration.packageName} version could not be confirmed because ${path.relative(root, invalidManifest.file)} ${invalidManifest.reason}.`,
         snippet: readFileSync(sourcePath, 'utf8').split(/\r?\n/, 1)[0] ?? '',
+        reasonCode: 'manifest-refusal',
       });
       continue;
     }
@@ -123,6 +124,7 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
         line: 1,
         reason: `No containing package.json declares ${migration.packageName}; this file was not transformed because its SDK version is unknown.`,
         snippet: readFileSync(sourcePath, 'utf8').split(/\r?\n/, 1)[0] ?? '',
+        reasonCode: 'manifest-refusal',
       });
       continue;
     }
@@ -132,6 +134,7 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
         line: 1,
         reason: `${migration.packageName} is declared as \`${declaration.range}\` in ${path.relative(root, declaration.file)}; this migration only analyzes major v${migration.fromMajor} ranges.`,
         snippet: readFileSync(sourcePath, 'utf8').split(/\r?\n/, 1)[0] ?? '',
+        reasonCode: 'manifest-refusal',
       });
       continue;
     }
@@ -1014,6 +1017,15 @@ async function migrateManifests(
       if (declared === undefined) manifest.engines = { ...manifest.engines, node: `>=${major}` };
     }
     const fileNotes = migration.updateManifest(manifest);
+    const versionChanged = (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+      .some((section) => before[section]?.[migration.packageName] !== manifest[section]?.[migration.packageName]);
+    if (!versionChanged) {
+      notes.push(...fileNotes.filter((note) => !note.includes(' → ')));
+      manual.push({ file: relativePath, line: 1,
+        reason: `The ${migration.packageName} dependency version could not be updated safely; the package was left unchanged.`,
+        snippet: `${migration.packageName} dependency update withheld`, reasonCode: 'manifest-refusal' });
+      continue;
+    }
     if (addNodeTypes) {
       manifest.devDependencies = { ...manifest.devDependencies, '@types/node': `^${nodeTypesMajor}.0.0` };
       fileNotes.push(`Added @types/node ^${nodeTypesMajor}.0.0 after detecting Node API use; the isolated verifier must pass typecheck before commit.`);
