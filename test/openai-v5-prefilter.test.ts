@@ -20,6 +20,16 @@ async function fixture(files: Record<string, string>, check: (cwd: string) => Pr
 const openaiManifest = JSON.stringify({ dependencies: { openai: '^4.0.0' }, engines: { node: '>=20' } });
 
 describe('OpenAI v5 source prefilter', () => {
+  it('loads a CommonJS SDK require written as a template literal without substitutions', async () => {
+    await fixture({
+      'package.json': openaiManifest,
+      'src/tmpl.ts': "const OpenAI = require(`openai`);\nconst c = new OpenAI();\nexport async function remove(id: string) { await c.files.del(id); }\n",
+    }, async (cwd) => {
+      const loaded = loadProject(cwd, 'openai').getSourceFiles().map((file) => path.relative(cwd, file.getFilePath()));
+      expect(loaded).toEqual(['src/tmpl.ts']);
+    });
+  });
+
   it('1 ignores unrelated monorepo packages during discovery and preview', async () => {
     await fixture({
       'package.json': '{}',

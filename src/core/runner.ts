@@ -290,7 +290,8 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
         && isSdk(node.moduleReference.expression.text)) found = true;
       else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)
         && ts.isStringLiteral(node.argument.literal) && isSdk(node.argument.literal.text)) found = true;
-      else if (ts.isCallExpression(node) && node.arguments.length > 0 && ts.isStringLiteral(node.arguments[0]!)
+      // require(`openai`) and import(`openai`): a template literal without substitutions is a static specifier.
+      else if (ts.isCallExpression(node) && node.arguments.length > 0 && ts.isStringLiteralLike(node.arguments[0]!)
         && (node.expression.kind === ts.SyntaxKind.ImportKeyword
           || ts.isIdentifier(node.expression) && node.expression.text === 'require') && isSdk(node.arguments[0]!.text)) found = true;
       else ts.forEachChild(node, visit);
