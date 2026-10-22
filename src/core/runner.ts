@@ -348,6 +348,13 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
     const names = directExports(source);
     if (names.size > 0) exportedClients.set(file, names);
   }
+  // A separate module can mutate an exported SDK client without spelling
+  // "openai" or importing the client by name. Include module-object consumers
+  // and derived classes so the migration can inspect cross-file escapes.
+  if (retained.size > 0) for (const [file, source] of contents) {
+    if ((exportedClients.size > 0 && /\b(?:import\s*\*\s*as\s+\w+\s+from\s*|import\s*\(|require\s*\()\s*['"][.#@]/.test(source))
+      || (/\bextends\s+\w+/.test(source) && /\bfrom\s*['"][.#@]/.test(source))) retained.add(file);
+  }
   for (const [file, source] of contents) {
     for (const match of source.matchAll(/\bexport\s+(?:type\s+)?(?:\*|\{([^}]+)\})\s*from\s*['"]([^'"]+)['"]/g)) {
       if (resolveLocal(file, match[2]!)) continue;

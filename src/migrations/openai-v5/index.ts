@@ -130,6 +130,12 @@ function isAffectedMethod(method: string): boolean {
   return DELETED_METHODS.has(method) || CHANGED_PATH_METHODS.has(method) || SAFE_NAMED_PATH_REWRITES.has(method);
 }
 
+function isAffectedWritePath(method: string): boolean {
+  if (isAffectedMethod(method)) return true;
+  if ([...DELETED_METHODS].some((deleted) => method === `${deleted.slice(0, deleted.lastIndexOf('.'))}.delete`)) return true;
+  return [...RUN_TOOLS_METHODS.values()].includes(method.split('.').at(-1) ?? '');
+}
+
 function hasDuplicateMovedSpecifier(file: SourceFile, specifier: string): boolean {
   const source = file.getFullText();
   const occurrences = source.split(specifier).length - 1;
@@ -181,7 +187,14 @@ function affectedSuffix(parts: readonly string[]): string | undefined {
 }
 
 export function hasAffectedOpenAiV5Call(file: SourceFile): boolean {
+  if (file.getImportDeclarations().some((declaration) => MOVED_IMPORTS.has(declaration.getModuleSpecifierValue()))
+    || file.getExportDeclarations().some((declaration) => MOVED_IMPORTS.has(declaration.getModuleSpecifierValue() ?? ''))
+    || file.getDescendantsOfKind(SyntaxKind.ImportType).some((node) =>
+      MOVED_IMPORTS.has(node.getArgument().getText().replace(/^['"]|['"]$/g, '')))) return true;
   return file.getDescendantsOfKind(SyntaxKind.CallExpression).some((call) => {
+    const expression = call.getExpression();
+    if ((expression.getText() === 'require' || expression.getKind() === SyntaxKind.ImportKeyword)
+      && MOVED_IMPORTS.has(moduleSpecifierLiteral(call.getArguments()[0]) ?? '')) return true;
     const parts = pathParts(call.getExpression());
     return Boolean(affectedSuffix(parts)) || parts.join('.').includes('beta.chat.completions')
       || RUN_TOOLS_METHODS.has(parts.at(-1) ?? '');
@@ -323,6 +336,126 @@ function resolveLocalImport(file: SourceFile, specifier: string): SourceFile | u
   return undefined;
 }
 
+interface ModuleOrigin { source?: SourceFile; uncertain: boolean }
+
+function moduleOrigin(expression: Node, visited = new Set<MorphSymbol>()): ModuleOrigin | undefined {
+  const node = unwrapTransparentExpression(expression);
+  const file = node.getSourceFile();
+  if (Node.isCallExpression(node)) {
+    const callee = node.getExpression();
+    if (callee.getText() === 'require' || callee.getKind() === SyntaxKind.ImportKeyword) {
+      const specifier = moduleSpecifierLiteral(node.getArguments()[0]);
+      if (!specifier || !(specifier.startsWith('.') || specifier.startsWith('@/') || specifier.startsWith('#'))) return undefined;
+      const source = resolveLocalImport(file, specifier);
+      return { source, uncertain: !source };
+    }
+  }
+  if (Node.isPropertyAccessExpression(node)) return moduleOrigin(node.getExpression(), visited);
+  if (!Node.isIdentifier(node)) return undefined;
+  const symbol = node.getSymbol();
+  if (!symbol || visited.has(symbol)) return undefined;
+  visited.add(symbol);
+  for (const declaration of symbol.getDeclarations()) {
+    if (Node.isNamespaceImport(declaration)) {
+      const specifier = declaration.getFirstAncestorByKind(SyntaxKind.ImportDeclaration)?.getModuleSpecifierValue();
+      if (!specifier || !(specifier.startsWith('.') || specifier.startsWith('@/') || specifier.startsWith('#'))) continue;
+      const source = resolveLocalImport(file, specifier);
+      return { source, uncertain: !source };
+    }
+    if (Node.isVariableDeclaration(declaration) && declaration.getInitializer()) {
+      const origin = moduleOrigin(declaration.getInitializer()!, visited);
+      if (origin) return origin;
+    }
+    if (Node.isParameterDeclaration(declaration)) {
+      const callback = declaration.getParent();
+      const thenCall = callback?.getParent();
+      const thenExpression = thenCall && Node.isCallExpression(thenCall) ? thenCall.getExpression() : undefined;
+      if (thenExpression && Node.isPropertyAccessExpression(thenExpression) && thenExpression.getName() === 'then') {
+        const origin = moduleOrigin(thenExpression.getExpression(), visited);
+        if (origin) return origin;
+      }
+    }
+  }
+  return undefined;
+}
+
+function globallyEscapedReceivers(project: Project, exportedClients: Map<string, Set<string>>): {
+  modules: Set<string>; classFields: Set<MorphSymbol>; classOwners: Map<Node, Set<string>>;
+  uncertainFieldNames: Set<string>;
+} {
+  const modules = new Set<string>();
+  const classFields = new Set<MorphSymbol>();
+  const classOwners = new Map<Node, Set<string>>();
+  const uncertainFieldNames = new Set<string>();
+  const namedClasses = new Map<string, Node[]>();
+  for (const source of project.getSourceFiles()) for (const declaration of [
+    ...source.getDescendantsOfKind(SyntaxKind.ClassDeclaration), ...source.getDescendantsOfKind(SyntaxKind.ClassExpression),
+  ]) {
+    const name = declaration.getName();
+    if (name) namedClasses.set(name, [...(namedClasses.get(name) ?? []), declaration]);
+  }
+  const markClassHierarchy = (owner: Node, field: string, visited = new Set<Node>()): void => {
+    if (visited.has(owner)) return;
+    visited.add(owner);
+    const fields = classOwners.get(owner) ?? new Set<string>();
+    fields.add(field);
+    classOwners.set(owner, fields);
+    if (!Node.isClassDeclaration(owner) && !Node.isClassExpression(owner)) return;
+    const base = owner.getExtends();
+    if (!base) return;
+    const baseExpression = base.getExpression();
+    const declaration = baseExpression.getSymbol()?.getAliasedSymbol()?.getDeclarations().find((node) =>
+      Node.isClassDeclaration(node) || Node.isClassExpression(node))
+      ?? baseExpression.getSymbol()?.getDeclarations().find((node) =>
+        Node.isClassDeclaration(node) || Node.isClassExpression(node));
+    const candidates = declaration ? [declaration] : namedClasses.get(baseExpression.getText()) ?? [];
+    if (candidates.length === 1) markClassHierarchy(candidates[0]!, field, visited);
+    else uncertainFieldNames.add(field);
+  };
+  const taint = (node: Node): void => {
+    const origin = moduleOrigin(node);
+    if (origin) {
+      if (origin.source) modules.add(origin.source.getFilePath());
+      else if (origin.uncertain) for (const file of exportedClients.keys()) modules.add(file);
+    }
+    const target = unwrapTransparentExpression(node);
+    for (const access of [target, ...target.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)]) {
+      if (!Node.isPropertyAccessExpression(access) || access.getExpression().getKind() !== SyntaxKind.ThisKeyword) continue;
+      const owner = access.getFirstAncestor((ancestor) => Node.isClassDeclaration(ancestor) || Node.isClassExpression(ancestor));
+      if (!owner) continue;
+      const symbol = access.getNameNode().getSymbol();
+      if (symbol) classFields.add(canonicalClientSymbol(symbol));
+      markClassHierarchy(owner, access.getName());
+    }
+  };
+  for (const file of project.getSourceFiles()) {
+    for (const assignment of file.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
+      if (assignment.getOperatorToken().getKind() !== SyntaxKind.EqualsToken) continue;
+      taint(assignment.getLeft());
+    }
+    for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      const name = call.getExpression().getText();
+      if (!['Object.assign', 'Reflect.set', 'Object.defineProperty', 'Reflect.defineProperty'].includes(name)) continue;
+      const target = call.getArguments()[0];
+      if (target) taint(target);
+    }
+  }
+  // A barrel can expose the same mutable module object under another path.
+  for (let pass = 0; pass < project.getSourceFiles().length; pass++) {
+    let changed = false;
+    for (const file of project.getSourceFiles()) {
+      if (modules.has(file.getFilePath())) continue;
+      if (file.getExportDeclarations().some((declaration) => {
+        const specifier = declaration.getModuleSpecifierValue();
+        return Boolean(specifier && resolveLocalImport(file, specifier)
+          && modules.has(resolveLocalImport(file, specifier)!.getFilePath()));
+      })) { modules.add(file.getFilePath()); changed = true; }
+    }
+    if (!changed) break;
+  }
+  return { modules, classFields, classOwners, uncertainFieldNames };
+}
+
 function isStablePathArgument(node: Node): boolean {
   if (Node.isNonNullExpression(node)) return Node.isIdentifier(node.getExpression());
   // The SDK's Run.id is a plain response field. Restrict this exception to a
@@ -335,9 +468,10 @@ function isStablePathArgument(node: Node): boolean {
 }
 
 function transformFile(file: SourceFile, result: MigrationResult, exportedClients: Map<string, Set<string>>,
-  referencesBySymbol: Map<MorphSymbol, Node[]>): void {
+  referencesBySymbol: Map<MorphSymbol, Node[]>, globalEscapes: ReturnType<typeof globallyEscapedReceivers>): void {
   const imported = new Set<string>();
   const maybeClientImports: MorphSymbol[] = [];
+  const globallyTaintedImports = new Set<MorphSymbol>();
   const requiredClientNames = new Set<string>();
   const messageNamespaceImports = new Set<MorphSymbol>();
   const edits: Edit[] = [];
@@ -457,6 +591,14 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       continue;
     }
     const exportedNames = exportedClients.get(source.getFilePath());
+    if (globalEscapes.modules.has(source.getFilePath())) {
+      const defaultSymbol = declaration.getDefaultImport()?.getSymbol();
+      if (defaultSymbol) globallyTaintedImports.add(defaultSymbol);
+      for (const named of declaration.getNamedImports()) {
+        const symbol = (named.getAliasNode() ?? named.getNameNode()).getSymbol();
+        if (symbol) globallyTaintedImports.add(symbol);
+      }
+    }
     const commonJsExport = source.getDescendantsOfKind(SyntaxKind.BinaryExpression).some((assignment) =>
       assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken
       && assignment.getLeft().getText() === 'module.exports');
@@ -690,7 +832,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       const harmlessUnchangedMethodStub = assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken
         && Boolean(targetSymbol && (clients.has(targetSymbol) || complexClients.has(targetSymbol)))
         && ((targetParts.length === 2 && CLIENT_CONFIG_KEYS.has(targetParts[1]!))
-          || (targetParts.length >= 3 && !isAffectedMethod(targetParts.slice(1).join('.'))));
+          || (targetParts.length >= 3 && !isAffectedWritePath(targetParts.slice(1).join('.'))));
       if (!harmlessUnchangedMethodStub) markAssignmentTarget(left);
       if (assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken) {
         const assignmentParts = pathParts(left);
@@ -748,6 +890,9 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     }
     if (!changed) break;
   }
+  if (globalEscapes.modules.has(file.getFilePath()))
+    for (const symbol of [...clients, ...complexClients]) escapedClients.add(symbol);
+  for (const symbol of globallyTaintedImports) escapedClients.add(symbol);
   const isAllowedClientReference = (reference: Node): boolean => {
     let current: Node = reference;
     // Type-only references do not pass or expose the runtime client value.
@@ -784,7 +929,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       const parts = pathParts(current);
       if (parts.length === 2 && CLIENT_CONFIG_KEYS.has(parts[1]!)) return true;
       // Replacing an unrelated leaf method does not change any migrated SDK call.
-      if (parts.length >= 3 && !isAffectedMethod(parts.slice(1).join('.'))) return true;
+      if (parts.length >= 3 && !isAffectedWritePath(parts.slice(1).join('.'))) return true;
     }
     return false;
   };
@@ -843,7 +988,12 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     if (node.getExpression().getKind() === SyntaxKind.ThisKeyword) {
       if (!isClassThisBinding(node)) return undefined;
       const owner = node.getFirstAncestor((ancestor) => Node.isClassDeclaration(ancestor) || Node.isClassExpression(ancestor));
-      return owner && classFields.get(owner)?.has(node.getName()) && !escapedClassFields.get(owner)?.has(node.getName()) ? [] : undefined;
+      const fieldSymbol = node.getNameNode().getSymbol();
+      const globallyEscaped = globalEscapes.uncertainFieldNames.has(node.getName())
+        || Boolean(owner && globalEscapes.classOwners.get(owner)?.has(node.getName()))
+        || Boolean(fieldSymbol && globalEscapes.classFields.has(canonicalClientSymbol(fieldSymbol)));
+      return owner && classFields.get(owner)?.has(node.getName()) && !escapedClassFields.get(owner)?.has(node.getName())
+        && !globallyEscaped ? [] : undefined;
     }
     const parent = clientParts(node.getExpression());
     return parent ? [...parent, node.getName()] : undefined;
@@ -886,6 +1036,28 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     return Node.isPropertyAccessExpression(callee) && callee.getName() === 'runTools'
       && Boolean(clientParts(callee));
   };
+  for (const assignment of file.getDescendantsOfKind(SyntaxKind.BinaryExpression)) {
+    if (assignment.getOperatorToken().getKind() !== SyntaxKind.EqualsToken) continue;
+    const left = unwrapTransparentExpression(assignment.getLeft());
+    if (!Node.isPropertyAccessExpression(left) || ![...RUN_TOOLS_METHODS.values()].includes(left.getName())
+      || !isTrackedRunner(left.getExpression())) continue;
+    const symbol = rootIdentifier(left.getExpression())?.getSymbol();
+    if (symbol) uncertainRunners.add(symbol);
+  }
+  for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+    const method = call.getExpression().getText();
+    if (!['Object.assign', 'Reflect.set', 'Object.defineProperty', 'Reflect.defineProperty'].includes(method)) continue;
+    const target = call.getArguments()[0];
+    if (!target || !isTrackedRunner(target)) continue;
+    const key = call.getArguments()[1];
+    const affected = method === 'Object.assign'
+      ? Node.isObjectLiteralExpression(key) && key.getProperties().some((property) =>
+        (Node.isPropertyAssignment(property) || Node.isShorthandPropertyAssignment(property))
+          && [...RUN_TOOLS_METHODS.values()].includes(property.getName()))
+      : Node.isStringLiteral(key) && [...RUN_TOOLS_METHODS.values()].includes(key.getLiteralValue());
+    const symbol = affected ? rootIdentifier(target)?.getSymbol() : undefined;
+    if (symbol) uncertainRunners.add(symbol);
+  }
   const streams = new Set<MorphSymbol>();
   const uncertainStreams = new Set<MorphSymbol>();
   for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
@@ -1428,6 +1600,7 @@ export const openaiV5: Migration = {
   transform(project: Project): MigrationResult {
     const result: MigrationResult = { changes: [], manual: [], filesChanged: [], fileUpdates: [] };
     const exportedClients = directlyConstructedOpenAIExports(project);
+    const globalEscapes = globallyEscapedReceivers(project, exportedClients);
     const referencesBySymbol = new Map<MorphSymbol, Node[]>();
     for (const source of project.getSourceFiles()) {
       for (const identifier of source.getDescendantsOfKind(SyntaxKind.Identifier)) {
@@ -1442,7 +1615,7 @@ export const openaiV5: Migration = {
         referencesBySymbol.set(origin, references);
       }
     }
-    for (const file of project.getSourceFiles()) transformFile(file, result, exportedClients, referencesBySymbol);
+    for (const file of project.getSourceFiles()) transformFile(file, result, exportedClients, referencesBySymbol, globalEscapes);
     return result;
   },
   updateManifest(manifest: PackageManifest): string[] {

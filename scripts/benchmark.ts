@@ -110,6 +110,7 @@ export interface BenchResult {
   manual: number;
   runtimeConfirmationNeeded?: boolean;
   runtimeConfirmationCount?: number;
+  runtimeBlockedCount?: number;
   manualFindings?: Array<{ file: string; line: number; reason: string; classification: 'legitimate' | 'not automated' | 'benchmark regression' }>;
   typecheck: CheckResult;
   tests: CheckResult;
@@ -570,6 +571,7 @@ export async function benchmarkOne(
     const runtimeFindings = runtimeConfirmationFindings(checkout, runtimeManifests, outcome);
     result.runtimeConfirmationCount = runtimeFindings.length;
     result.runtimeConfirmationNeeded = result.runtimeConfirmationCount > 0;
+    result.runtimeBlockedCount = countRuntimeBlockedPackages(checkout, runtimeManifests, outcome);
     const allNodeTypesGroups = countAllNodeTypesGroups(outcome, checkout);
     const creditedChanges = benchmarkCreditedChanges(checkout, outcome);
     const creditedOutcome = { ...outcome, changes: creditedChanges };
@@ -696,6 +698,7 @@ export function renderBenchmarkReport(
   const legitimateManual = results.reduce((sum, row) => sum + (row.manualFindings ?? []).filter((finding) => finding.classification === 'legitimate').length, 0);
   const benchmarkRegressions = results.reduce((sum, row) => sum + (row.manualFindings ?? []).filter((finding) => finding.classification === 'benchmark regression').length, 0);
   const runtimeConfirmations = results.reduce((sum, row) => sum + (row.runtimeConfirmationCount ?? Number(Boolean(row.runtimeConfirmationNeeded))), 0);
+  const runtimeBlocks = results.reduce((sum, row) => sum + (row.runtimeBlockedCount ?? 0), 0);
   const eligible = Math.max(0, detected - legitimateManual);
   const eligibleWithoutBenchRegressions = Math.max(0, eligible - benchmarkRegressions);
   const rate = detected === 0 ? 'N/A' : `${((migrated / detected) * 100).toFixed(1)}%`;
@@ -711,7 +714,8 @@ export function renderBenchmarkReport(
     `Automatic migration rate: **${rate}** (${migrated} of ${detected} detected migration items).`,
     `Criterion rate excluding legitimate manual items: **${eligibleRate}** (${migrated} of ${eligible} eligible items; ${legitimateManual} legitimate manual items excluded).`,
     `Rate excluding benchmark-generated compiler regressions as well: **${eligibleWithoutBenchRegressionsRate}** (${migrated} of ${eligibleWithoutBenchRegressions} items; ${benchmarkRegressions} generated regressions excluded separately).`,
-    `Packages requiring explicit \`--node-runtime 20\` confirmation: **${runtimeConfirmations}** (${runtimeConfirmations} affected packages had an insufficient \`engines.node\` range).`,
+    `Packages requiring explicit \`--node-runtime 20\` confirmation: **${runtimeConfirmations}**.`,
+    `Packages whose engines.node blocks OpenAI v5: **${runtimeBlocks}**.`,
     'The denominator counts migration change groups plus manual findings, including potential edits withheld in files with manual findings and up to five new compiler diagnostics per previously passing project; it does not count individual API callsites. Runtime confirmation is an explicit user decision in the migration flow and is counted separately from migration success.', '',
     '| Repository | Pinned commit | Status | Detected items | Migrated | Manual | Types before | Types after | Tests before | Tests after | Details |',
     '|---|---|---:|---:|---:|---:|---|---|---|---|---|',
@@ -774,6 +778,17 @@ export function countRuntimeConfirmationFindings(
   outcome: Pick<RunOutcome, 'changes' | 'manual'>,
 ): number {
   return runtimeConfirmationFindings(projectRoot, manifests, outcome).length;
+}
+
+/** Existing CLI manifest refusals are already in the denominator; this is only a report subtotal. */
+export function countRuntimeBlockedPackages(
+  projectRoot: string,
+  manifests: readonly { directory: string; supported: boolean }[],
+  outcome: Pick<RunOutcome, 'manual'>,
+): number {
+  return manifests.filter(({ directory, supported }) => !supported
+    && outcome.manual.some((finding) => finding.reasonCode === 'manifest-refusal'
+      && path.resolve(projectRoot, finding.file) === path.join(directory, 'package.json'))).length;
 }
 
 function countAllNodeTypesGroups(outcome: Pick<RunOutcome, 'changes'>, projectRoot: string): number {

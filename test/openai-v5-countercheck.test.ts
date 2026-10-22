@@ -20,6 +20,141 @@ function graph(files: Record<string, string>) {
 }
 
 describe('OpenAI v5 counter-verification', () => {
+  it('10 holds a client when a rewritten method target is replaced', () => {
+    for (const write of ['client.files.delete = fake', '(client.files as any).delete = fake', 'Object.assign(client.files, { delete: fake })']) {
+      const result = transform(`import OpenAI from 'openai'; const client = new OpenAI(); ${write}; client.files.del('id');`);
+      expect(result.fileUpdates, write).toEqual([]);
+      expect(result.manual.some((finding) => finding.snippet.includes("client.files.del('id')")), write).toBe(true);
+    }
+    const runner = transform("import OpenAI from 'openai'; const client = new OpenAI(); const run = client.chat.completions.runTools({ tools: [] }); run.finalFunctionToolCall = fake; run.finalFunctionCall();");
+    expect(runner.fileUpdates).toEqual([]);
+    expect(runner.manual.some((finding) => finding.snippet.includes('run.finalFunctionCall'))).toBe(true);
+  });
+
+  it('11 holds exports mutated through dynamic imports', () => {
+    for (const mutation of [
+      "import('./lib').then((m) => { (m.client as any).files = {}; });",
+      "import('./lib').then((m) => { Reflect.set(m, 'client', fake); });",
+      "import('./lib').then((m) => { Object.assign(m, { client: fake }); });",
+      "import('./lib').then((m) => { Object.defineProperty(m, 'client', { value: fake }); });",
+    ]) {
+      const result = graph({ 'lib.ts': "import OpenAI from 'openai'; export const client = new OpenAI();",
+        'mutation.ts': mutation, 'consumer.ts': "import { client } from './lib'; client.files.del('id');" });
+      expect(result.fileUpdates?.some((item) => item.file === '/consumer.ts'), mutation).toBe(false);
+      expect(result.manual.some((finding) => finding.file === '/consumer.ts'), mutation).toBe(true);
+    }
+  });
+
+  it('12 holds exports mutated through namespace imports and require', () => {
+    for (const mutation of [
+      "import * as lib from './lib'; (lib.client as any).files = {};",
+      "import * as lib from './lib'; Reflect.set(lib, 'client', fake);",
+      "import * as lib from './lib'; Object.assign(lib, { client: fake });",
+      "import * as lib from './lib'; Object.defineProperty(lib, 'client', { value: fake });",
+      "require('./lib').client.files = {};",
+      "import * as unresolved from './unresolved'; Reflect.set(unresolved, 'client', fake);",
+    ]) {
+      const result = graph({ 'lib.ts': "import OpenAI from 'openai'; export const client = new OpenAI();",
+        'mutation.ts': mutation, 'consumer.ts': "import { client } from './lib'; client.files.del('id');" });
+      expect(result.fileUpdates?.some((item) => item.file === '/consumer.ts'), mutation).toBe(false);
+      expect(result.manual.some((finding) => finding.file === '/consumer.ts'), mutation).toBe(true);
+    }
+    const consumer = graph({ 'lib.ts': "import OpenAI from 'openai'; export const client = new OpenAI();",
+      'consumer.ts': "const { client } = require('./lib'); client.files.del('id');" });
+    expect(consumer.manual.some((finding) => finding.file === '/consumer.ts')).toBe(true);
+  });
+
+  it('12b loads mutation-only files into the runner analysis', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-module-mutation-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.0.0"},"engines":{"node":">=20"}}');
+      await writeFile(path.join(cwd, 'lib.ts'), "import OpenAI from 'openai'; export const client = new OpenAI();");
+      await writeFile(path.join(cwd, 'consumer.ts'), "import { client } from './lib'; client.files.del('id');");
+      for (const mutation of [
+        "import('./lib').then((m) => { (m.client as any).files = {}; });",
+        "import * as lib from './lib'; Reflect.set(lib, 'client', fake);",
+        "require('./lib').client.files = {};",
+      ]) {
+        await writeFile(path.join(cwd, 'mutation.ts'), mutation);
+        const outcome = await runMigration(openaiV5, { cwd, dryRun: true });
+        expect(outcome.proposedFiles.some((file) => file.relativePath === 'consumer.ts'), mutation).toBe(false);
+        expect(outcome.manual.some((finding) => finding.file === 'consumer.ts'), mutation).toBe(true);
+      }
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('13 holds inherited fields mutated in direct and indirect subclasses across files', () => {
+    const cases: Array<Record<string, string>> = [
+      { 'classes.ts': "import OpenAI from 'openai'; class Base { constructor(protected client: OpenAI) {} go(id: string) { return this.client.files.del(id); } } class Sub extends Base { hack() { (this.client as any).files = {}; } }" },
+      { 'base.ts': "import OpenAI from 'openai'; export class Base { constructor(protected client: OpenAI) {} go(id: string) { return this.client.files.del(id); } }",
+        'middle.ts': "import { Base } from './base'; export class Middle extends Base {}",
+        'sub.ts': "import { Middle } from './middle'; class Sub extends Middle { hack() { (this.client as any).files = {}; } }" },
+    ];
+    for (const files of cases) {
+      const result = graph(files);
+      expect(result.fileUpdates, Object.keys(files).join(',')).toEqual([]);
+      expect(result.manual.some((finding) => finding.snippet.includes('this.client.files.del')), Object.keys(files).join(',')).toBe(true);
+    }
+  });
+
+  it('13b loads derived mutation files into the runner analysis', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-inheritance-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.0.0"},"engines":{"node":">=20"}}');
+      await writeFile(path.join(cwd, 'base.ts'), "import OpenAI from 'openai'; export class Base { constructor(protected client: OpenAI) {} go(id: string) { return this.client.files.del(id); } }");
+      await writeFile(path.join(cwd, 'middle.ts'), "import { Base } from './base'; export class Middle extends Base {}");
+      await writeFile(path.join(cwd, 'sub.ts'), "import { Middle } from './middle'; class Sub extends Middle { hack() { (this.client as any).files = {}; } }");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true });
+      expect(outcome.proposedFiles.some((file) => file.relativePath === 'base.ts')).toBe(false);
+      expect(outcome.manual.some((finding) => finding.file === 'base.ts' && finding.snippet.includes('this.client.files.del'))).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('13c does not hold an unrelated class with a field of the same name', () => {
+    const result = graph({
+      'safe.ts': "import OpenAI from 'openai'; class Safe { client = new OpenAI(); go() { this.client.files.del('id'); } }",
+      'other.ts': "import OpenAI from 'openai'; class Other { client = new OpenAI(); hack() { (this.client as any).files = {}; } }",
+    });
+    expect(result.fileUpdates?.find((file) => file.file === '/safe.ts')?.contents).toContain("this.client.files.delete('id')");
+  });
+
+  it('14 detects an import-only migration before a Node 20 runtime decision', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-import-runtime-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.0.0"},"engines":{"node":">=18.17.0"}}');
+      for (const source of [
+        "import type { ParsedChatCompletion } from 'openai/resources/beta/chat/completions';",
+        "type P = import('openai/resources/beta/chat/completions').ParsedChatCompletion;",
+        "const x = require('openai/resources/beta/chat/completions');",
+      ]) {
+        await writeFile(path.join(cwd, 'index.ts'), source);
+        const outcome = await runMigration(openaiV5, { cwd, dryRun: true });
+        expect(outcome.manual.some((finding) => finding.reasonCode === 'runtime-confirmation'), source).toBe(true);
+      }
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('15 distinguishes incompatible engines from missing runtime confirmation in the report', () => {
+    const row = { name: 'fixture', commit: 'a'.repeat(40), status: 'manual', usages: 1, migrated: 0, manual: 1,
+      typecheck: { before: 'skipped', after: 'skipped' }, tests: { before: 'skipped', after: 'skipped' },
+      details: '', runtimeConfirmationCount: 0, runtimeBlockedCount: 1, manualFindings: [] } as never;
+    const report = benchmark.renderBenchmarkReport([row], 'complete', 1, openaiV5);
+    expect(report).toContain('Packages whose engines.node blocks OpenAI v5: **1**');
+    expect(report).toContain('Packages requiring explicit `--node-runtime 20` confirmation: **0**');
+  });
+
+  it('15b counts an engines refusal once without adding a second manual item', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-runtime-block-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.0.0"},"engines":{"node":">=18.17.0"}}');
+      await writeFile(path.join(cwd, 'index.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('id');");
+      const outcome = await benchmark.analyzeBenchmarkMigration(openaiV5, cwd);
+      const manifests = [{ directory: cwd, supported: false }];
+      expect(benchmark.countRuntimeBlockedPackages(cwd, manifests, outcome)).toBe(1);
+      expect(benchmark.runtimeConfirmationFindings(cwd, manifests, outcome)).toEqual([]);
+      expect(outcome.manual.filter((finding) => finding.reasonCode === 'manifest-refusal')).toHaveLength(1);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
   it('1 holds clients captured by shorthand objects and CommonJS exports', () => {
     for (const exportLine of ['const deps = { client };', 'module.exports = { client };']) {
       const result = transform(`import OpenAI from 'openai'; const client = new OpenAI(); ${exportLine} (deps.client as any).files = fake; ${call};`
