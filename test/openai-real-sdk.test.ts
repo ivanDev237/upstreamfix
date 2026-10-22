@@ -18,7 +18,7 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
     const tsconfigPath = path.join(cwd, 'tsconfig.json');
     const tsconfig = { compilerOptions: { strict: true, noEmit: true,
       skipLibCheck: true, target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext' },
-      include: ['files.ts', 'chat.ts', 'stream.ts', 'tools.ts', 'class.ts', 'events.ts', 'moved.ts', 'paths.ts', 'observed.ts', 'beta-chat-types.ts'] };
+      include: ['files.ts', 'chat.ts', 'stream.ts', 'tools.ts', 'class.ts', 'events.ts', 'moved.ts', 'paths.ts', 'subresource.ts', 'observed.ts', 'beta-chat-types.ts'] };
     await writeFile(tsconfigPath, JSON.stringify(tsconfig));
     const files = new Map([
       ['files.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const remove = () => client.files.del('file_123');\n"],
@@ -29,7 +29,8 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
       ['events.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const observe = () => { const runner = client.beta.chat.completions.runTools({model:'gpt-4o', messages:[], tools:[]}); runner.on('functionCall', () => {}); return runner.finalFunctionCall(); };\n"],
       ['moved.ts', "import type { OpenAIError } from 'openai/error';\nexport type MigrationError = OpenAIError;\n"],
       ['deep.ts', "import type { Message, MessageContentText } from 'openai/resources/beta/threads/messages/messages';\nexport type SavedMessage = Message;\nexport type SavedText = MessageContentText;\n"],
-      ['paths.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nconst runs: OpenAI.Beta.Threads.Runs = client.beta.threads.runs;\nexport const retrieveSubresourceRun = (threadId: string, runId: string) => runs.retrieve(threadId, runId);\nexport const retrieveRun = (threadId: string, runId: string) => client.beta.threads.runs.retrieve(threadId, runId);\nexport const retrieveMessage = (threadId: string, messageId: string) => client.beta.threads.messages.retrieve(threadId, messageId);\n"],
+      ['paths.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const retrieveRun = (threadId: string, runId: string) => client.beta.threads.runs.retrieve(threadId, runId);\nexport const retrieveMessage = (threadId: string, messageId: string) => client.beta.threads.messages.retrieve(threadId, messageId);\n"],
+      ['subresource.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nconst runs: OpenAI.Beta.Threads.Runs = client.beta.threads.runs;\nexport const retrieveSubresourceRun = (threadId: string, runId: string) => runs.retrieve(threadId, runId);\nexport const retrieveDirectRun = (threadId: string, runId: string) => client.beta.threads.runs.retrieve(threadId, runId);\n"],
       ['beta-chat-types.ts', `import { ChatCompletionStream, ChatCompletionRunner, ChatCompletionStreamingRunner, Completions,
   type ParsedChoice, type ParsedChatCompletion, type ParsedChatCompletionMessage, type ParsedFunctionToolCall,
   type ChatCompletionStreamParams, type ChatCompletionToolRunnerParams } from 'openai/resources/beta/chat/completions';
@@ -57,12 +58,14 @@ export const runtimeTypes = [ChatCompletionStream, ChatCompletionRunner, ChatCom
     for (const name of files.keys()) project.addSourceFileAtPath(path.join(cwd, name));
     const result = openaiV5.transform(project);
     expect(result.manual.some((finding) => finding.file.endsWith('class.ts') && finding.snippet.includes('this.client.beta.chat'))).toBe(true);
+    expect(result.manual.some((finding) => finding.file.endsWith('subresource.ts') && finding.snippet.includes('runs.retrieve'))).toBe(true);
     expect(result.fileUpdates?.some((update) => update.file.endsWith('class.ts'))).toBe(false);
+    expect(result.fileUpdates?.some((update) => update.file.endsWith('subresource.ts'))).toBe(false);
     // Only the truly removed nested message module moves; openai/error remains
     // a deprecated v5 re-export and therefore does not add a changed file.
     expect(result.fileUpdates).toHaveLength(9);
     for (const update of result.fileUpdates ?? []) await writeFile(update.file, update.contents);
-    await writeFile(tsconfigPath, JSON.stringify({ ...tsconfig, include: [...files.keys()].filter((name) => name !== 'class.ts') }));
+    await writeFile(tsconfigPath, JSON.stringify({ ...tsconfig, include: [...files.keys()].filter((name) => !['class.ts', 'subresource.ts'].includes(name)) }));
     await install('5.0.0');
     const v5Declarations = await readFile(path.join(cwd, 'node_modules/openai/resources/chat/completions.d.ts'), 'utf8');
     expect(v5Declarations).toMatch(/export\s+\*\s+from\s+["']\.\/completions\//);
@@ -70,14 +73,14 @@ export const runtimeTypes = [ChatCompletionStream, ChatCompletionRunner, ChatCom
     expect(await readFile(path.join(cwd, 'chat.ts'), 'utf8')).toContain('client.chat.completions.parse');
     expect(await readFile(path.join(cwd, 'stream.ts'), 'utf8')).toContain('client.chat.completions.stream');
     expect(await readFile(path.join(cwd, 'tools.ts'), 'utf8')).toContain('client.chat.completions.runTools');
-    expect(await readFile(path.join(cwd, 'class.ts'), 'utf8')).toContain('this.client.chat.completions.parse');
+    expect(await readFile(path.join(cwd, 'class.ts'), 'utf8')).toContain('this.client.beta.chat.completions.parse');
     expect(await readFile(path.join(cwd, 'events.ts'), 'utf8')).toContain("runner.on('functionToolCall'");
     expect(await readFile(path.join(cwd, 'events.ts'), 'utf8')).toContain('runner.finalFunctionToolCall()');
     expect(await readFile(path.join(cwd, 'moved.ts'), 'utf8')).toContain("'openai/error'");
     expect(await readFile(path.join(cwd, 'deep.ts'), 'utf8')).toContain("'openai/resources/beta/threads/messages'");
     expect(await readFile(path.join(cwd, 'deep.ts'), 'utf8')).toContain('TextContentBlock as MessageContentText');
     expect(await readFile(path.join(cwd, 'paths.ts'), 'utf8')).toContain('runs.retrieve(runId, { thread_id: threadId })');
-    expect(await readFile(path.join(cwd, 'paths.ts'), 'utf8')).toContain('runs.retrieve(runId, { thread_id: threadId })');
+    expect(await readFile(path.join(cwd, 'paths.ts'), 'utf8')).toContain('messages.retrieve(messageId, { thread_id: threadId })');
     expect(await readFile(path.join(cwd, 'beta-chat-types.ts'), 'utf8')).toContain("'openai/resources/chat/completions'");
     expect(await readFile(path.join(cwd, 'observed.ts'), 'utf8')).toContain('openai.chat.completions.parse(');
   }, 300_000);

@@ -119,6 +119,15 @@ Object.assign(client, {});`);
     expect(outcome.manual.some((item) => /finalFunctionCall/.test(item.reason))).toBe(true);
   });
 
+  it('holds typed subresource and direct client calls after extracting a client subresource', () => {
+    const outcome = migrate(`import OpenAI from 'openai'; const client = new OpenAI();
+const runs: OpenAI.Beta.Threads.Runs = client.beta.threads.runs;
+runs.retrieve(threadId, runId); client.beta.threads.runs.retrieve(threadId, runId);`);
+    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual.some((item) => item.snippet.includes('runs.retrieve(threadId, runId)'))).toBe(true);
+    expect(outcome.manual.some((item) => item.snippet.includes('client.beta.threads.runs.retrieve'))).toBe(true);
+  });
+
   it('does not flag unrelated this.files methods merely because the file imports OpenAI', () => {
     const outcome = migrate("import OpenAI from 'openai'; class Store { files = { update(a: string, b: string) {} }; go() { this.files.update('a','b'); } }");
     expect(outcome.manual).toEqual([]);

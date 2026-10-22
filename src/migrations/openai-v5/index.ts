@@ -707,6 +707,19 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     }
   }
   for (const symbol of escapeCandidates) if (clients.has(symbol) || complexClients.has(symbol)) escapedClients.add(symbol);
+  for (let pass = 0; pass < file.getDescendantsOfKind(SyntaxKind.VariableDeclaration).length; pass++) {
+    let changed = false;
+    for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
+      const symbol = variable.getNameNode().getSymbol();
+      const initializer = variable.getInitializer();
+      const source = initializer ? rootIdentifier(initializer)?.getSymbol() : undefined;
+      if (symbol && source && escapedClients.has(source) && (clients.has(symbol) || complexClients.has(symbol)) && !escapedClients.has(symbol)) {
+        escapedClients.add(symbol);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
   const clientParts = (node: Node): string[] | undefined => {
     const unwrapped = unwrapTransparentExpression(node);
     if (unwrapped !== node) return clientParts(unwrapped);
@@ -1121,11 +1134,15 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     }
     const parts = clientParts(expression);
     if (!parts || parts.length < 2) {
-      const possibleMethod = affectedSuffix(partsAfterLastComputedAccess(expression)) ?? affectedSuffix(pathParts(expression));
       const root = rootIdentifier(expression);
       const hasComputedPath = Node.isElementAccessExpression(expression)
         || expression.getDescendantsOfKind(SyntaxKind.ElementAccessExpression).length > 0;
       const rootSymbol = root?.getSymbol();
+      const expressionParts = pathParts(expression);
+      const receiverPrefix = rootSymbol ? clientPrefixes.get(rootSymbol) : undefined;
+      const possibleMethod = (receiverPrefix?.length
+        ? affectedSuffix([...receiverPrefix, ...expressionParts.slice(1)]) : undefined)
+        ?? affectedSuffix(partsAfterLastComputedAccess(expression)) ?? affectedSuffix(expressionParts);
       const definitelyStructuredOther = Boolean(root?.getSymbol()?.getDeclarations().length
         && root.getSymbol()!.getDeclarations().every((declaration) => {
           const type = Node.isParameterDeclaration(declaration) || Node.isVariableDeclaration(declaration)
