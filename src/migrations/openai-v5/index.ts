@@ -787,7 +787,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
         && ancestor.getArguments().some((argument) => argument === escapedReference
           || argument.getDescendants().includes(escapedReference)));
       if (consumer && (Node.isCallExpression(consumer) || Node.isNewExpression(consumer))) {
-        const target = consumer.getExpression().getText();
+        const target = `${Node.isNewExpression(consumer) ? 'new ' : ''}${consumer.getExpression().getText()}`;
         escapeReasons.set(symbol, `The OpenAI client is passed to ${target}; verify that ${target} does not modify it before migrating this call.`);
       }
     }
@@ -1239,7 +1239,9 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
         ?? affectedSuffix(partsAfterLastComputedAccess(expression)) ?? affectedSuffix(expressionParts);
       if (rootSymbol && escapedClients.has(rootSymbol) && possibleMethod) {
         addManual(result, file, call, escapeReasons.get(rootSymbol)
-          ?? 'The OpenAI client escapes through a use the migration cannot prove safe; review this affected call manually.');
+          ?? (CHANGED_PATH_METHODS.has(possibleMethod) || SAFE_NAMED_PATH_REWRITES.has(possibleMethod)
+            ? 'OpenAI v5 uses named path parameters for this method, but its client receiver is not tracked safely because it escapes; review this affected call manually.'
+            : 'The OpenAI client receiver is not tracked safely because it escapes; review this affected call manually.'));
         continue;
       }
       const definitelyStructuredOther = Boolean(root?.getSymbol()?.getDeclarations().length

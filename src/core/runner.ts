@@ -1019,7 +1019,7 @@ async function migrateManifests(
     const fileNotes = migration.updateManifest(manifest);
     const versionChanged = (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
       .some((section) => before[section]?.[migration.packageName] !== manifest[section]?.[migration.packageName]);
-    if (!versionChanged) {
+    if (!versionChanged && fileNotes.some((note) => /could not safely update|could not be updated|non-modifiable|unsupported/i.test(note))) {
       notes.push(...fileNotes.filter((note) => !note.includes(' → ')));
       manual.push({ file: relativePath, line: 1,
         reason: `The ${migration.packageName} dependency version could not be updated safely; the package was left unchanged.`,
