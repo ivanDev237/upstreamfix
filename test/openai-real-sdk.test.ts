@@ -65,7 +65,7 @@ export const runtimeTypes = [ChatCompletionStream, ChatCompletionRunner, ChatCom
     await writeFile(tsconfigPath, JSON.stringify({ ...tsconfig, include: [...files.keys()].filter((name) => name !== 'class.ts') }));
     await install('5.0.0');
     const v5Declarations = await readFile(path.join(cwd, 'node_modules/openai/resources/chat/completions.d.ts'), 'utf8');
-    expect(v5Declarations).toMatch(/export\s+(?:(?:declare\s+)?(?:interface|type)\s+ParsedChatCompletion\b|\{[^}]*\bParsedChatCompletion\b\})/s);
+    expect(v5Declarations).toMatch(/export\s+\*\s+from\s+["']\.\/completions\//);
     await check();
     expect(await readFile(path.join(cwd, 'chat.ts'), 'utf8')).toContain('client.chat.completions.parse');
     expect(await readFile(path.join(cwd, 'stream.ts'), 'utf8')).toContain('client.chat.completions.stream');
