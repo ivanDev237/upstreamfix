@@ -746,22 +746,25 @@ export function runtimeConfirmationFindings(
   manifests: readonly { directory: string; supported: boolean }[],
   outcome: Pick<RunOutcome, 'changes' | 'manual'>,
 ): Array<{ file: string; line: 1; reason: string }> {
-  const relevantFiles = new Set<string>();
-  const explicitRuntimeDirectories = new Set<string>();
+  const relevantFiles: Array<{ file: string; explicitRuntime: boolean }> = [];
   const callRules = new Set(['del-to-delete', 'beta-chat', 'named-path-parameters', 'run-tools-event', 'run-tools-method']);
   for (const change of outcome.changes) if (callRules.has(change.rule))
-    relevantFiles.add(path.resolve(projectRoot, change.file));
+    relevantFiles.push({ file: path.resolve(projectRoot, change.file), explicitRuntime: false });
   for (const finding of outcome.manual) {
     if (finding.reasonCode !== 'runtime-confirmation' && finding.reasonCode !== 'openai-affected-call') continue;
-    if (finding.reasonCode === 'runtime-confirmation')
-      explicitRuntimeDirectories.add(path.dirname(path.resolve(projectRoot, finding.file)));
-    relevantFiles.add(path.resolve(projectRoot, finding.file));
+    relevantFiles.push({ file: path.resolve(projectRoot, finding.file), explicitRuntime: finding.reasonCode === 'runtime-confirmation' });
   }
-  return manifests.filter(({ directory, supported }) => !supported && (explicitRuntimeDirectories.has(path.resolve(directory)) || [...relevantFiles].some((file) => {
-    const relative = path.relative(path.resolve(directory), file);
-    return relative !== '' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
-      && /\.[cm]?[jt]sx?$/i.test(relative);
-  }))).map(({ directory }) => ({ file: path.relative(projectRoot, path.join(directory, 'package.json')),
+  const affectedOwners = new Set<string>();
+  for (const { file, explicitRuntime } of relevantFiles) {
+    if (!explicitRuntime && !/\.[cm]?[jt]sx?$/i.test(file)) continue;
+    const owner = manifests.filter(({ directory }) => {
+      const relative = path.relative(path.resolve(directory), file);
+      return relative !== '' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+    }).sort((left, right) => right.directory.length - left.directory.length)[0];
+    if (owner) affectedOwners.add(path.resolve(owner.directory));
+  }
+  return manifests.filter(({ directory, supported }) => !supported && affectedOwners.has(path.resolve(directory)))
+    .map(({ directory }) => ({ file: path.relative(projectRoot, path.join(directory, 'package.json')),
     line: 1 as const, reason: 'OpenAI v5 requires Node.js 20 or later, but this package does not declare a compatible engines.node range; confirm the production runtime before upgrading.' }));
 }
 
