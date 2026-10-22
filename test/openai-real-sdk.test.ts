@@ -35,7 +35,7 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
   type ChatCompletionStreamParams, type ChatCompletionToolRunnerParams } from 'openai/resources/beta/chat/completions';
 export type SavedCompletion = ParsedChoice<ParsedChatCompletionMessage<ParsedFunctionToolCall>>;
 export type StreamArgs = ChatCompletionStreamParams;
-export type ToolArgs = ChatCompletionToolRunnerParams;
+export type ToolArgs = ChatCompletionToolRunnerParams<unknown>;
 export const runtimeTypes = [ChatCompletionStream, ChatCompletionRunner, ChatCompletionStreamingRunner, Completions];
 `],
       ['observed.ts', "import OpenAI from 'openai';\nfunction observeOpenAI<T extends OpenAI>(client: T): T { return client; }\nconst createOpenAIClient = async () => observeOpenAI(new OpenAI({apiKey: 'sk-test-fixture'}));\nexport async function parse() { const openai = await createOpenAIClient(); return openai.beta.chat.completions.parse({model:'gpt-4o', messages:[]}); }\n"],
