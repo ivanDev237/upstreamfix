@@ -5,6 +5,15 @@ series are experimental; review proposed migrations before applying them.
 
 ## Unreleased
 
+## 0.4.0
+
+- The reusable client workflow now accepts `repository_dispatch` events from the UpstreamFix GitHub App. It runs only when the event names the receiving repository, its default branch and its current head commit; the event payload is never used to choose code, branches or migrations. Manual and scheduled runs are unchanged. The App itself is still in staging.
+- OpenAI v4 to v5 remains **experimental**, but its rewrites are now far more conservative. A client is rewritten only when every use of it can be tracked: clients that are passed to other code, copied, mutated (including from another module, a subclass or a namespace import) or reached through an untracked receiver become manual findings instead of edits.
+- OpenAI v5 coverage: `runTools` event and method renames, safe named path parameters (for example `runs.retrieve(threadId, runId)`), the removed `beta.chat` namespace, moved beta chat and message imports, removed polling and runner types, and `APIError.headers`.
+- OpenAI v5 Node.js requirements: Node.js 20 is required. The missing `@types/node` and `"node"` tsconfig types are repaired together with the SDK upgrade, or not at all, and only when the runtime is guaranteed by `engines.node` or confirmed with `--node-runtime 20`.
+- The Action's publish job now re-renders the expected `package.json` and `tsconfig.json` repair and requires an exact match, rejecting any other dependency, duplicated JSON key or unexpected configuration change.
+- The public OpenAI benchmark now follows the CLI's all-or-nothing `--write` rule: 1 of 17 valid repositories migrates without a manual finding. See [benchmark/openai-5-results.md](benchmark/openai-5-results.md).
+
 ## 0.3.0
 
 - Added experimental declarative YAML migration recipes for SDK publishers. Preview one with `upstreamfix migrate --recipe <file.yml> --experimental`.
