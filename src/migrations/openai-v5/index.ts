@@ -36,28 +36,9 @@ const MOVED_IMPORTS = new Map<string, string>([
 // These names are checked against the published openai@5.0.0 declarations.
 // Unknown names are kept for manual review instead of being moved speculatively.
 const V5_BETA_CHAT_COMPLETION_EXPORTS = new Set([
-  'ChatCompletion', 'ChatCompletionChunk', 'ChatCompletionStream', 'ChatCompletionStreamParams',
-  'ChatCompletionRunner', 'ChatCompletionStreamingRunner', 'ChatCompletionToolRunnerParams',
-  'ChatCompletionToolRunnerParamsWithContext', 'ChatCompletionToolRunnerParamsWithoutContext',
-  'ChatCompletionStreamingToolRunnerParams', 'ChatCompletionStreamingToolRunnerParamsWithContext',
-  'ChatCompletionStreamingToolRunnerParamsWithoutContext', 'Completions', 'ParsedChatCompletion',
-  'ParsedChatCompletionMessage', 'ParsedChoice', 'ParsedFunction', 'ParsedFunctionToolCall',
-  'ChatCompletionParseParams', 'ChatCompletionCreateParams', 'ChatCompletionCreateParamsBase',
-  'ChatCompletionCreateParamsNonStreaming', 'ChatCompletionCreateParamsStreaming',
-  'ChatCompletionMessageParam', 'ChatCompletionMessage', 'ChatCompletionStreamOptions',
-  'ChatCompletionAssistantMessageParam', 'ChatCompletionSystemMessageParam',
-  'ChatCompletionUserMessageParam', 'ChatCompletionDeveloperMessageParam',
-  'ChatCompletionToolMessageParam', 'ChatCompletionFunctionMessageParam',
-  'ChatCompletionContentPart', 'ChatCompletionContentPartText', 'ChatCompletionContentPartImage',
-  'ChatCompletionContentPartRefusal', 'ChatCompletionContentPartInputAudio',
-  'ChatCompletionContentPartAudio', 'ChatCompletionContentPartVideo', 'ChatCompletionAudio',
-  'ChatCompletionAudioTranscript', 'ChatCompletionAudioTranslation', 'ChatCompletionTokenLogprob',
-  'ChatCompletionMessageToolCall', 'ChatCompletionMessageFunctionToolCall',
-  'ChatCompletionMessageCustomToolCall', 'ChatCompletionTool', 'ChatCompletionToolChoiceOption',
-  'ChatCompletionAllowedToolChoice', 'ChatCompletionAllowedTools', 'ChatCompletionNamedToolChoice',
-  'ChatCompletionFunctionTool', 'ChatCompletionUpdateParams', 'ChatCompletionListParams',
-  'ChatCompletionDeleted', 'ChatCompletionStoreMessage', 'ChatCompletionAudioParam',
-  'ChatCompletionAudioContentPart', 'ChatCompletionVideoContentPart', 'ChatCompletionImageContentPart',
+  'ChatCompletionStream', 'ChatCompletionStreamParams', 'ChatCompletionRunner',
+  'ChatCompletionStreamingRunner', 'ChatCompletionToolRunnerParams', 'Completions',
+  'ParsedChoice', 'ParsedChatCompletionMessage', 'ParsedFunctionToolCall',
 ]);
 const MOVED_MESSAGE_TYPES = new Map([
   ['MessageContentText', 'TextContentBlock'],
@@ -115,6 +96,7 @@ function rootIdentifier(node: Node): Node | undefined {
   const expression = unwrapTransparentExpression(node);
   if (expression !== node) return rootIdentifier(expression);
   if (Node.isIdentifier(node)) return node;
+  if (node.getKind() === SyntaxKind.ThisKeyword) return node;
   if (Node.isPropertyAccessExpression(node)) return rootIdentifier(node.getExpression());
   if (Node.isElementAccessExpression(node)) return rootIdentifier(node.getExpression());
   if (Node.isQualifiedName(node)) return rootIdentifier(node.getLeft());
@@ -221,18 +203,56 @@ function directlyConstructedOpenAIExports(project: Project): Map<string, Set<str
       }
     }
     if (constructors.size === 0) continue;
+    const locals = new Set<string>();
     for (const variable of source.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
       if (!Node.isIdentifier(variable.getNameNode())) continue;
-      const statement = variable.getParentIfKind(SyntaxKind.VariableDeclarationList)
-        ?.getParentIfKind(SyntaxKind.VariableStatement);
-      if (!statement?.getModifiers().some((modifier) => modifier.getKind() === SyntaxKind.ExportKeyword)) continue;
       const initializer = variable.getInitializer();
       if (!initializer || !Node.isNewExpression(initializer) || !Node.isIdentifier(initializer.getExpression())
         || !constructors.has(initializer.getExpression().getText())) continue;
-      const names = exported.get(source.getFilePath()) ?? new Set<string>();
-      names.add(variable.getName());
-      exported.set(source.getFilePath(), names);
+      locals.add(variable.getName());
     }
+    const exportedLocals = new Set<string>();
+    for (const variable of source.getVariableDeclarations()) {
+      const statement = variable.getParentIfKind(SyntaxKind.VariableDeclarationList)?.getParentIfKind(SyntaxKind.VariableStatement);
+      if (Node.isIdentifier(variable.getNameNode()) && statement?.getModifiers().some((modifier) => modifier.getKind() === SyntaxKind.ExportKeyword))
+        exportedLocals.add(variable.getName());
+    }
+    for (const declaration of source.getExportDeclarations()) {
+      if (declaration.getModuleSpecifierValue()) continue;
+      for (const element of declaration.getNamedExports()) exportedLocals.add(element.getNameNode().getText());
+    }
+    const clients = new Set([...locals].filter((name) => exportedLocals.has(name)));
+    if (clients.size) exported.set(source.getFilePath(), clients);
+  }
+  for (let pass = 0; pass < project.getSourceFiles().length; pass++) {
+    let changed = false;
+    for (const source of project.getSourceFiles()) {
+      for (const declaration of source.getExportDeclarations()) {
+        const specifier = declaration.getModuleSpecifierValue();
+        if (!specifier) continue;
+        const dependency = resolveLocalImport(source, specifier);
+        const known = dependency ? exported.get(dependency.getFilePath()) : undefined;
+        if (!dependency || !known) continue;
+        const names = exported.get(source.getFilePath()) ?? new Set<string>();
+        const elements = declaration.getNamedExports();
+        if (elements.length) {
+          for (const element of elements) {
+            const original = element.getNameNode().getText();
+            if (known.has(original)) names.add(element.getName());
+          }
+        } else if (declaration.isNamespaceExport()) {
+          // Namespace re-exports need qualified receiver analysis, which is not yet certain.
+          continue;
+        } else if (elements.length === 0) {
+          for (const name of known) names.add(name);
+        }
+        if (names.size && names !== exported.get(source.getFilePath())) {
+          exported.set(source.getFilePath(), names);
+          changed = true;
+        }
+      }
+    }
+    if (!changed) break;
   }
   return exported;
 }
@@ -337,13 +357,35 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       .map((entry) => entry.getAliasNode()?.getText() ?? 'APIError')));
   for (const declaration of file.getImportDeclarations()) {
     const source = resolveLocalImport(file, declaration.getModuleSpecifierValue());
-    if (!source) continue;
+    if (!source) {
+      const specifier = declaration.getModuleSpecifierValue();
+      if (specifier.startsWith('.') || specifier.startsWith('@/') || specifier.startsWith('#')) {
+        for (const named of declaration.getNamedImports()) {
+          const symbol = (named.getAliasNode() ?? named.getNameNode()).getSymbol();
+          if (symbol) complexClients.add(symbol);
+        }
+        const defaultImport = declaration.getDefaultImport();
+        const symbol = defaultImport?.getSymbol();
+        if (symbol) complexClients.add(symbol);
+      }
+      continue;
+    }
     const exportedNames = exportedClients.get(source.getFilePath());
-    if (!exportedNames) continue;
     for (const named of declaration.getNamedImports()) {
-      if (!exportedNames.has(named.getName())) continue;
       const symbol = (named.getAliasNode() ?? named.getNameNode()).getSymbol();
-      if (symbol) clients.add(symbol);
+      if (!symbol) continue;
+      if (exportedNames?.has(named.getName())) {
+        clients.add(symbol);
+        continue;
+      }
+      const uncertainReexport = source.getExportDeclarations().some((exported) => {
+        if (!exported.getModuleSpecifierValue()) return false;
+        const reexportSource = resolveLocalImport(source, exported.getModuleSpecifierValue()!);
+        if (reexportSource) return false;
+        return exported.getNamedExports().length === 0
+          || exported.getNamedExports().some((entry) => entry.getName() === named.getName());
+      });
+      if (uncertainReexport) complexClients.add(symbol);
     }
   }
   const classFields = new Map<Node, Set<string>>();
@@ -364,8 +406,14 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
       const symbol = candidate.getTypeName().getSymbol();
       // A named alias may hide a union or conditional client shape. Keep it in
       // the manual-review set instead of treating it as a certain SDK client.
-      return Boolean(symbol?.getDeclarations().some((declaration) =>
-        Node.isInterfaceDeclaration(declaration) && [...imported].includes(declaration.getName())));
+      return Boolean(symbol?.getDeclarations().some((declaration) => {
+        if (Node.isInterfaceDeclaration(declaration) && [...imported].includes(declaration.getName())) return true;
+        if (Node.isTypeAliasDeclaration(declaration)) {
+          const typeNode = declaration.getTypeNode();
+          return Boolean(typeNode && knownClientType(typeNode, visited));
+        }
+        return false;
+      }));
     };
     return knownClientType(type);
   };
@@ -499,6 +547,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
   const assignments = new Map<MorphSymbol, Node[]>();
   const unsafeAliases = new Set<MorphSymbol>();
   const unsafeAliasNames = new Set<string>();
+  const overwrittenResourcePrefixes = new Map<MorphSymbol, Set<string>>();
   const markAssignmentTarget = (target: Node): void => {
     const expression = unwrapTransparentExpression(target);
     if (Node.isIdentifier(expression)) {
@@ -538,7 +587,21 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
         values.push(assignment.getRight());
         assignments.set(symbol, values);
       }
-    } else markAssignmentTarget(left);
+    } else {
+      markAssignmentTarget(left);
+      if (assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken) {
+        const root = rootIdentifier(left);
+        const symbol = root?.getSymbol();
+        const parts = pathParts(left);
+        const resourcePath = parts.slice(1).join('.');
+        const affected = [...DELETED_METHODS, ...CHANGED_PATH_METHODS, ...SAFE_NAMED_PATH_REWRITES.keys()];
+        if (symbol && clients.has(symbol) && resourcePath && affected.some((method) => method.startsWith(`${resourcePath}.`))) {
+          const prefixes = overwrittenResourcePrefixes.get(symbol) ?? new Set<string>();
+          prefixes.add(resourcePath);
+          overwrittenResourcePrefixes.set(symbol, prefixes);
+        }
+      }
+    }
   }
   for (const loop of [...file.getDescendantsOfKind(SyntaxKind.ForOfStatement), ...file.getDescendantsOfKind(SyntaxKind.ForInStatement)]) {
     const initializer = loop.getInitializer();
@@ -554,10 +617,18 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     for (const variable of file.getDescendantsOfKind(SyntaxKind.VariableDeclaration)) {
       const initializer = variable.getInitializer();
       const symbol = variable.getNameNode().getSymbol();
-      if (!symbol || clients.has(symbol) || unsafeAliases.has(symbol)
-        || (Node.isIdentifier(variable.getNameNode()) && unsafeAliasNames.has(variable.getName()))) continue;
+      if (!symbol || clients.has(symbol)) continue;
       const values = [...(initializer ? [initializer] : []), ...(assignments.get(symbol) ?? [])];
       if (values.length === 0) continue;
+      const hasTrackedSource = values.some((value) => {
+        const unwrapped = unwrapTransparentExpression(value);
+        if (Node.isIdentifier(unwrapped)) return Boolean(unwrapped.getSymbol() && clients.has(unwrapped.getSymbol()!));
+        return Node.isNewExpression(unwrapped) && imported.has(unwrapped.getExpression().getText());
+      });
+      if (unsafeAliases.has(symbol) || (Node.isIdentifier(variable.getNameNode()) && unsafeAliasNames.has(variable.getName()))) {
+        if (hasTrackedSource) complexClients.add(symbol);
+        continue;
+      }
       const onlyTrackedClients = values.every((value) => {
         const unwrapped = unwrapTransparentExpression(value);
         if (Node.isIdentifier(unwrapped)) {
@@ -567,12 +638,13 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
         return Node.isNewExpression(unwrapped) && imported.has(unwrapped.getExpression().getText());
       });
       if (onlyTrackedClients) { clients.add(symbol); changed = true; }
+      else if (hasTrackedSource) complexClients.add(symbol);
     }
     if (!changed) break;
   }
   for (const symbol of unsafeAliases) {
+    if (clients.has(symbol) || complexClients.has(symbol)) complexClients.add(symbol);
     clients.delete(symbol);
-    complexClients.delete(symbol);
     clientPrefixes.delete(symbol);
   }
   const clientParts = (node: Node): string[] | undefined => {
@@ -978,13 +1050,23 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
             ? declaration.getTypeNode() : undefined;
           return Boolean(type && Node.isTypeLiteral(type) && ![...imported].some((name) => mentionsIdentifier(type.getText(), name)));
         }));
-      if ((Boolean(possibleMethod) && (Boolean(rootSymbol) || hasOpenAiModuleEvidence) && !definitelyStructuredOther || (hasComputedPath
+      const trackedRoot = Boolean(rootSymbol && (clients.has(rootSymbol) || complexClients.has(rootSymbol)));
+      const evidenceAllowsSuffix = hasOpenAiModuleEvidence && (possibleMethod?.split('.').length ?? 0) >= 3;
+      const invalidThisReceiver = hasOpenAiModuleEvidence && root?.getKind() === SyntaxKind.ThisKeyword && Boolean(possibleMethod);
+      if (invalidThisReceiver || (Boolean(possibleMethod) && (trackedRoot || evidenceAllowsSuffix) && !definitelyStructuredOther || (hasComputedPath
         && Boolean(rootSymbol && (clients.has(rootSymbol) || complexClients.has(rootSymbol))))
         || (hasComputedPath && root?.getText() === 'openai' && hasOpenAiModuleEvidence
           && partsAfterLastComputedAccess(expression).join('.') === 'chat.completions.create')))
         addManual(result, file, call, 'OpenAI v5 changes this method, but its client receiver is not tracked safely; review the receiver and arguments manually.');
       if (root?.getSymbol() && complexClients.has(root.getSymbol()!) && possibleMethod)
-        addManual(result, file, call, 'valeur OpenAI non suivie : vérifier la variante de ce client avant la migration.');
+        addManual(result, file, call, 'The OpenAI receiver is not tracked safely; review this client variant and method manually.');
+      continue;
+    }
+    const root = rootIdentifier(expression);
+    const rootSymbol = root?.getSymbol();
+    const methodPath = parts.join('.');
+    if (rootSymbol && [...(overwrittenResourcePrefixes.get(rootSymbol) ?? [])].some((prefix) => methodPath.startsWith(`${prefix}.`))) {
+      addManual(result, file, call, 'An OpenAI resource prefix was reassigned, so calls below it cannot be migrated safely; review the receiver manually.');
       continue;
     }
     const method = parts.join('.');

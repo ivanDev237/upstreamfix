@@ -56,7 +56,7 @@ interface ScopedProject {
   manifestBySource: Map<string, string>;
 }
 
-function loadScopedProject(root: string, migration: Migration, excludedDirectories: readonly string[] = [], nodeRuntime?: number, analysisRuntimeOverride = false): ScopedProject {
+function loadScopedProject(root: string, migration: Migration, excludedDirectories: readonly string[] = [], nodeRuntime?: number): ScopedProject {
   const project = new Project({
     skipAddingFilesFromTsConfig: true,
     compilerOptions: { allowJs: true },
@@ -135,15 +135,13 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
     }
     if (!migration.declarativeRecipe && migration.id === 'openai@5' && !guaranteesNodeMajor(declaration.manifest.engines?.node ?? '', 20)
       && !(nodeRuntime === 20 && declaration.manifest.engines?.node === undefined)) {
-      if (!analysisRuntimeOverride) {
-        manual.push({
-          file: sourcePath,
-          line: 1,
-          reason: `OpenAI SDK v5 requires Node.js 20 or later. Declare a compatible engines.node range in ${path.relative(root, declaration.file)} and confirm the deployed runtime before migrating; this source file was left unchanged.`,
-          snippet: `engines.node: ${declaration.manifest.engines?.node ?? 'not declared'}`,
-        });
-        continue;
-      }
+      manual.push({
+        file: sourcePath,
+        line: 1,
+        reason: `OpenAI SDK v5 requires Node.js 20 or later. Declare a compatible engines.node range in ${path.relative(root, declaration.file)} and confirm the deployed runtime before migrating; this source file was left unchanged.`,
+        snippet: `engines.node: ${declaration.manifest.engines?.node ?? 'not declared'}`,
+      });
+      continue;
     }
     project.addSourceFileAtPath(sourcePath);
     manifestBySource.set(sourcePath, declaration.file);
@@ -280,23 +278,32 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
     for (const match of source.matchAll(/import\s+([^;\n]+?)\s+from\s*['"]openai['"]/g)) {
       const clause = match[1] ?? '';
       const defaultName = /^\s*([A-Za-z_$][\w$]*)/.exec(clause)?.[1];
-      if (defaultName) constructors.add(defaultName);
+      if (defaultName && defaultName !== 'type') constructors.add(defaultName);
       const named = /\{([^}]+)\}/.exec(clause)?.[1];
       for (const item of (named ?? '').split(',')) {
         const [imported, alias] = item.trim().split(/\s+as\s+/);
         if (['OpenAI', 'AzureOpenAI'].includes(imported ?? '')) constructors.add(alias ?? imported!);
       }
     }
-    const constructorPattern = [...constructors].join('|');
-    const pattern = new RegExp(`\\bexport\\s+(?:declare\\s+)?(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*(?::[^=;\\n]+)?=\\s*(?:new\\s+)?(?:${constructorPattern})\\b`, 'g');
-    return new Set([...source.matchAll(pattern)].map((match) => match[1]!));
+    const constructorPattern = [...constructors].map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    const constructed = new Set([...source.matchAll(new RegExp(`\\b(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*(?::[^=;\\n]+)?=\\s*(?:new\\s+)?(?:${constructorPattern})\\b`, 'g'))].map((match) => match[1]!));
+    const exported = new Set([...source.matchAll(new RegExp(`\\bexport\\s+(?:declare\\s+)?(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*(?::[^=;\\n]+)?=\\s*(?:new\\s+)?(?:${constructorPattern})\\b`, 'g'))].map((match) => match[1]!));
+    for (const match of source.matchAll(/\bexport\s*\{([^}]+)\}(?:\s*from\s*['"][^'"]+['"])?/g)) {
+      for (const item of (match[1] ?? '').split(',')) {
+        const [local, alias] = item.trim().split(/\s+as\s+/);
+        if (local && constructed.has(local)) exported.add(alias ?? local);
+      }
+    }
+    return exported;
   };
   const imports = (source: string): Array<{ specifier: string; names: string[] }> => {
     const found: Array<{ specifier: string; names: string[] }> = [];
-    const pattern = /import\s+(?:type\s+)?(?:\{([^}]+)\}|(?:[A-Za-z_$][\w$]*|\*\s+as\s+[A-Za-z_$][\w$]*))\s+from\s*['"]([^'"]+)['"]/g;
+    const pattern = /import\s+(?:type\s+)?([^;\n]+?)\s+from\s*['"]([^'"]+)['"]/g;
     for (const match of source.matchAll(pattern)) {
-      if (!match[1]) continue;
-      found.push({ specifier: match[2]!, names: match[1].split(',').map((name) => name.trim().split(/\s+as\s+/)[0]!).filter(Boolean) });
+      const clause = match[1] ?? '';
+      const named = /\{([^}]+)\}/.exec(clause)?.[1];
+      const names = named ? named.split(',').map((name) => name.trim().split(/\s+as\s+/)[0]!).filter(Boolean) : [];
+      found.push({ specifier: match[2]!, names });
     }
     return found;
   };
@@ -321,25 +328,33 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
     }
     return undefined;
   };
-  for (const file of retained) {
-    const source = contents.get(file);
-    if (!source) continue;
+  for (const [file, source] of contents) {
     const names = directExports(source);
     if (names.size > 0) exportedClients.set(file, names);
+  }
+  for (const [file, source] of contents) {
+    for (const match of source.matchAll(/\bexport\s+(?:type\s+)?(?:\*|\{([^}]+)\})\s*from\s*['"]([^'"]+)['"]/g)) {
+      if (resolveLocal(file, match[2]!)) continue;
+      const names = exportedClients.get(file) ?? new Set<string>();
+      const specifiers = match[1];
+      if (!specifiers) names.add('*');
+      else for (const item of specifiers.split(',')) {
+        const [, exportedName] = item.trim().split(/\s+as\s+/);
+        names.add(exportedName ?? item.trim());
+      }
+      exportedClients.set(file, names);
+    }
   }
   let changed = true;
   while (changed) {
     changed = false;
     for (const [file, source] of contents) {
-      if (retained.has(file)) continue;
       const clientImports = imports(source).filter((entry) => {
         const dependency = resolveLocal(file, entry.specifier);
         const names = dependency ? exportedClients.get(dependency) : undefined;
-        return Boolean(names && entry.names.some((name) => names.has(name)));
+        return Boolean(names && entry.names.some((name) => names.has(name) || names.has('*')));
       });
-      if (clientImports.length === 0) continue;
-      retained.add(file);
-      changed = true;
+      if (clientImports.length > 0 && !retained.has(file)) { retained.add(file); changed = true; }
       const reexported = new Set<string>();
       for (const match of source.matchAll(/\bexport\s*\{([^}]+)\}\s*from\s*['"]([^'"]+)['"]/g)) {
         const dependency = resolveLocal(file, match[2]!);
@@ -349,7 +364,13 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
           if (original && known?.has(original)) reexported.add(part.trim().split(/\s+as\s+/).at(-1)!);
         }
       }
-      if (reexported.size > 0) exportedClients.set(file, reexported);
+      if (reexported.size > 0) {
+        const known = exportedClients.get(file) ?? new Set<string>();
+        const previousSize = known.size;
+        for (const name of reexported) known.add(name);
+        if (known.size !== previousSize) { exportedClients.set(file, known); changed = true; }
+        if (!retained.has(file)) { retained.add(file); changed = true; }
+      }
     }
   }
   return [...retained].sort();
@@ -401,8 +422,6 @@ export interface RunOptions {
   allowYarnLockInstall?: boolean;
   /** Analyze without writing the checkout or regenerating lockfiles. */
   analysisOnly?: boolean;
-  /** Benchmark-only source analysis under Node 20; retains a manual runtime finding. */
-  analysisRuntimeOverride?: boolean;
   /** Registry snapshot cutoff shared with independent publication verification. */
   registryBefore?: string;
 }
@@ -411,8 +430,6 @@ export interface RunOutcome extends MigrationResult {
   manifestNotes: string[];
   proposedDiff: string[];
   proposedFiles: ProposedFileChange[];
-  /** Source files changed only because a benchmark explicitly assumed Node 20. */
-  runtimeOverrideFiles?: string[];
 }
 
 interface ManifestFileChange {
@@ -436,10 +453,7 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   if (options.nodeRuntime && !((!migration.declarativeRecipe && options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (!migration.declarativeRecipe && options.nodeRuntime === 20 && migration.id === 'openai@5') || options.nodeRuntime === migration.requiredNodeMajor)) {
     throw new Error('--node-runtime 22 applies to firebase-admin@14; --node-runtime 20 applies to openai@5; recipes require their declared nodeMajor.');
   }
-  if (options.analysisRuntimeOverride && (!options.analysisOnly || migration.id !== 'openai@5' || options.nodeRuntime !== 20)) {
-    throw new Error('The OpenAI runtime override is restricted to source-only benchmark analysis under Node.js 20.');
-  }
-  const scoped = loadScopedProject(options.cwd, migration, options.excludedDirectories, options.nodeRuntime, options.analysisRuntimeOverride === true);
+  const scoped = loadScopedProject(options.cwd, migration, options.excludedDirectories, options.nodeRuntime);
   const project = scoped.project;
   const originalSources = new Map<string, string>(await Promise.all(
     project.getSourceFiles().map(async (file): Promise<[string, string]> => [file.getFilePath(), await readFile(file.getFilePath(), 'utf8')]),
@@ -496,7 +510,7 @@ export async function runMigration(migration: Migration, options: RunOptions): P
       && (result.manual.length === 0 || options.analysisOnly) && result.changes.length > 0
     ? await migrateManifests(
       migration,
-      options.analysisRuntimeOverride ? { ...options, nodeRuntime: undefined } : options,
+      options,
       manifestsEligibleForManifestChanges,
       nodeTypesRepair.nodeTypesManifestPaths?.size ? 20 : undefined,
       nodeTypesRepair.nodeTypesManifestPaths ?? new Set<string>(),
@@ -560,16 +574,6 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     reportedCharacters += proposedDiff[index]!.length;
   }
 
-  const runtimeOverrideFiles = options.analysisRuntimeOverride && migration.id === 'openai@5'
-    ? [...new Set(result.filesChanged.filter((file) => /\.(?:[cm]?[jt]sx?)$/i.test(file)).flatMap((file) => {
-      const manifestPath = scoped.manifestBySource.get(file);
-      if (!manifestPath) return [];
-      try {
-        const owner = parseManifest<PackageManifest>(readFileSync(manifestPath, 'utf8'));
-        return typeof owner.engines?.node === 'string' && guaranteesNodeMajor(owner.engines.node, 20) ? [] : [projectPath(options.cwd, file)];
-      } catch { return [projectPath(options.cwd, file)]; }
-    }))]
-    : [];
   return {
     ...result,
     filesChanged: [...new Set([
@@ -581,7 +585,6 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     manifestNotes: [...new Set([...compatibilityNotes, ...manifest.notes])],
     proposedDiff,
     proposedFiles,
-    ...(runtimeOverrideFiles.length > 0 ? { runtimeOverrideFiles } : {}),
   };
 }
 
@@ -752,6 +755,13 @@ async function prepareNodeTypesRepair(options: RunOptions, eligibleManifestPaths
           manual.push({ file: tsconfigPath, line: 1,
             reason: 'The Node type repair was withheld because tsconfig.json is malformed; repair its JSONC syntax and rerun typecheck.',
             snippet: 'tsconfig repair withheld' });
+          continue;
+        }
+        const localTypes = (localConfig.config as { compilerOptions?: { types?: unknown } }).compilerOptions?.types;
+        if ((localConfig.config as { extends?: unknown }).extends !== undefined && !Array.isArray(localTypes)) {
+          manual.push({ file: tsconfigPath, line: 1,
+            reason: 'The types are inherited from an extended configuration; add "node" manually to the appropriate compilerOptions.types array in that configuration.',
+            snippet: 'inherited tsconfig types' });
           continue;
         }
         const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, {}, {

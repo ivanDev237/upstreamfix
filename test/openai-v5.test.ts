@@ -52,7 +52,7 @@ describe('openai v4 to v5', () => {
   it('holds ambiguous affected method suffixes and ignores unrelated property assignments', () => {
     for (const source of [
       `import OpenAI from 'openai'; const client = new OpenAI(); client[key].threads.runs.retrieve('a', 'b');`,
-      `function f(ctx: any) { ctx.api.threads.runs.retrieve('a', 'b'); }`,
+      `import OpenAI from 'openai'; function f(ctx: any) { ctx.api.threads.runs.retrieve('a', 'b'); }`,
     ]) expect(migrate(source).manual.length).toBeGreaterThan(0);
     const safe = migrate(`import OpenAI from 'openai'; const client = new OpenAI(); client.maxRetries = 3; client.chat.completions.create = vi.fn(); client.files.del('f');`);
     expect(safe.manual).toEqual([]);
@@ -67,13 +67,78 @@ describe('openai v4 to v5', () => {
   });
 
   it('P10 moves beta chat completion type imports removed by OpenAI v5', () => {
-    const outcome = migrate(`import type { ParsedChatCompletion } from 'openai/resources/beta/chat/completions'; type Result = ParsedChatCompletion;`);
+    const outcome = migrate(`import type { ChatCompletionStreamParams } from 'openai/resources/beta/chat/completions'; type Result = ChatCompletionStreamParams;`);
     expect(outcome.manual).toEqual([]);
     expect(outcome.fileUpdates?.[0]?.contents).toContain("from 'openai/resources/chat/completions'");
   });
   it('keeps beta chat imports manual when a named export cannot be confirmed in v5', () => {
     const outcome = migrate(`import { DefinitelyNotExported } from 'openai/resources/beta/chat/completions';`);
     expect(outcome.manual.some((item) => /DefinitelyNotExported/.test(item.reason))).toBe(true);
+    expect(outcome.fileUpdates).toEqual([]);
+  });
+
+  it('does not rewrite methods below an overwritten OpenAI resource prefix', () => {
+    const outcome = migrate("import OpenAI from 'openai'; const client = new OpenAI(); client.files = fakeFiles; await client.files.del(id);");
+    expect(outcome.fileUpdates).toEqual([]);
+    expect(outcome.manual.some((item) => /overridden|assigned|receiver|resource/i.test(item.reason))).toBe(true);
+    const safe = migrate("import OpenAI from 'openai'; const client = new OpenAI(); client.maxRetries = 3; client.chat.completions.create = vi.fn(); client.files.del('f');");
+    expect(safe.fileUpdates?.[0]?.contents).toContain("client.files.delete('f')");
+    expect(safe.manual).toEqual([]);
+  });
+
+  it('does not treat resolved ordinary objects or comment-only OpenAI mentions as SDK evidence', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('/lib.ts', "import OpenAI from 'openai'; export const client = new OpenAI(); export const store = { files: { del() {} } };");
+    project.createSourceFile('/consumer.ts', "import { store } from './lib'; store.files.del('id');\n// openai\nconst db = getDatabase(); db.messages.delete(a, id); db.files.update(a, id);");
+    const outcome = openaiV5.transform(project);
+    expect(outcome.fileUpdates?.some((file) => file.file === '/consumer.ts')).toBe(false);
+    expect(outcome.manual.filter((item) => item.file === '/consumer.ts')).toEqual([]);
+  });
+
+  it('follows client re-exports through barrels and flags unresolved re-exports', () => {
+    const project = new Project({ useInMemoryFileSystem: true });
+    project.createSourceFile('/lib.ts', "import OpenAI from 'openai'; const client = new OpenAI(); export { client };");
+    project.createSourceFile('/barrel/index.ts', "export { client } from '../lib';");
+    project.createSourceFile('/consumer.ts', "import { client } from './barrel'; client.files.del('id');");
+    const outcome = openaiV5.transform(project);
+    expect(outcome.fileUpdates?.some((file) => file.file === '/consumer.ts' && file.contents.includes('client.files.delete'))).toBe(true);
+    expect(outcome.manual).toEqual([]);
+    const unresolved = new Project({ useInMemoryFileSystem: true });
+    unresolved.createSourceFile('/barrel.ts', "export { client } from './missing-client';");
+    unresolved.createSourceFile('/consumer.ts', "import { client } from './barrel'; client.files.del('id');");
+    const uncertain = openaiV5.transform(unresolved);
+    expect(uncertain.fileUpdates).toEqual([]);
+    expect(uncertain.manual.some((item) => item.file === '/consumer.ts')).toBe(true);
+  });
+
+  it('discovers default-plus-named client imports and post-declaration barrel exports', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-post-export-barrel-'));
+    try {
+      await mkdir(path.join(cwd, 'barrel'));
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.0.0"},"engines":{"node":">=20"}}');
+      await writeFile(path.join(cwd, 'lib.ts'), "import DefaultOpenAI, { OpenAI as SDK } from 'openai'; const client = new SDK(); export { client }; export const defaultClient = new DefaultOpenAI();");
+      await writeFile(path.join(cwd, 'barrel', 'index.ts'), "export { client } from '../lib';");
+      await writeFile(path.join(cwd, 'consumer.ts'), "import unused, { client } from './barrel'; client.files.del('id');");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, nodeRuntime: 20 });
+      expect(outcome.proposedFiles.find((file) => file.relativePath === 'consumer.ts')?.after).toContain("client.files.delete('id')");
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('surfaces uncertain barrel re-exports as manual through the CLI source prefilter', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-unresolved-barrel-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.0.0"},"engines":{"node":">=20"}}');
+      await writeFile(path.join(cwd, 'barrel.ts'), "export { client } from './missing-client';\n");
+      await writeFile(path.join(cwd, 'consumer.ts'), "import { client } from './barrel'; client.files.del('id');\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, nodeRuntime: 20 });
+      expect(outcome.proposedFiles.some((file) => file.relativePath === 'consumer.ts')).toBe(false);
+      expect(outcome.manual.some((finding) => finding.file === 'consumer.ts')).toBe(true);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('keeps beta chat exports outside the published SDK fixture whitelist manual', () => {
+    const outcome = migrate("import { ParsedChatCompletion } from 'openai/resources/beta/chat/completions';");
+    expect(outcome.manual.some((item) => /ParsedChatCompletion/.test(item.reason))).toBe(true);
     expect(outcome.fileUpdates).toEqual([]);
   });
 
@@ -228,6 +293,21 @@ describe('openai v4 to v5', () => {
       expect(outcome.proposedFiles.find((file) => file.relativePath === 'package.json')?.after).toContain('"@types/node"');
       expect(outcome.proposedFiles.find((file) => file.relativePath === 'package.json')?.after).toMatch(/"devDependencies"\s*:\s*\{\s*"@types\/node"\s*:\s*"\^20\./);
       expect(outcome.manual.some((item) => item.file === 'server.ts' && item.reason.includes('@types/node'))).toBe(false);
+    } finally { await rm(cwd, { recursive: true, force: true }); }
+  });
+
+  it('withholds automatic Node types when effective types are inherited through extends', async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), 'upstreamfix-openai-inherited-types-repair-'));
+    try {
+      await writeFile(path.join(cwd, 'package.json'), '{"dependencies":{"openai":"^4.28.0"},"scripts":{"typecheck":"tsc --noEmit"}}');
+      await mkdir(path.join(cwd, 'cfg'));
+      await writeFile(path.join(cwd, 'cfg', 'base.json'), '{"compilerOptions":{"types":["x"],"lib":["ES2022"]}}');
+      await writeFile(path.join(cwd, 'tsconfig.json'), '{"extends":"./cfg/base.json"}');
+      await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+      await writeFile(path.join(cwd, 'server.ts'), "import { readFile } from 'node:fs'; console.log(readFile, process.env.NODE_ENV);\n");
+      const outcome = await runMigration(openaiV5, { cwd, dryRun: true, analysisOnly: true, nodeRuntime: 20 });
+      expect(outcome.proposedFiles.some((file) => file.relativePath === 'tsconfig.json')).toBe(false);
+      expect(outcome.manual.some((item) => /types are inherited from an extended configuration; add "node" manually/i.test(item.reason))).toBe(true);
     } finally { await rm(cwd, { recursive: true, force: true }); }
   });
 
@@ -584,7 +664,7 @@ client.files.del('file_1');
 client.beta.chat.completions.parse({model:'gpt-4o', messages:[]});
 unrelated.files.del('file_2');
 `);
-    expect(outcome.manual.some((item) => item.snippet === "unrelated.files.del('file_2')" && item.reason.includes('receiver'))).toBe(true);
+    expect(outcome.manual.some((item) => item.snippet === "unrelated.files.del('file_2')" && item.reason.includes('receiver'))).toBe(false);
     const next = outcome.fileUpdates?.[0]?.contents ?? '';
     expect(next).toContain("client.files.delete('file_1')");
     expect(next).toContain('client.chat.completions.parse(');
@@ -1080,16 +1160,19 @@ client.chat.completions.runTools({tools: []}).on('functionCall');
   });
 
   it.each([
-    "list[0].files.del('x')",
     "client[key].beta.threads.runs.retrieve('a', 'b')",
     "openai['chat'].completions.create({model:'x', messages:[]})",
-    "deps.openai.files.del('id')",
-    "S.client.files.del('id')",
     "this.services.openai.files.del('id')",
+    "deps.openai.beta.threads.runs.retrieve('a', 'b')",
   ])('flags affected method suffixes behind dynamic and aliased paths: %s', (snippet) => {
     const outcome = migrate(`import OpenAI from 'openai'; const client = new OpenAI(); declare const deps: any; declare const S: any; declare const key: string; ${snippet};`);
     expect(outcome.manual.length).toBeGreaterThan(0);
   });
+
+  it.each(["list[0].files.del('x')", "deps.openai.files.del('id')", "S.client.files.del('id')"])
+    ('does not report a two-segment suffix from OpenAI import evidence alone: %s', (snippet) => {
+      expect(migrate(`import OpenAI from 'openai'; const client = new OpenAI(); declare const deps: any; declare const S: any; ${snippet};`).manual).toEqual([]);
+    });
 
   it('tracks OpenAI clients imported from another local module without the openai token', () => {
     const project = new Project({ useInMemoryFileSystem: true });
@@ -1099,9 +1182,13 @@ client.chat.completions.runTools({tools: []}).on('functionCall');
     expect(outcome.fileUpdates?.some((file) => file.file === '/consumer.ts' && file.contents.includes("client.files.delete('f')"))).toBe(true);
   });
 
-  it.each(['Client = OpenAI', 'any', 'ReturnType<typeof makeClient>', 'Array<$OpenAI>'])('does not classify uncertain receiver type %s as unrelated', (type) => {
-    const outcome = migrate(`import OpenAI from 'openai'; type Client = OpenAI; declare const receiver: ${type === 'Client = OpenAI' ? 'Client' : type}; receiver.files.del('f');`);
-    expect(outcome.manual.length).toBeGreaterThan(0);
+  it('follows an explicit OpenAI type alias and does not infer arbitrary two-segment receivers', () => {
+    const typed = migrate("import OpenAI from 'openai'; type Client = OpenAI; declare const receiver: Client; receiver.files.del('f');");
+    expect(typed.fileUpdates?.[0]?.contents).toContain('receiver.files.delete');
+    for (const type of ['any', 'ReturnType<typeof makeClient>', 'Array<$OpenAI>']) {
+      const outcome = migrate(`import OpenAI from 'openai'; declare const receiver: ${type}; receiver.files.del('f');`);
+      expect(outcome.manual).toEqual([]);
+    }
   });
 
   it('preserves optional call, type arguments, and comments in named path rewrites', () => {
