@@ -15,25 +15,116 @@ describe.skipIf(!enabled)('OpenAI v4 to v5 against published SDKs', () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-openai-sdk-'));
     roots.push(cwd);
     await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ private: true, type: 'module', dependencies: { openai: '4.104.0' } }));
-    await writeFile(path.join(cwd, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true,
-      skipLibCheck: true, target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext' }, include: ['*.ts'] }));
+    const tsconfigPath = path.join(cwd, 'tsconfig.json');
+    const tsconfig = { compilerOptions: { strict: true, noEmit: true,
+      skipLibCheck: true, target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext' },
+      include: ['files.ts', 'chat.ts', 'stream.ts', 'tools.ts', 'class.ts', 'events.ts', 'moved.ts', 'paths.ts', 'subresource.ts', 'observed.ts', 'beta-chat-types.ts'] };
+    await writeFile(tsconfigPath, JSON.stringify(tsconfig));
     const files = new Map([
       ['files.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const remove = () => client.files.del('file_123');\n"],
       ['chat.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const parse = () => client.beta.chat.completions.parse({model:'gpt-4o', messages:[]});\n"],
+      ['stream.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const stream = () => client.beta.chat.completions.stream({model:'gpt-4o', messages:[]});\n"],
+      ['tools.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const run = () => client.beta.chat.completions.runTools({model:'gpt-4o', messages:[], tools:[]});\n"],
+      ['class.ts', "import OpenAI from 'openai';\nclass Service { client: OpenAI; constructor() { this.client = new OpenAI({apiKey: 'sk-test-fixture'}); } run() { return this.client.beta.chat.completions.parse({model:'gpt-4o', messages:[]}); } }\nexport const service = new Service();\n"],
+      ['events.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const observe = () => { const runner = client.beta.chat.completions.runTools({model:'gpt-4o', messages:[], tools:[]}); runner.on('functionCall', () => {}); return runner.finalFunctionCall(); };\n"],
+      ['moved.ts', "import type { OpenAIError } from 'openai/error';\nexport type MigrationError = OpenAIError;\n"],
+      ['deep.ts', "import type { Message, MessageContentText } from 'openai/resources/beta/threads/messages/messages';\nexport type SavedMessage = Message;\nexport type SavedText = MessageContentText;\n"],
+      ['paths.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nexport const retrieveRun = (threadId: string, runId: string) => client.beta.threads.runs.retrieve(threadId, runId);\nexport const retrieveMessage = (threadId: string, messageId: string) => client.beta.threads.messages.retrieve(threadId, messageId);\n"],
+      ['subresource.ts', "import OpenAI from 'openai';\nconst client = new OpenAI({apiKey: 'sk-test-fixture'});\nconst runs: OpenAI.Beta.Threads.Runs = client.beta.threads.runs;\nexport const retrieveSubresourceRun = (threadId: string, runId: string) => runs.retrieve(threadId, runId);\nexport const retrieveDirectRun = (threadId: string, runId: string) => client.beta.threads.runs.retrieve(threadId, runId);\n"],
+      ['beta-chat-types.ts', `import { ChatCompletionStream, ChatCompletionRunner, ChatCompletionStreamingRunner, Completions,
+  type ParsedChoice, type ParsedChatCompletion, type ParsedChatCompletionMessage, type ParsedFunctionToolCall,
+  type ChatCompletionStreamParams, type ChatCompletionToolRunnerParams } from 'openai/resources/beta/chat/completions';
+export type SavedCompletion = ParsedChatCompletion<ParsedChoice<ParsedChatCompletionMessage<ParsedFunctionToolCall>>>;
+export type StreamArgs = ChatCompletionStreamParams;
+export type ToolArgs = ChatCompletionToolRunnerParams<any>;
+export const runtimeTypes = [ChatCompletionStream, ChatCompletionRunner, ChatCompletionStreamingRunner, Completions];
+`],
+      ['observed.ts', "import OpenAI from 'openai';\nfunction observeOpenAI<T extends OpenAI>(client: T): T { return client; }\nconst createOpenAIClient = async () => observeOpenAI(new OpenAI({apiKey: 'sk-test-fixture'}));\nexport async function parse() { const openai = await createOpenAIClient(); return openai.beta.chat.completions.parse({model:'gpt-4o', messages:[]}); }\n"],
     ]);
     for (const [name, source] of files) await writeFile(path.join(cwd, name), source);
     const install = (version: string) => runRealSdkNpm(cwd, ['install', '--ignore-scripts', '--no-save', '--package-lock=false', '--no-audit', '--no-fund', `openai@${version}`, '@types/node@22']);
-    const check = () => runRealSdkNode(cwd, [path.join(process.cwd(), 'node_modules/typescript/bin/tsc'), '--project', path.join(cwd, 'tsconfig.json')], 90_000);
+    const check = async () => {
+      try {
+        await runRealSdkNode(cwd, [path.join(process.cwd(), 'node_modules/typescript/bin/tsc'), '--project', path.join(cwd, 'tsconfig.json')], 90_000);
+      } catch (error) {
+        const output = error && typeof error === 'object' ? error as { stdout?: unknown; stderr?: unknown } : {};
+        if (error instanceof Error) error.message += `\n${String(output.stdout ?? '')}\n${String(output.stderr ?? '')}`;
+        throw error;
+      }
+    };
     await install('4.104.0');
     await check();
     const project = new Project({ skipAddingFilesFromTsConfig: true });
     for (const name of files.keys()) project.addSourceFileAtPath(path.join(cwd, name));
     const result = openaiV5.transform(project);
-    expect(result.manual).toEqual([]);
-    expect(result.fileUpdates).toHaveLength(2);
+    expect(result.manual.some((finding) => finding.file.endsWith('class.ts') && finding.snippet.includes('this.client.beta.chat'))).toBe(true);
+    expect(result.manual.some((finding) => finding.file.endsWith('subresource.ts') && finding.snippet.includes('runs.retrieve'))).toBe(true);
+    expect(result.fileUpdates?.some((update) => update.file.endsWith('class.ts'))).toBe(false);
+    expect(result.fileUpdates?.some((update) => update.file.endsWith('subresource.ts'))).toBe(false);
+    // Only the truly removed nested message module moves; openai/error remains
+    // a deprecated v5 re-export and therefore does not add a changed file.
+    expect(result.fileUpdates).toHaveLength(9);
     for (const update of result.fileUpdates ?? []) await writeFile(update.file, update.contents);
+    await writeFile(tsconfigPath, JSON.stringify({ ...tsconfig, include: [...files.keys()].filter((name) => !['class.ts', 'subresource.ts'].includes(name)) }));
     await install('5.0.0');
+    const v5Declarations = await readFile(path.join(cwd, 'node_modules/openai/resources/chat/completions.d.ts'), 'utf8');
+    expect(v5Declarations).toMatch(/export\s+\*\s+from\s+["']\.\/completions\//);
     await check();
     expect(await readFile(path.join(cwd, 'chat.ts'), 'utf8')).toContain('client.chat.completions.parse');
+    expect(await readFile(path.join(cwd, 'stream.ts'), 'utf8')).toContain('client.chat.completions.stream');
+    expect(await readFile(path.join(cwd, 'tools.ts'), 'utf8')).toContain('client.chat.completions.runTools');
+    expect(await readFile(path.join(cwd, 'class.ts'), 'utf8')).toContain('this.client.beta.chat.completions.parse');
+    expect(await readFile(path.join(cwd, 'events.ts'), 'utf8')).toContain("runner.on('functionToolCall'");
+    expect(await readFile(path.join(cwd, 'events.ts'), 'utf8')).toContain('runner.finalFunctionToolCall()');
+    expect(await readFile(path.join(cwd, 'moved.ts'), 'utf8')).toContain("'openai/error'");
+    expect(await readFile(path.join(cwd, 'deep.ts'), 'utf8')).toContain("'openai/resources/beta/threads/messages'");
+    expect(await readFile(path.join(cwd, 'deep.ts'), 'utf8')).toContain('TextContentBlock as MessageContentText');
+    expect(await readFile(path.join(cwd, 'paths.ts'), 'utf8')).toContain('runs.retrieve(runId, { thread_id: threadId })');
+    expect(await readFile(path.join(cwd, 'paths.ts'), 'utf8')).toContain('messages.retrieve(messageId, { thread_id: threadId })');
+    expect(await readFile(path.join(cwd, 'beta-chat-types.ts'), 'utf8')).toContain("'openai/resources/chat/completions'");
+    expect(await readFile(path.join(cwd, 'observed.ts'), 'utf8')).toContain('openai.chat.completions.parse(');
+  }, 300_000);
+
+  it('reproduces the v5 tool message content union using the published SDK declarations', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-openai-content-types-'));
+    roots.push(cwd);
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ private: true, type: 'module', dependencies: { openai: '4.104.0' } }));
+    await writeFile(path.join(cwd, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true, noEmit: true,
+      skipLibCheck: true, target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext' }, include: ['index.ts'] }));
+    await writeFile(path.join(cwd, 'index.ts'), `import OpenAI from 'openai';
+const client = new OpenAI({apiKey:'sk-test-fixture'});
+const runner = client.beta.chat.completions.runTools({model:'gpt-4o', messages:[], tools:[]});
+for (const message of runner.messages) {
+  if (message.role === 'tool' && message.content) {
+    if (message.content.startsWith('created node')) console.log(message.content);
+  }
+}
+`);
+    const install = (version: string) => runRealSdkNpm(cwd, ['install', '--ignore-scripts', '--no-save', '--package-lock=false', '--no-audit', '--no-fund', `openai@${version}`, '@types/node@22']);
+    const check = async () => {
+      try {
+        await runRealSdkNode(cwd, [path.join(process.cwd(), 'node_modules/typescript/bin/tsc'), '--project', path.join(cwd, 'tsconfig.json')]);
+      } catch (error) {
+        const output = error && typeof error === 'object' ? error as { stdout?: unknown; stderr?: unknown } : {};
+        if (error instanceof Error) error.message += `\n${String(output.stdout ?? '')}\n${String(output.stderr ?? '')}`;
+        throw error;
+      }
+    };
+    await install('4.20.1');
+    await check();
+    const project = new Project({ skipAddingFilesFromTsConfig: true });
+    project.addSourceFileAtPath(path.join(cwd, 'index.ts'));
+    const migration = openaiV5.transform(project);
+    expect(migration.manual).toEqual([]);
+    expect(migration.fileUpdates).toHaveLength(1);
+    await writeFile(migration.fileUpdates![0]!.file, migration.fileUpdates![0]!.contents);
+    await install('5.0.0');
+    let failedOutput = '';
+    try { await check(); }
+    catch (error) {
+      const output = error && typeof error === 'object' ? error as { stdout?: unknown; stderr?: unknown } : {};
+      failedOutput = `${String(output.stdout ?? '')}\n${String(output.stderr ?? '')}`;
+    }
+    expect(failedOutput).toContain('ChatCompletionContentPartText');
   }, 300_000);
 });

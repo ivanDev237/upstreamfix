@@ -18,6 +18,20 @@ const proposal: Proposal = {
 };
 
 describe('Action publication boundary', () => {
+  it('P10 rejects an added Node type package bundled with any unrelated devDependency', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply openai@5 migration with UpstreamFix' };
+    const before = '{"name":"client","dependencies":{"openai":"^4.0.0"}}';
+    const after = '{"name":"client","dependencies":{"openai":"^5.0.0"},"devDependencies":{"@types/node":"^20.0.0","evil-pkg":"^1.0.0"}}';
+    expect(() => validatePublishableBundle({ ...proposal, migration: 'openai@5', files: ['package.json'] },
+      { 'package.json': { before, after } }, identity)).toThrow(/package.json|deterministic|unexpected/i);
+  });
+  it('P10 rejects duplicate package manifest keys at the publication boundary', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply openai@5 migration with UpstreamFix' };
+    const before = '{"dependencies":{"openai":"^4.0.0"}}';
+    const after = '{"dependencies":{"openai":"^5.0.0"},"scripts":{},"scripts":{"postinstall":"evil"}}';
+    expect(() => validatePublishableBundle({ ...proposal, migration: 'openai@5', files: ['package.json'] },
+      { 'package.json': { before, after } }, identity)).toThrow(/duplicate|invalid JSON/i);
+  });
   it('Z4 permits a nested executable with an existing name and a moved entry point', () => {
     const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply firebase-admin@14 migration with UpstreamFix' };
     const before = JSON.stringify({ lockfileVersion: 3, packages: { '': {}, 'node_modules/mime': { bin: { mime: 'old.js' } } } });
@@ -190,6 +204,41 @@ describe('Action publication boundary', () => {
     }
     const before = "import * as admin from 'firebase-admin';\nadmin.initializeApp();\n";
     expect(() => validatePublishableBundle({ ...proposal, files: ['server.ts'] }, { 'server.ts': { before, after: 'require(\"evil\")\n' } }, identity)).toThrow(/migration|source/i);
+  });
+  it('allows only deterministic OpenAI @types/node and tsconfig node type additions', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply openai@5 migration with UpstreamFix' };
+    const beforePackage = '{"dependencies":{"openai":"^4.28.0"},"engines":{"node":">=20"}}';
+    const afterPackage = '{"dependencies":{"openai":"^5.0.0"},"engines":{"node":">=20"}, "devDependencies":{"@types/node":"^20.0.0"}}';
+    const beforeConfig = '{\n  "compilerOptions": {\n    "types": ["jest"]\n  }\n}\n';
+    const afterConfig = '{\n  "compilerOptions": {\n    "types": ["jest", "node"]\n  }\n}\n';
+    expect(() => validatePublishableBundle({ ...proposal, migration: 'openai@5', files: ['package.json', 'tsconfig.json'], commit, verification: 'passed' }, {
+      'package.json': { before: beforePackage, after: afterPackage }, 'tsconfig.json': { before: beforeConfig, after: afterConfig },
+    }, identity)).not.toThrow();
+    expect(() => validatePublishableBundle({ ...proposal, migration: 'openai@5', files: ['package.json'], commit, verification: 'passed' }, {
+      'package.json': { before: beforePackage, after: afterPackage.replace('^20.0.0', '^18.0.0') },
+    }, identity)).toThrow(/@types\/node|package.json/i);
+    expect(() => validatePublishableBundle({ ...proposal, migration: 'openai@5', files: ['package.json', 'tsconfig.json'], commit, verification: 'passed' }, {
+      'package.json': { before: beforePackage, after: afterPackage }, 'tsconfig.json': { before: beforeConfig, after: afterConfig.replace('"jest"', '"jest", "unsafe"') },
+    }, identity)).toThrow(/tsconfig|deterministic/i);
+  });
+  it('rejects inherited or bundle-invented tsconfig types instead of trusting them as the base list', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply openai@5 migration with UpstreamFix' };
+    const beforePackage = '{"dependencies":{"openai":"^4.28.0"},"engines":{"node":">=20"}}';
+    const afterPackage = '{"dependencies":{"openai":"^5.0.0"},"engines":{"node":">=20"},"devDependencies":{"@types/node":"^20.0.0"}}';
+    const beforeConfig = '{"compilerOptions":{"lib":["ES2022"]}}';
+    const maliciousConfig = '{"compilerOptions":{"lib":["ES2022"],"types":["./evil","node"]}}';
+    expect(() => validatePublishableBundle({ ...proposal, migration: 'openai@5', files: ['package.json', 'tsconfig.json'], commit, verification: 'passed' }, {
+      'package.json': { before: beforePackage, after: afterPackage }, 'tsconfig.json': { before: beforeConfig, after: maliciousConfig },
+    }, identity)).toThrow(/deterministic|tsconfig/i);
+  });
+  it('rejects adding compilerOptions.types when the source config had no local types or extends', () => {
+    const identity = { author: 'upstreamfix[bot]', authorEmail: '41898282+github-actions[bot]@users.noreply.github.com', committer: 'upstreamfix[bot]', committerEmail: '41898282+github-actions[bot]@users.noreply.github.com', subject: 'Apply openai@5 migration with UpstreamFix' };
+    const beforePackage = '{"dependencies":{"openai":"^4.28.0"},"engines":{"node":">=20"}}';
+    const afterPackage = '{"dependencies":{"openai":"^5.0.0"},"engines":{"node":">=20"},"devDependencies":{"@types/node":"^20.0.0"}}';
+    expect(() => validatePublishableBundle({ ...proposal, migration: 'openai@5', files: ['package.json', 'tsconfig.json'], commit, verification: 'passed' }, {
+      'package.json': { before: beforePackage, after: afterPackage },
+      'tsconfig.json': { before: '{"compilerOptions":{"strict":true}}', after: '{"compilerOptions":{"strict":true,"types":["node"]}}' },
+    }, identity)).toThrow(/deterministic|tsconfig/i);
   });
   it('X4 accepts the exact bytes of a normal Firebase source migration', () => {
     const before = "import * as admin from 'firebase-admin';\nadmin.initializeApp();\n";

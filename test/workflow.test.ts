@@ -6,6 +6,17 @@ import { describe, expect, it } from 'vitest';
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 describe('GitHub Actions CI workflow', () => {
+  it('benchmarks the exact PR head named in the OpenAI report', async () => {
+    const workflow = await readFile(path.join(projectRoot, '.github/workflows/benchmark.yml'), 'utf8');
+    expect(workflow).toContain('ref: ${{ github.event.pull_request.head.sha || github.sha }}');
+    expect(workflow).toContain('UPSTREAMFIX_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}');
+  });
+  it('runs expensive benchmarks only by explicit dispatch or on a pull request', async () => {
+    const workflow = await readFile(path.join(projectRoot, '.github/workflows/benchmark.yml'), 'utf8');
+    expect(workflow).not.toMatch(/push:\s*\n\s*branches: \[develop\]/);
+    expect(workflow).toContain('workflow_dispatch:');
+    expect(workflow).toContain('pull_request:');
+  });
   it('runs install, typecheck, build, and tests on Node 22 and 24 for pushes and pull requests', async () => {
     const workflow = await readFile(path.join(projectRoot, '.github/workflows/ci.yml'), 'utf8');
     expect(workflow).toContain('push:');
@@ -17,5 +28,6 @@ describe('GitHub Actions CI workflow', () => {
     expect(workflow).toContain('npm run typecheck');
     expect(workflow).toContain('npm run build');
     expect(workflow).toContain('npm test');
+    expect(workflow).toContain('npx vitest run test/openai-real-sdk.test.ts');
   });
 });

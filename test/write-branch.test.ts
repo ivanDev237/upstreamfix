@@ -5,7 +5,10 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
+import { openaiV5 } from '../src/migrations/openai-v5/index.js';
 import { assertChangedSourcesUseTargetSdk, writeMigrationOnBranch } from '../src/core/write-branch.js';
+import { applyProposedFiles } from '../src/core/verify.js';
+import { runMigration } from '../src/core/runner.js';
 import type { RunOutcome } from '../src/core/runner.js';
 
 const execFile = promisify(execFileCallback);
@@ -33,6 +36,25 @@ async function makeRepository(
     ...(withChecks ? { scripts: { typecheck: 'node -e "process.exit(0)"', test: 'node -e "process.exit(0)"' } } : {}),
   }, null, 2) + '\n');
   await writeFile(path.join(cwd, 'index.js'), source);
+  await git(cwd, 'add', '.');
+  await git(cwd, 'commit', '-qm', 'fixture');
+  return cwd;
+}
+
+async function makeOpenAiRepository(typecheck: string): Promise<string> {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-openai-write-test-'));
+  roots.push(cwd);
+  await git(cwd, 'init', '-q');
+  await git(cwd, 'config', 'user.name', 'UpstreamFix test');
+  await git(cwd, 'config', 'user.email', 'test@example.invalid');
+  await writeFile(path.join(cwd, 'package.json'), JSON.stringify({
+    name: 'openai-fixture', version: '1.0.0', type: 'module',
+    engines: { node: '>=20' }, dependencies: { openai: '^4.28.0' },
+    scripts: { typecheck, test: 'node -e "process.exit(0)"' },
+  }, null, 2) + '\n');
+  await writeFile(path.join(cwd, 'tsconfig.json'), JSON.stringify({ compilerOptions: { lib: ['ES2022'], noEmit: true } }));
+  await writeFile(path.join(cwd, 'client.ts'), "import OpenAI from 'openai'; const client = new OpenAI(); client.files.del('f');\n");
+  await writeFile(path.join(cwd, 'server.ts'), 'console.log(process.env.NODE_ENV);\n');
   await git(cwd, 'add', '.');
   await git(cwd, 'commit', '-qm', 'fixture');
   return cwd;
@@ -74,6 +96,36 @@ describe('verified Git branch writes', () => {
     await expect(writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions })).rejects.toThrow(/manual review/);
     expect((await git(cwd, 'branch', '--list', 'upstreamfix/*')).trim()).toBe('');
     expect((await git(cwd, 'status', '--porcelain')).trim()).toBe('');
+  });
+
+  it('does not create an OpenAI branch unless the isolated typecheck passes after adding Node types', async () => {
+    const cwd = await makeOpenAiRepository('node -e "process.exit(1)"');
+    await expect(writeMigrationOnBranch(openaiV5, { cwd, nodeRuntime: 20, verificationOptions }))
+      .rejects.toThrow('The isolated typecheck failed');
+    expect((await git(cwd, 'branch', '--list', 'upstreamfix/openai-5')).trim()).toBe('');
+    expect((await git(cwd, 'status', '--porcelain')).trim()).toBe('');
+  });
+
+  it('merges OpenAI and Node type edits into one package path for preview, apply, CLI, and Action branch writes', async () => {
+    const cwd = await makeOpenAiRepository('tsc --noEmit');
+    const preview = await runMigration(openaiV5, { cwd, dryRun: true, nodeRuntime: 20 });
+    expect(new Set(preview.proposedFiles.map((file) => file.relativePath)).size).toBe(preview.proposedFiles.length);
+    const copy = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-openai-apply-preview-'));
+    roots.push(copy);
+    for (const relative of ['package.json', 'tsconfig.json', 'client.ts', 'server.ts'])
+      await writeFile(path.join(copy, relative), await readFile(path.join(cwd, relative), 'utf8'));
+    await applyProposedFiles(copy, preview.proposedFiles);
+    const applied = JSON.parse(await readFile(path.join(copy, 'package.json'), 'utf8')) as { dependencies: { openai: string }; devDependencies: { '@types/node': string } };
+    expect(applied.dependencies.openai).toBe('^5.0.0');
+    expect(applied.devDependencies['@types/node']).toBe('^20.0.0');
+    const result = await writeMigrationOnBranch(openaiV5, {
+      cwd, nodeRuntime: 20,
+      verificationOptions: { execute: async () => ({ stdout: 'verified without network' }) },
+    });
+    expect(result.verification.status).toBe('passed');
+    const committed = JSON.parse(await git(cwd, 'show', `${result.branch}:package.json`)) as { dependencies: { openai: string }; devDependencies: { '@types/node': string } };
+    expect(committed.dependencies.openai).toBe('^5.0.0');
+    expect(committed.devDependencies['@types/node']).toBe('^20.0.0');
   });
 
   it('creates a dedicated branch and commit after real local verification', async () => {

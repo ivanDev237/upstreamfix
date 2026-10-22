@@ -38,7 +38,7 @@ concurrency:
 
 jobs:
   benchmark:
-    name: ${{ github.event_name == 'pull_request' && 'openai@5' || inputs.migration }} public repositories
+    name: ${{ github.event_name != 'workflow_dispatch' && 'openai@5' || inputs.migration }} public repositories
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
@@ -46,6 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -60,7 +61,7 @@ jobs:
       - name: Run reviewed corpus in isolated containers
         shell: bash
         env:
-          BENCHMARK_MIGRATION: ${{ github.event_name == 'pull_request' && 'openai@5' || inputs.migration }}
+          BENCHMARK_MIGRATION: ${{ github.event_name != 'workflow_dispatch' && 'openai@5' || inputs.migration }}
           BENCHMARK_REPOSITORY: ${{ inputs.repository }}
           BENCHMARK_REPORT: ${{ runner.temp }}/upstreamfix-benchmark.md
           UPSTREAMFIX_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}

@@ -1,4 +1,5 @@
-import { closeSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
+import { closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { builtinModules } from 'node:module';
 import { execFile as execFileCallback } from 'node:child_process';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { registerTemporaryCleanup } from './process-cleanup.js';
@@ -6,13 +7,23 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { structuredPatch } from 'diff';
-import { Node, Project, SyntaxKind } from 'ts-morph';
+import { Node, Project, SyntaxKind, ts } from 'ts-morph';
 import type { ManualItem, Migration, MigrationResult, PackageManifest, ProposedFileChange } from './types.js';
 import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from './project-discovery.js';
 import { parseManifest } from './manifest.js';
 import { guaranteesNodeMajor } from './node-range.js';
+import { hasAffectedOpenAiV5Call } from '../migrations/openai-v5/index.js';
 
 const execFile = promisify(execFileCallback);
+
+function projectPath(root: string, candidate: string): string {
+  const absoluteRoot = path.resolve(root);
+  const absolute = path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(absoluteRoot, candidate);
+  const relative = path.relative(absoluteRoot, absolute);
+  if (path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`))
+    throw new Error('Migration produced a path outside the project root; no file content was included in the report.');
+  return relative.split(path.sep).join('/') || '.';
+}
 
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs']);
 const MAX_DIFF_INPUT_BYTES = 1024 * 1024;
@@ -20,6 +31,14 @@ const MAX_DIFF_OUTPUT_CHARS = 64 * 1024;
 const MAX_REPORT_DIFF_CHARS = 256 * 1024;
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const LOCKFILE_NAMES = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock']);
+const NODE_BUILTIN_MODULES = new Set(builtinModules.map((name) => name.replace(/^node:/, '')));
+const NODE_ONLY_GLOBALS = new Set([
+  'Buffer', '__dirname', '__filename', 'clearImmediate', 'exports', 'global', 'module', 'process', 'require',
+  'setImmediate', 'NodeJS',
+]);
+const NODE_BUILTIN_PATTERN = [...NODE_BUILTIN_MODULES].sort((a, b) => b.length - a.length)
+  .map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+const NODE_GLOBAL_PATTERN = new RegExp(`\\b(?:${[...NODE_ONLY_GLOBALS].join('|')})\\b`);
 
 export function loadProject(cwd: string, packageName = 'firebase-admin'): Project {
   const project = new Project({
@@ -36,6 +55,7 @@ interface ScopedProject {
   project: Project;
   manual: ManualItem[];
   manifestBySource: Map<string, string>;
+  escapeOnlySources: Set<string>;
 }
 
 function loadScopedProject(root: string, migration: Migration, excludedDirectories: readonly string[] = [], nodeRuntime?: number): ScopedProject {
@@ -43,7 +63,7 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
     skipAddingFilesFromTsConfig: true,
     compilerOptions: { allowJs: true },
   });
-  const manifests = findPackageManifests(root, excludedDirectories).map((file) => {
+  const manifests = findPackageManifests(root, excludedDirectories).filter((file) => isSafeProjectFile(root, file)).map((file) => {
     let parsed: PackageManifest | undefined;
     let invalid = false;
     try {
@@ -54,9 +74,11 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
     return { file, parsed, invalid };
   });
   const manual: ManualItem[] = [];
+  const runtimeBlocked = new Map<string, ManualItem>();
   const manifestBySource = new Map<string, string>();
+  const escapeOnlySources = new Set<string>();
 
-  for (const sourcePath of findSourceFiles(root, migration.packageName, excludedDirectories)) {
+  for (const sourcePath of findSourceFiles(root, migration.packageName, excludedDirectories, escapeOnlySources)) {
     if (statSync(sourcePath).size > MAX_SOURCE_BYTES) {
       manual.push({ file: sourcePath, line: 1, reason: 'Source file exceeds the 2 MiB analysis size limit; review this SDK usage manually.', snippet: '' });
       continue;
@@ -93,16 +115,22 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
         line: 1,
         reason: `The ${migration.packageName} version could not be confirmed because ${path.relative(root, invalidManifest.file)} ${invalidManifest.reason}.`,
         snippet: readFileSync(sourcePath, 'utf8').split(/\r?\n/, 1)[0] ?? '',
+        reasonCode: 'manifest-refusal',
       });
       continue;
     }
     if (!declaration) {
+      if (migration.id === 'openai@5' && escapeOnlySources.has(sourcePath)) {
+        project.addSourceFileAtPath(sourcePath);
+        continue;
+      }
       if (migration.packageName === 'stripe' && !hasLikelyStripeSdkUsage(sourcePath)) continue;
       manual.push({
         file: sourcePath,
         line: 1,
         reason: `No containing package.json declares ${migration.packageName}; this file was not transformed because its SDK version is unknown.`,
         snippet: readFileSync(sourcePath, 'utf8').split(/\r?\n/, 1)[0] ?? '',
+        reasonCode: 'manifest-refusal',
       });
       continue;
     }
@@ -112,24 +140,31 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
         line: 1,
         reason: `${migration.packageName} is declared as \`${declaration.range}\` in ${path.relative(root, declaration.file)}; this migration only analyzes major v${migration.fromMajor} ranges.`,
         snippet: readFileSync(sourcePath, 'utf8').split(/\r?\n/, 1)[0] ?? '',
+        reasonCode: 'manifest-refusal',
       });
       continue;
     }
     if (!migration.declarativeRecipe && migration.id === 'openai@5' && !guaranteesNodeMajor(declaration.manifest.engines?.node ?? '', 20)
       && !(nodeRuntime === 20 && declaration.manifest.engines?.node === undefined)) {
-      manual.push({
-        file: sourcePath,
-        line: 1,
-        reason: `OpenAI SDK v5 requires Node.js 20 or later. Declare a compatible engines.node range in ${path.relative(root, declaration.file)} and confirm the deployed runtime before migrating; this source file was left unchanged.`,
-        snippet: `engines.node: ${declaration.manifest.engines?.node ?? 'not declared'}`,
-      });
+      const probe = new Project({ skipAddingFilesFromTsConfig: true, compilerOptions: { allowJs: true } });
+      if (hasAffectedOpenAiV5Call(probe.addSourceFileAtPath(sourcePath)) && !runtimeBlocked.has(declaration.file)) {
+        runtimeBlocked.set(declaration.file, {
+          file: declaration.file,
+          line: 1,
+          reason: `OpenAI SDK v5 requires Node.js 20 or later. Declare a compatible engines.node range in ${path.relative(root, declaration.file)} and confirm the deployed runtime before migrating; affected source files were left unchanged.`,
+          snippet: `engines.node: ${declaration.manifest.engines?.node ?? 'not declared'}`,
+          reasonCode: nodeRuntime === 20 && declaration.manifest.engines?.node !== undefined
+            ? 'manifest-refusal' : 'runtime-confirmation',
+        });
+      }
       continue;
     }
     project.addSourceFileAtPath(sourcePath);
     manifestBySource.set(sourcePath, declaration.file);
   }
 
-  return { project, manual, manifestBySource };
+  manual.push(...runtimeBlocked.values());
+  return { project, manual, manifestBySource, escapeOnlySources };
 }
 
 function hasLikelyStripeSdkUsage(sourcePath: string): boolean {
@@ -191,7 +226,8 @@ export function lockfileCommandEnvironment(home: string): NodeJS.ProcessEnv {
   };
 }
 
-function findSourceFiles(root: string, packageName: string, excludedDirectories: readonly string[] = []): string[] {
+function findSourceFiles(root: string, packageName: string, excludedDirectories: readonly string[] = [], escapeOnlySources = new Set<string>()): string[] {
+  if (packageName === 'openai') return findOpenAiSourceFiles(root, excludedDirectories, escapeOnlySources);
   const found: string[] = [];
   const visit = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -203,11 +239,305 @@ function findSourceFiles(root: string, packageName: string, excludedDirectories:
       if (!entry.isFile() || entry.name.endsWith('.d.ts')) continue;
       if (!SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
       if (statSync(absolutePath).size > MAX_SOURCE_BYTES) {
-        if (largeFileContainsPackage(absolutePath, packageName)) found.push(absolutePath);
+        if (packageName === '' || largeFileContainsPackage(absolutePath, packageName)) found.push(absolutePath);
       }
       else {
         const source = readFileSync(absolutePath, 'utf8');
-        if (source.includes(packageName) || (packageName === 'stripe' && /\bstripe\b/i.test(source))) found.push(absolutePath);
+        if (packageName === '' || source.includes(packageName) || (packageName === 'stripe' && /\bstripe\b/i.test(source))) found.push(absolutePath);
+      }
+    }
+  };
+  visit(root);
+  return found;
+}
+
+function findOpenAiSourceFiles(root: string, excludedDirectories: readonly string[], escapeOnlySources: Set<string>): string[] {
+  const smallFiles = findAllSourceFiles(root, excludedDirectories);
+  const contents = new Map(smallFiles.map((file) => [file, readFileSync(file, 'utf8')]));
+  const tsconfigs: string[] = [];
+  const findTsconfigs = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const absolutePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name) && !isExcludedDirectory(root, absolutePath, excludedDirectories)) findTsconfigs(absolutePath);
+      } else if (entry.isFile() && /^tsconfig(?:\.[^/]+)?\.json$/.test(entry.name)) tsconfigs.push(absolutePath);
+    }
+  };
+  findTsconfigs(root);
+  const pathMappings: Array<{ directory: string; configPath: string; base: string; paths: Record<string, string[]> }> = [];
+  for (const configPath of tsconfigs) {
+    try {
+      const config = ts.readConfigFile(configPath, ts.sys.readFile);
+      if (config.error || !config.config) continue;
+      const options = ts.parseJsonConfigFileContent(config.config, ts.sys, path.dirname(configPath), undefined, configPath).options;
+      const base = options.baseUrl ?? (typeof options.pathsBasePath === 'string' ? options.pathsBasePath : path.dirname(configPath));
+      const paths = options.paths ?? {};
+      pathMappings.push({ directory: path.dirname(configPath), configPath, base, paths });
+    } catch { /* An unresolved or malformed config cannot safely establish a local source link. */ }
+  }
+  const retained = new Set<string>();
+  const hasDirectSdkSpecifier = (file: string, source: string): boolean => {
+    const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
+      /\.tsx$/.test(file) ? ts.ScriptKind.TSX : /\.jsx$/.test(file) ? ts.ScriptKind.JSX : ts.ScriptKind.TS);
+    let found = false;
+    const isSdk = (value: string): boolean => value === 'openai' || value.startsWith('openai/');
+    const visit = (node: ts.Node): void => {
+      if (found) return;
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
+        && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier) && isSdk(node.moduleSpecifier.text)) found = true;
+      else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)
+        && node.moduleReference.expression && ts.isStringLiteral(node.moduleReference.expression)
+        && isSdk(node.moduleReference.expression.text)) found = true;
+      else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)
+        && ts.isStringLiteral(node.argument.literal) && isSdk(node.argument.literal.text)) found = true;
+      // require(`openai`) and import(`openai`): a template literal without substitutions is a static specifier.
+      else if (ts.isCallExpression(node) && node.arguments.length > 0 && ts.isStringLiteralLike(node.arguments[0]!)
+        && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+          || ts.isIdentifier(node.expression) && node.expression.text === 'require') && isSdk(node.arguments[0]!.text)) found = true;
+      else ts.forEachChild(node, visit);
+    };
+    visit(ast);
+    return found;
+  };
+  for (const [file, source] of contents) if (hasDirectSdkSpecifier(file, source)) retained.add(file);
+  const largeFiles: string[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const absolutePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name) && !isExcludedDirectory(root, absolutePath, excludedDirectories)) visit(absolutePath);
+      } else if (entry.isFile() && !entry.name.endsWith('.d.ts') && SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
+        && statSync(absolutePath).size > MAX_SOURCE_BYTES && largeFileContainsPackage(absolutePath, 'openai')) largeFiles.push(absolutePath);
+    }
+  };
+  visit(root);
+  for (const file of largeFiles) retained.add(file);
+  const seedRetained = new Set(retained);
+
+  const exportedClients = new Map<string, Set<string>>();
+  const directExports = (source: string): Set<string> => {
+    const constructors = new Set(['OpenAI', 'AzureOpenAI']);
+    for (const match of source.matchAll(/import\s+([^;\n]+?)\s+from\s*['"]openai['"]/g)) {
+      const clause = match[1] ?? '';
+      const defaultName = /^\s*([A-Za-z_$][\w$]*)/.exec(clause)?.[1];
+      if (defaultName && defaultName !== 'type') constructors.add(defaultName);
+      const named = /\{([^}]+)\}/.exec(clause)?.[1];
+      for (const item of (named ?? '').split(',')) {
+        const [imported, alias] = item.trim().split(/\s+as\s+/);
+        if (['OpenAI', 'AzureOpenAI'].includes(imported ?? '')) constructors.add(alias ?? imported!);
+      }
+    }
+    const constructorPattern = [...constructors].map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    const constructed = new Set([...source.matchAll(new RegExp(`\\b(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*(?::[^=;\\n]+)?=\\s*(?:new\\s+)?(?:${constructorPattern})\\b`, 'g'))].map((match) => match[1]!));
+    const exported = new Set([...source.matchAll(new RegExp(`\\bexport\\s+(?:declare\\s+)?(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*(?::[^=;\\n]+)?=\\s*(?:new\\s+)?(?:${constructorPattern})\\b`, 'g'))].map((match) => match[1]!));
+    for (const match of source.matchAll(/\bexport\s*\{([^}]+)\}(?:\s*from\s*['"][^'"]+['"])?/g)) {
+      for (const item of (match[1] ?? '').split(',')) {
+        const [local, alias] = item.trim().split(/\s+as\s+/);
+        if (local && constructed.has(local)) exported.add(alias ?? local);
+      }
+    }
+    for (const match of source.matchAll(/\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/g)) {
+      if (constructed.has(match[1]!)) exported.add('default');
+    }
+    return exported;
+  };
+  const imports = (source: string): Array<{ specifier: string; names: string[] }> => {
+    const found: Array<{ specifier: string; names: string[] }> = [];
+    const pattern = /import\s+(?:type\s+)?([^;\n]+?)\s+from\s*['"]([^'"]+)['"]/g;
+    for (const match of source.matchAll(pattern)) {
+      const clause = match[1] ?? '';
+      const named = /\{([^}]+)\}/.exec(clause)?.[1];
+      const names = named ? named.split(',').map((name) => name.trim().split(/\s+as\s+/)[0]!).filter(Boolean) : [];
+      const defaultName = /^\s*([A-Za-z_$][\w$]*)/.exec(clause)?.[1];
+      if (defaultName && defaultName !== 'type') names.push('default');
+      found.push({ specifier: match[2]!, names });
+    }
+    return found;
+  };
+  const resolveLocal = (file: string, specifier: string): string | undefined => {
+    const bases = specifier.startsWith('.') ? [path.resolve(path.dirname(file), specifier)] : [];
+    if (!specifier.startsWith('.')) {
+      const mapping = pathMappings.filter((item) => file.startsWith(`${item.directory}${path.sep}`))
+        .sort((left, right) => right.directory.length - left.directory.length
+          || Number(path.basename(right.configPath) === 'tsconfig.json') - Number(path.basename(left.configPath) === 'tsconfig.json'))[0];
+      if (mapping) {
+        for (const [pattern, targets] of Object.entries(mapping.paths)) {
+          const wildcard = pattern.indexOf('*');
+          const prefix = wildcard < 0 ? pattern : pattern.slice(0, wildcard);
+          const suffix = wildcard < 0 ? '' : pattern.slice(wildcard + 1);
+          if (!specifier.startsWith(prefix) || !specifier.endsWith(suffix) || specifier.length < prefix.length + suffix.length) continue;
+          const middle = specifier.slice(prefix.length, specifier.length - suffix.length || undefined);
+          for (const target of targets) bases.push(path.resolve(mapping.base, target.replace('*', middle)));
+        }
+      }
+    }
+    for (const base of bases) {
+      const candidates = [base, ...[...SOURCE_EXTENSIONS].map((extension) => `${base}${extension}`), ...[...SOURCE_EXTENSIONS].map((extension) => path.join(base, `index${extension}`))];
+      const found = candidates.find((candidate) => contents.has(candidate));
+      if (found) return found;
+    }
+    return undefined;
+  };
+  for (const [file, source] of contents) {
+    const names = directExports(source);
+    if (names.size > 0) exportedClients.set(file, names);
+  }
+  for (const [file, source] of contents) {
+    for (const match of source.matchAll(/\bexport\s+(?:type\s+)?(?:\*|\{([^}]+)\})\s*from\s*['"]([^'"]+)['"]/g)) {
+      if (resolveLocal(file, match[2]!)) continue;
+      const names = exportedClients.get(file) ?? new Set<string>();
+      const specifiers = match[1];
+      if (!specifiers) names.add('*');
+      else for (const item of specifiers.split(',')) {
+        const [, exportedName] = item.trim().split(/\s+as\s+/);
+        names.add(exportedName ?? item.trim());
+      }
+      exportedClients.set(file, names);
+    }
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [file, source] of contents) {
+      const clientImports = imports(source).filter((entry) => {
+        const dependency = resolveLocal(file, entry.specifier);
+        const names = dependency ? exportedClients.get(dependency) : undefined;
+        return Boolean(names && entry.names.some((name) => names.has(name) || names.has('*')));
+      });
+      if (clientImports.length > 0 && !retained.has(file)) { retained.add(file); changed = true; }
+      const reexported = new Set<string>();
+      for (const match of source.matchAll(/\bexport\s*\{([^}]+)\}\s*from\s*['"]([^'"]+)['"]/g)) {
+        const dependency = resolveLocal(file, match[2]!);
+        const known = dependency ? exportedClients.get(dependency) : undefined;
+        for (const part of (match[1] ?? '').split(',')) {
+          const original = part.trim().split(/\s+as\s+/)[0];
+          if (original && known?.has(original)) reexported.add(part.trim().split(/\s+as\s+/).at(-1)!);
+        }
+      }
+      for (const match of source.matchAll(/\bexport\s+\*\s+from\s*['"]([^'"]+)['"]/g)) {
+        const dependency = resolveLocal(file, match[1]!);
+        const known = dependency ? exportedClients.get(dependency) : undefined;
+        if (known) for (const name of known) reexported.add(name);
+      }
+      if (reexported.size > 0) {
+        const known = exportedClients.get(file) ?? new Set<string>();
+        const previousSize = known.size;
+        for (const name of reexported) known.add(name);
+        if (known.size !== previousSize) { exportedClients.set(file, known); changed = true; }
+        if (!retained.has(file)) { retained.add(file); changed = true; }
+      }
+    }
+  }
+  type LocalLink = { specifier: string; exportedNames: string[]; localBindings: string[]; moduleObject: boolean };
+  const structuralLinks = new Map<string, { links: LocalLink[]; classBases: Set<string>;
+    mutatedNames: Set<string>; mutatedSpecifiers: Set<string> }>();
+  for (const [file, source] of contents) {
+    const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
+      /\.tsx$/.test(file) ? ts.ScriptKind.TSX : /\.jsx$/.test(file) ? ts.ScriptKind.JSX : ts.ScriptKind.TS);
+    const links: LocalLink[] = [];
+    const classBases = new Set<string>();
+    const mutatedNames = new Set<string>();
+    const mutatedSpecifiers = new Set<string>();
+    const collectIdentifiers = (node: ts.Node): void => {
+      if (ts.isIdentifier(node)) classBases.add(node.text);
+      ts.forEachChild(node, collectIdentifiers);
+    };
+    const collectMutationTarget = (node: ts.Node): void => {
+      if (ts.isIdentifier(node)) mutatedNames.add(node.text);
+      if (ts.isCallExpression(node) && node.arguments.length > 0 && ts.isStringLiteral(node.arguments[0]!)
+        && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+          || ts.isIdentifier(node.expression) && node.expression.text === 'require'))
+        mutatedSpecifiers.add(node.arguments[0]!.text);
+      ts.forEachChild(node, collectMutationTarget);
+    };
+    const visit = (node: ts.Node): void => {
+      if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+        const clause = node.importClause;
+        const named = clause?.namedBindings;
+        links.push({ specifier: node.moduleSpecifier.text,
+          exportedNames: named && ts.isNamedImports(named) ? named.elements.map((element) => element.propertyName?.text ?? element.name.text) : [],
+          localBindings: [...(clause?.name ? [clause.name.text] : []),
+            ...(named && ts.isNamedImports(named) ? named.elements.map((element) => element.name.text) : []),
+            ...(named && ts.isNamespaceImport(named) ? [named.name.text] : [])],
+          moduleObject: Boolean(named && ts.isNamespaceImport(named)) });
+      }
+      if (ts.isCallExpression(node) && node.arguments.length > 0 && ts.isStringLiteral(node.arguments[0]!)
+        && (node.expression.kind === ts.SyntaxKind.ImportKeyword || ts.isIdentifier(node.expression) && node.expression.text === 'require')) {
+        const thenAccess = node.parent;
+        const thenCall = thenAccess && ts.isPropertyAccessExpression(thenAccess) && thenAccess.name.text === 'then'
+          && ts.isCallExpression(thenAccess.parent) ? thenAccess.parent : undefined;
+        const callback = thenCall?.arguments[0];
+        const parameter = callback && (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback)) ? callback.parameters[0] : undefined;
+        links.push({ specifier: node.arguments[0]!.text, exportedNames: [],
+          localBindings: parameter && ts.isIdentifier(parameter.name) ? [parameter.name.text] : [], moduleObject: true });
+      }
+      if ((ts.isClassDeclaration(node) || ts.isClassExpression(node)) && node.heritageClauses)
+        for (const clause of node.heritageClauses) if (clause.token === ts.SyntaxKind.ExtendsKeyword)
+          for (const type of clause.types) collectIdentifiers(type.expression);
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken)
+        collectMutationTarget(node.left);
+      if (ts.isCallExpression(node) && ['Object.assign', 'Reflect.set', 'Object.defineProperty', 'Reflect.defineProperty'].includes(node.expression.getText(ast)))
+        if (node.arguments[0]) collectMutationTarget(node.arguments[0]);
+      ts.forEachChild(node, visit);
+    };
+    visit(ast);
+    structuralLinks.set(file, { links, classBases, mutatedNames, mutatedSpecifiers });
+  }
+  const manifests = findPackageManifests(root, excludedDirectories);
+  const manifestOpenAiCache = new Map<string, boolean>();
+  const declaresOpenAi = (file: string): boolean => {
+    const owner = closestManifest(file, manifests);
+    if (!owner) return false;
+    const cached = manifestOpenAiCache.get(owner);
+    if (cached !== undefined) return cached;
+    try {
+      const manifest = parseManifest<PackageManifest>(readFileSync(owner, 'utf8'));
+      const declared = (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+        .some((section) => typeof manifest[section]?.openai === 'string');
+      manifestOpenAiCache.set(owner, declared);
+      return declared;
+    } catch { manifestOpenAiCache.set(owner, false); return false; }
+  };
+  for (let pass = 0; pass < contents.size; pass++) {
+    let added = false;
+    for (const [file, info] of structuralLinks) {
+      if (retained.has(file)) continue;
+      const linked = info.links.some((link) => {
+        const dependency = resolveLocal(file, link.specifier);
+        if (!dependency || !retained.has(dependency)) return false;
+        const exported = exportedClients.get(dependency);
+        const clientLink = exported && (link.moduleObject || link.exportedNames.some((name) => exported.has(name) || exported.has('*')));
+        const classLink = link.localBindings.some((name) => info.classBases.has(name));
+        return Boolean(clientLink || classLink);
+      });
+      // Unresolved module writes are deliberately analyzed only inside a
+      // package that actually declares OpenAI; an unrelated package cannot
+      // taint every client merely by importing an unresolved local module.
+      const uncertainWrite = declaresOpenAi(file) && info.links.some((link) =>
+        link.moduleObject && !resolveLocal(file, link.specifier)
+        && (link.specifier.startsWith('.') || link.specifier.startsWith('#')
+          || link.specifier.startsWith('@/') || link.specifier.startsWith('~/'))
+        && (info.mutatedSpecifiers.has(link.specifier)
+          || link.localBindings.some((name) => info.mutatedNames.has(name))));
+      if (linked || uncertainWrite) { retained.add(file); added = true; }
+    }
+    if (!added) break;
+  }
+  for (const file of retained) if (!seedRetained.has(file) && !declaresOpenAi(file)) escapeOnlySources.add(file);
+  return [...retained].sort();
+}
+
+function findAllSourceFiles(root: string, excludedDirectories: readonly string[] = []): string[] {
+  const found: string[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const absolutePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name) && !isExcludedDirectory(root, absolutePath, excludedDirectories)) visit(absolutePath);
+      } else if (entry.isFile() && !entry.name.endsWith('.d.ts')
+        && SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
+        && statSync(absolutePath).size <= MAX_SOURCE_BYTES) {
+        found.push(absolutePath);
       }
     }
   };
@@ -241,7 +571,7 @@ export interface RunOptions {
   nodeRuntime?: number;
   /** Yarn Classic needs a full dependency installation to regenerate yarn.lock. */
   allowYarnLockInstall?: boolean;
-  /** Count source findings only; never regenerate lockfiles or prepare manifest writes. */
+  /** Analyze without writing the checkout or regenerating lockfiles. */
   analysisOnly?: boolean;
   /** Registry snapshot cutoff shared with independent publication verification. */
   registryBefore?: string;
@@ -264,6 +594,7 @@ interface ManifestOutcome {
   notes: string[];
   changes: ManifestFileChange[];
   manual: ManualItem[];
+  nodeTypesManifestPaths?: Set<string>;
 }
 
 export async function runMigration(migration: Migration, options: RunOptions): Promise<RunOutcome> {
@@ -279,7 +610,52 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     project.getSourceFiles().map(async (file): Promise<[string, string]> => [file.getFilePath(), await readFile(file.getFilePath(), 'utf8')]),
   ));
   const result = migration.transform(project);
+  if (scoped.escapeOnlySources.size > 0) {
+    for (const sourcePath of scoped.escapeOnlySources) {
+      const source = project.getSourceFile(sourcePath);
+      if (source && hasAffectedOpenAiV5Call(source)
+        && !result.manual.some((finding) => finding.file === sourcePath && finding.reasonCode === 'openai-affected-call')) result.manual.push({
+        file: sourcePath, line: 1,
+        reason: 'This source uses an OpenAI client exported by another package; review its affected call before upgrading the owner package.',
+        snippet: source.getFullText().slice(0, 500), reasonCode: 'openai-affected-call',
+      });
+    }
+    result.fileUpdates = result.fileUpdates?.filter((update) => !scoped.escapeOnlySources.has(update.file));
+    result.filesChanged = result.filesChanged.filter((file) => !scoped.escapeOnlySources.has(file));
+    result.changes = result.changes.filter((change) => !scoped.escapeOnlySources.has(change.file));
+    result.manual = result.manual.filter((finding) => !scoped.escapeOnlySources.has(finding.file)
+      || finding.reasonCode === 'openai-affected-call');
+  }
   result.manual.unshift(...scoped.manual);
+  if (migration.id === 'openai@5' && !migration.declarativeRecipe) {
+    result.manual.push(...inspectOpenAiTypeEnvironment(options.cwd, options.excludedDirectories));
+  }
+  const manifestsWithChangedCode = new Set(
+    result.filesChanged.map((sourcePath) => scoped.manifestBySource.get(sourcePath)).filter((file): file is string => Boolean(file)),
+  );
+  const nodeTypesRepair = migration.id === 'openai@5' && !migration.declarativeRecipe
+    ? await prepareNodeTypesRepair(options, manifestsWithChangedCode)
+    : { notes: [], changes: [], manual: [] } satisfies ManifestOutcome;
+  if (nodeTypesRepair.nodeTypesManifestPaths?.size || nodeTypesRepair.changes.length > 0) {
+    const packagePaths = findPackageManifests(options.cwd, options.excludedDirectories);
+    const repairedManifestPaths = nodeTypesRepair.nodeTypesManifestPaths ?? new Set<string>();
+    for (let index = result.manual.length - 1; index >= 0; index--) {
+      const finding = result.manual[index]!;
+      if (/OpenAI v4 may have supplied @types\/node|OpenAI v5 requires Web fetch types/.test(finding.reason)
+        && [...repairedManifestPaths].some((manifestPath) =>
+          closestManifest(path.resolve(options.cwd, finding.file), packagePaths) === manifestPath)) {
+        result.manual.splice(index, 1);
+      }
+    }
+    for (const manifestPath of repairedManifestPaths) {
+      result.changes.push({ file: manifestPath, line: 1, rule: 'node-types', before: 'Node declarations unavailable', after: '@types/node added alongside OpenAI v5 after isolated typecheck verification' });
+    }
+    for (const change of nodeTypesRepair.changes) {
+      if (!result.filesChanged.includes(change.absolutePath))
+        result.filesChanged.push(change.absolutePath);
+      result.changes.push({ file: change.absolutePath, line: 1, rule: 'node-types', before: 'Node declarations unavailable', after: 'Node types enabled after isolated typecheck verification' });
+    }
+  }
   const compatibilityNotes = migration.inspectManifest
     ? await inspectManifests(migration, options.cwd, options.excludedDirectories)
     : [];
@@ -291,11 +667,21 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   if (!options.dryRun && result.manual.length > 0) {
     throw new Error('This migration has manual review items; no files were written. Resolve them and preview again.');
   }
-  const manifestsWithChangedCode = new Set(
-    result.filesChanged.map((sourcePath) => scoped.manifestBySource.get(sourcePath)).filter((file): file is string => Boolean(file)),
-  );
-  const manifest = !options.analysisOnly && result.manual.length === 0 && result.changes.length > 0
-    ? await migrateManifests(migration, options, manifestsWithChangedCode)
+  const manualManifestPaths = new Set(result.manual.map((finding) => closestManifest(
+    path.resolve(options.cwd, finding.file), findPackageManifests(options.cwd, options.excludedDirectories),
+  )).filter((file): file is string => Boolean(file)));
+  const manifestsEligibleForManifestChanges = options.analysisOnly
+    ? new Set([...manifestsWithChangedCode].filter((file) => !manualManifestPaths.has(file)))
+    : manifestsWithChangedCode;
+  const baseManifest = (!options.analysisOnly || migration.id === 'openai@5')
+      && (result.manual.length === 0 || options.analysisOnly) && result.changes.length > 0
+    ? await migrateManifests(
+      migration,
+      options,
+      manifestsEligibleForManifestChanges,
+      nodeTypesRepair.nodeTypesManifestPaths?.size ? 20 : undefined,
+      nodeTypesRepair.nodeTypesManifestPaths ?? new Set<string>(),
+    )
     : {
         notes: [options.analysisOnly
           ? 'Dependency versions were not modified during source-only benchmark analysis.'
@@ -305,6 +691,15 @@ export async function runMigration(migration: Migration, options: RunOptions): P
         changes: [],
         manual: [],
       };
+  const manifest: ManifestOutcome = {
+    notes: [...nodeTypesRepair.notes, ...baseManifest.notes],
+    changes: [
+      ...nodeTypesRepair.changes.filter((change) => path.basename(change.absolutePath) !== 'package.json'),
+      ...nodeTypesRepair.changes.filter((change) => path.basename(change.absolutePath) === 'package.json'),
+      ...baseManifest.changes,
+    ],
+    manual: [...nodeTypesRepair.manual, ...baseManifest.manual],
+  };
   if (!options.dryRun && manifest.manual.length > 0) {
     throw new Error('A dependency manifest needs manual review; no files were written. Resolve it and preview again.');
   }
@@ -320,15 +715,21 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     const before = originalSources.get(filePath);
     const after = sourceUpdates.get(filePath);
     if (before === undefined || after === undefined) return [];
-    const relativePath = path.relative(options.cwd, filePath);
+    const relativePath = projectPath(options.cwd, filePath);
     proposedFiles.push({ relativePath, before, after });
     const diff = unifiedDiff(relativePath, before, after);
     return diff ? [diff] : [];
   });
   for (const change of manifest.changes) {
-    proposedFiles.push({ relativePath: change.relativePath, before: change.before, after: change.after });
-    const diff = unifiedDiff(change.relativePath, change.before, change.after);
+    const relativePath = projectPath(options.cwd, change.absolutePath);
+    proposedFiles.push({ relativePath, before: change.before, after: change.after });
+    const diff = unifiedDiff(relativePath, change.before, change.after);
     if (diff) proposedDiff.push(diff);
+  }
+  const seenPaths = new Set<string>();
+  for (const file of proposedFiles) {
+    if (seenPaths.has(file.relativePath)) throw new Error(`Migration generated duplicate changes for ${file.relativePath}; no files were proposed.`);
+    seenPaths.add(file.relativePath);
   }
   let reportedCharacters = 0;
   for (let index = 0; index < proposedDiff.length; index++) {
@@ -342,16 +743,345 @@ export async function runMigration(migration: Migration, options: RunOptions): P
 
   return {
     ...result,
-    filesChanged: [
-      ...result.filesChanged.map((file) => path.relative(options.cwd, file)),
-      ...manifest.changes.map((change) => change.relativePath),
-    ],
-    changes: result.changes.map((c) => ({ ...c, file: path.relative(options.cwd, c.file) })),
-    manual: [...result.manual, ...manifest.manual].map((m) => ({ ...m, file: path.relative(options.cwd, m.file) })),
+    filesChanged: [...new Set([
+      ...result.filesChanged.map((file) => projectPath(options.cwd, file)),
+      ...manifest.changes.map((change) => projectPath(options.cwd, change.absolutePath)),
+    ])],
+    changes: result.changes.map((c) => ({ ...c, file: projectPath(options.cwd, c.file) })),
+    manual: [...result.manual, ...manifest.manual].map((m) => ({ ...m, file: projectPath(options.cwd, m.file) })),
     manifestNotes: [...new Set([...compatibilityNotes, ...manifest.notes])],
     proposedDiff,
     proposedFiles,
   };
+}
+
+function inspectOpenAiTypeEnvironment(root: string, excludedDirectories: readonly string[] = []): ManualItem[] {
+  const findings: ManualItem[] = [];
+  const sourceFiles = findAllSourceFiles(root, excludedDirectories);
+  const manifestPaths = findPackageManifests(root, excludedDirectories);
+  for (const manifestPath of manifestPaths) {
+    let manifest: PackageManifest;
+    try { manifest = parseManifest<PackageManifest>(readFileSync(manifestPath, 'utf8')); }
+    catch { continue; }
+    if (!(['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+      .some((section) => isSupportedSourceMajor(manifest[section]?.openai ?? '', 4))) continue;
+
+    const directory = path.dirname(manifestPath);
+    const tooling = { ...manifest.dependencies, ...manifest.devDependencies };
+    const typescriptVersion = /^\s*[~^]?(\d+)\.(\d+)/.exec(tooling.typescript ?? '');
+    if (typescriptVersion && (Number(typescriptVersion[1]) < 4
+      || (Number(typescriptVersion[1]) === 4 && Number(typescriptVersion[2]) < 9))) {
+      findings.push({ file: manifestPath, line: 1,
+        reason: `OpenAI v5 requires TypeScript 4.9 or later; declared version ${tooling.typescript} can install an older compiler. Upgrade TypeScript and run typecheck.`,
+        snippet: `typescript: ${tooling.typescript}` });
+    }
+    const jestVersion = /^\s*[~^]?(\d+)/.exec(tooling.jest ?? '');
+    if (jestVersion && Number(jestVersion[1]) < 28) {
+      findings.push({ file: manifestPath, line: 1,
+        reason: `OpenAI v5 requires Jest 28 or later; declared version ${tooling.jest} can install an older runner. Upgrade Jest and rerun tests.`,
+        snippet: `jest: ${tooling.jest}` });
+    }
+    const tsconfigPath = path.join(directory, 'tsconfig.json');
+    let compilerOptions: Record<string, unknown> | undefined;
+    try {
+      let configExists = false;
+      try { configExists = statSync(tsconfigPath).isFile(); } catch { /* no local tsconfig */ }
+      const unsafeConfig = configExists && unsafeTsconfigReference(root, tsconfigPath);
+      if (unsafeConfig) {
+        findings.push({ file: tsconfigPath, line: 1,
+          reason: 'The OpenAI type environment includes a symlinked or out-of-project tsconfig; it was not read. Review the configuration manually.',
+          snippet: 'tsconfig path withheld' });
+        compilerOptions = undefined;
+      } else {
+      const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, {}, {
+        ...ts.sys,
+        onUnRecoverableConfigFileDiagnostic: () => undefined,
+      });
+      if (parsed) compilerOptions = parsed.options as unknown as Record<string, unknown>;
+      }
+    } catch { /* Missing or invalid configuration cannot establish the active compiler environment. */ }
+    const nodeTypes = manifest.devDependencies?.['@types/node'] ?? manifest.dependencies?.['@types/node'];
+    const nodeTypesMajor = /^\s*[~^]?(\d+)/.exec(nodeTypes ?? '');
+    const explicitlyLoadedTypes = Array.isArray(compilerOptions?.types)
+      ? (compilerOptions.types as unknown[]).filter((value): value is string => typeof value === 'string')
+      : undefined;
+    const nodeTypesVisible = Boolean(nodeTypes) && (!explicitlyLoadedTypes || explicitlyLoadedTypes.includes('node'));
+    const workersTypes = manifest.devDependencies?.['@cloudflare/workers-types'] ?? manifest.dependencies?.['@cloudflare/workers-types'];
+    const workersVersion = /^\s*(?:[~^]|>=)?(\d+)\.(\d+)\.(\d+)/.exec(workersTypes ?? '');
+    if (workersTypes && (!workersVersion || (Number(workersVersion[1]) === 0
+      && Number(workersVersion[2]) < 20221111))) {
+      findings.push({ file: manifestPath, line: 1,
+        reason: `OpenAI v5's Cloudflare Workers guide requires @cloudflare/workers-types >=0.20221111.0; declared ${workersTypes} needs review and typecheck.`,
+        snippet: `@cloudflare/workers-types: ${workersTypes}` });
+    }
+    if (workersTypes && compilerOptions && (!Array.isArray(compilerOptions.types)
+      || !compilerOptions.types.includes('@cloudflare/workers-types'))) {
+      findings.push({ file: tsconfigPath, line: 1,
+        reason: 'OpenAI v5 Cloudflare Workers tsconfig should include @cloudflare/workers-types in compilerOptions.types; review this runtime configuration and typecheck.',
+        snippet: `compilerOptions.types: ${JSON.stringify(compilerOptions.types ?? null)}` });
+    }
+    const bunTypes = manifest.devDependencies?.['@types/bun'] ?? manifest.dependencies?.['@types/bun'];
+    const bunVersion = /^\s*(?:[~^]|>=)?(\d+)\.(\d+)/.exec(bunTypes ?? '');
+    if (bunTypes && (!bunVersion || Number(bunVersion[1]) < 1
+      || (Number(bunVersion[1]) === 1 && Number(bunVersion[2]) < 2))) {
+      findings.push({ file: manifestPath, line: 1,
+        reason: `OpenAI v5's Bun guide requires @types/bun >=1.2.0; declared ${bunTypes} needs review and typecheck.`,
+        snippet: `@types/bun: ${bunTypes}` });
+    }
+    const hasDomTypes = hasDomLibrary(compilerOptions);
+    if (compilerOptions && Array.isArray(compilerOptions.lib)
+      && !hasDomTypes
+      && nodeTypesVisible
+      && nodeTypesMajor && Number(nodeTypesMajor[1]) < 20) {
+      findings.push({ file: manifestPath, line: 1,
+        reason: `OpenAI v5 needs Web fetch types, but this tsconfig excludes DOM and @types/node ${nodeTypes} predates Node 20. Upgrade @types/node >=20 and typecheck; review runtime compatibility first.`,
+        snippet: `@types/node: ${nodeTypes}` });
+    }
+
+    if (compilerOptions && Array.isArray(compilerOptions.lib)
+      && !hasDomTypes
+      && !nodeTypesVisible && !workersTypes && !bunTypes) {
+      findings.push({ file: tsconfigPath, line: 1,
+        reason: 'OpenAI v5 requires Web fetch types (RequestInit, Headers, Blob, File). This tsconfig excludes DOM and the package lacks @types/node; choose a compatible DOM lib or @types/node >=20, then typecheck. The correct runtime target cannot be inferred safely.',
+        snippet: `compilerOptions.lib: ${JSON.stringify(compilerOptions.lib)}` });
+    }
+    if (nodeTypesVisible) continue;
+    for (const sourcePath of sourceFiles) {
+      const owner = closestManifest(sourcePath, manifestPaths);
+      if (owner !== manifestPath) continue;
+      if (!/\.[cm]?tsx?$/.test(sourcePath) && !(compilerOptions?.checkJs === true && /\.[cm]?jsx?$/.test(sourcePath))) continue;
+      if (statSync(sourcePath).size > MAX_SOURCE_BYTES) continue;
+      const source = readFileSync(sourcePath, 'utf8');
+      const usage = findNodeTypeUsage(source);
+      if (!usage) continue;
+      findings.push({ file: sourcePath, line: usage.line,
+        reason: 'OpenAI v4 may have supplied @types/node transitively; v5 does not. This file uses a Node built-in or global, but Node declarations are not visible to the compiler. Add a compatible @types/node devDependency, include "node" in compilerOptions.types when restricted, and run typecheck; otherwise review this runtime-specific use manually.',
+        snippet: source.split('\n')[usage.line - 1]?.trim().slice(0, 500) ?? usage.name });
+      break;
+    }
+  }
+  return findings;
+}
+
+async function prepareNodeTypesRepair(options: RunOptions, eligibleManifestPaths: Set<string>): Promise<ManifestOutcome> {
+  const findings = inspectOpenAiTypeEnvironment(options.cwd, options.excludedDirectories)
+    .filter((finding) => /OpenAI v4 may have supplied @types\/node|OpenAI v5 requires Web fetch types/.test(finding.reason));
+  if (findings.length === 0) return { notes: [], changes: [], manual: [] };
+  const notes: string[] = [];
+  const changes: ManifestFileChange[] = [];
+  const manual: ManualItem[] = [];
+  const nodeTypesManifestPaths = new Set<string>();
+  for (const manifestPath of findPackageManifests(options.cwd, options.excludedDirectories)) {
+    const raw = await readFile(manifestPath, 'utf8');
+    let manifest: PackageManifest;
+    try { manifest = parseManifest<PackageManifest>(raw); } catch { continue; }
+    if (!(['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+      .some((section) => isSupportedSourceMajor(manifest[section]?.openai ?? '', 4))) continue;
+    if (!eligibleManifestPaths.has(manifestPath)) continue;
+    const packageDirectory = path.dirname(manifestPath);
+    const packageManifests = findPackageManifests(options.cwd, options.excludedDirectories);
+    const relevant = findings.some((finding) => closestManifest(path.resolve(options.cwd, finding.file), packageManifests) === manifestPath);
+    if (!relevant) continue;
+    if (hasUnsafeDependencySpecs(manifest)) {
+      manual.push({ file: path.relative(options.cwd, manifestPath), line: 1,
+        reason: 'The Node type repair was withheld because Git, URL, local, aliased, override dependency specs require a manual lockfile update.',
+        snippet: 'Node type repair withheld', reasonCode: 'lockfile-refusal' });
+      continue;
+    }
+    const locks = await findLockfiles(options.cwd, packageDirectory);
+    const unsafeLock = locks.find((lock) => !isSafeProjectFile(options.cwd, path.resolve(options.cwd, lock)));
+    if (unsafeLock) {
+      manual.push({ file: path.resolve(options.cwd, unsafeLock), line: 1,
+        reason: 'The Node type repair was withheld because the lockfile is symlinked or resolves outside the project.',
+        snippet: 'lockfile repair withheld', reasonCode: 'lockfile-refusal' });
+      continue;
+    }
+    if ((['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+      .some((section) => typeof manifest[section]?.['@types/node'] === 'string')) continue;
+    const scripts = manifest.scripts as Record<string, unknown> | undefined;
+    const typecheckConfigured = typeof scripts?.typecheck === 'string';
+    if (!typecheckConfigured) continue;
+    const declaredNodeRange = manifest.engines?.node;
+    const runtimeMajor = typeof declaredNodeRange === 'string'
+      ? guaranteesNodeMajor(declaredNodeRange, 20) ? 20 : undefined
+      : options.nodeRuntime;
+    if (runtimeMajor === undefined || runtimeMajor < 20) continue;
+    const tsconfigPath = path.join(packageDirectory, 'tsconfig.json');
+    let tsconfigChange: ManifestFileChange | undefined;
+    try {
+      if (await exists(tsconfigPath) && unsafeTsconfigReference(options.cwd, tsconfigPath)) {
+        manual.push({ file: tsconfigPath, line: 1,
+          reason: 'The Node type repair was withheld because tsconfig.json or an extends target is symlinked or outside the project.',
+          snippet: 'tsconfig repair withheld' });
+        continue;
+      }
+      if (await exists(tsconfigPath)) {
+        const configBefore = await readFile(tsconfigPath, 'utf8');
+        const localConfig = ts.parseConfigFileTextToJson(tsconfigPath, configBefore);
+        if (localConfig.error || !localConfig.config || typeof localConfig.config !== 'object') {
+          manual.push({ file: tsconfigPath, line: 1,
+            reason: 'The Node type repair was withheld because tsconfig.json is malformed; repair its JSONC syntax and rerun typecheck.',
+            snippet: 'tsconfig repair withheld' });
+          continue;
+        }
+        const localTypes = (localConfig.config as { compilerOptions?: { types?: unknown } }).compilerOptions?.types;
+        if ((localConfig.config as { extends?: unknown }).extends !== undefined && !Array.isArray(localTypes)) {
+          manual.push({ file: tsconfigPath, line: 1,
+            reason: 'The types are inherited from an extended configuration; add "node" manually to the appropriate compilerOptions.types array in that configuration.',
+            snippet: 'inherited tsconfig types' });
+          continue;
+        }
+        const parsed = ts.getParsedCommandLineOfConfigFile(tsconfigPath, {}, {
+          ...ts.sys,
+          onUnRecoverableConfigFileDiagnostic: () => undefined,
+        });
+        if (!parsed || parsed.errors.some((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)) {
+          manual.push({ file: tsconfigPath, line: 1,
+            reason: 'The Node type repair was withheld because the effective TypeScript configuration could not be resolved safely.',
+            snippet: 'tsconfig repair withheld' });
+          continue;
+        }
+        const types = (parsed.options as unknown as { types?: string[] }).types;
+        if (Array.isArray(types) && !types.includes('node')) {
+          const configAfter = addNodeTypeToTsconfig(configBefore, types);
+          if (!configAfter) {
+            manual.push({ file: tsconfigPath, line: 1,
+              reason: 'The Node type repair was withheld because compilerOptions.types contains comments, a trailing comma, or a structure that cannot be edited without changing its formatting.',
+              snippet: 'tsconfig repair withheld' });
+            continue;
+          }
+          tsconfigChange = { absolutePath: tsconfigPath, relativePath: path.relative(options.cwd, tsconfigPath), before: configBefore, after: configAfter };
+        }
+      }
+    } catch {
+      manual.push({ file: tsconfigPath, line: 1,
+        reason: 'The Node type repair was withheld because tsconfig.json could not be read safely.',
+        snippet: 'tsconfig repair withheld' });
+      continue;
+    }
+    if (tsconfigChange) changes.push(tsconfigChange);
+    nodeTypesManifestPaths.add(manifestPath);
+    notes.push(`Added @types/node ^${runtimeMajor}.0.0 to ${path.relative(options.cwd, manifestPath)} together with its OpenAI v5 upgrade; the isolated verifier must pass its typecheck before commit.`);
+  }
+  return { notes, changes, manual, nodeTypesManifestPaths };
+}
+
+export function addNodeTypeToTsconfig(raw: string, effectiveTypes: readonly string[]): string | undefined {
+  if (effectiveTypes.includes('node')) return raw;
+  const parsed = ts.parseJsonText('tsconfig.json', raw);
+  const root = parsed.statements[0]?.expression;
+  const diagnostics = (parsed as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? [];
+  if (diagnostics.length > 0 || !root || !ts.isObjectLiteralExpression(root)) return undefined;
+  const findProperty = (object: ts.ObjectLiteralExpression, name: string): ts.PropertyAssignment | undefined =>
+    object.properties.find((property): property is ts.PropertyAssignment => ts.isPropertyAssignment(property)
+      && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) && property.name.text === name);
+  const compilerOptions = findProperty(root, 'compilerOptions');
+  const insertProperty = (object: ts.ObjectLiteralExpression, propertyText: string): string => {
+    const close = object.end - 1;
+    const content = raw.slice(object.getStart(parsed) + 1, close);
+    const whitespace = content.match(/\s*$/)?.[0] ?? '';
+    const insertAt = close - whitespace.length;
+    const multiline = raw.includes('\n');
+    const lineEnding = raw.includes('\r\n') ? '\r\n' : '\n';
+    const parentIndent = raw.slice(0, object.getStart(parsed)).split(/\r?\n/).at(-1)?.match(/^\s*/)?.[0] ?? '';
+    const childIndent = `${parentIndent}  `;
+    const comma = object.properties.length > 0 ? ',' : '';
+    const addition = multiline ? `${comma}${lineEnding}${childIndent}${propertyText}` : `${comma}${propertyText}`;
+    return raw.slice(0, insertAt) + addition + raw.slice(insertAt);
+  };
+  let updated: string;
+  if (compilerOptions && ts.isObjectLiteralExpression(compilerOptions.initializer)) {
+    const optionsObject = compilerOptions.initializer;
+    const typesProperty = findProperty(optionsObject, 'types');
+    if (typesProperty && ts.isArrayLiteralExpression(typesProperty.initializer)) {
+      const array = typesProperty.initializer;
+      const close = array.end - 1;
+      const content = raw.slice(array.getStart(parsed) + 1, close);
+      if (/\/\/|\/\*/.test(content)) return undefined;
+      const whitespace = content.match(/\s*$/)?.[0] ?? '';
+      const insertAt = close - whitespace.length;
+      const hasValues = array.elements.length > 0;
+      const hasTrailingComma = content.trimEnd().endsWith(',');
+      if (hasTrailingComma) return undefined;
+      const multiline = content.includes('\n');
+      const lineEnding = raw.includes('\r\n') ? '\r\n' : '\n';
+      const arrayIndent = raw.slice(0, array.getStart(parsed)).split(/\r?\n/).at(-1)?.match(/^\s*/)?.[0] ?? '';
+      const addition = multiline
+        ? `${hasValues && !hasTrailingComma ? ',' : ''}${lineEnding}${arrayIndent}  "node"`
+        : `${hasValues ? ', ' : ''}"node"`;
+      updated = raw.slice(0, insertAt) + addition + raw.slice(insertAt);
+    } else if (typesProperty) return undefined;
+    else updated = insertProperty(optionsObject, `"types": ${JSON.stringify([...effectiveTypes, 'node'])}`);
+  } else if (compilerOptions) return undefined;
+  else updated = insertProperty(root, `"compilerOptions": { "types": ${JSON.stringify([...effectiveTypes, 'node'])} }`);
+  const validated = ts.parseJsonText('tsconfig.json', updated);
+  return ((validated as unknown as { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? []).length === 0
+    ? updated : undefined;
+}
+
+export function addNodeTypesDependency(raw: string, major: number): string | undefined {
+  const rootStart = raw.charCodeAt(0) === 0xfeff ? 1 : 0;
+  const dependencyMember = findJsonObjectMember(raw, rootStart, 'devDependencies');
+  const lineEnding = raw.includes('\r\n') ? '\r\n' : '\n';
+  const separatorMatch = /"(\s*:\s*)"/.exec(raw);
+  const keyValueSeparator = separatorMatch?.[1] ?? ': ';
+  const indent = raw.match(/(?:\r?\n)([ \t]+)"[^"\r\n]+"\s*:/)?.[1] ?? '  ';
+  const specifier = `^${major}.0.0`;
+  let updated: string;
+  if (dependencyMember) {
+    if (raw[dependencyMember.valueStart] !== '{') return undefined;
+    const end = jsonValueEnd(raw, dependencyMember.valueStart);
+    if (end < 0) return undefined;
+    const close = end - 1;
+    const multilineDependencies = /\r?\n/.test(raw.slice(dependencyMember.valueStart + 1, close));
+    const whitespace = raw.slice(dependencyMember.valueStart + 1, close).match(/\s*$/)?.[0] ?? '';
+    const insertAt = close - whitespace.length;
+    const hasEntries = raw.slice(dependencyMember.valueStart + 1, insertAt).trim().length > 0;
+    const childIndent = multilineDependencies ? `${indent}${indent}` : '';
+    const addition = multilineDependencies
+      ? `${hasEntries ? ',' : ''}${lineEnding}${childIndent}"@types/node"${keyValueSeparator}"${specifier}"`
+      : `${hasEntries ? ', ' : ''}"@types/node"${keyValueSeparator}"${specifier}"`;
+    updated = raw.slice(0, insertAt) + addition + raw.slice(insertAt);
+  } else {
+    const end = jsonValueEnd(raw, rootStart);
+    if (end < 0) return undefined;
+    const close = end - 1;
+    const multilineRoot = /\r?\n/.test(raw.slice(rootStart + 1, close));
+    const whitespace = raw.slice(rootStart + 1, close).match(/\s*$/)?.[0] ?? '';
+    const insertAt = close - whitespace.length;
+    const hasEntries = raw.slice(rootStart + 1, insertAt).trim().length > 0;
+    const addition = multilineRoot
+      ? `${hasEntries ? ',' : ''}${lineEnding}${indent}"devDependencies"${keyValueSeparator}{${lineEnding}${indent}${indent}"@types/node"${keyValueSeparator}"${specifier}"${lineEnding}${indent}}`
+      : `${hasEntries ? ', ' : ''}"devDependencies"${keyValueSeparator}{"@types/node"${keyValueSeparator}"${specifier}"}`;
+    updated = raw.slice(0, insertAt) + addition + raw.slice(insertAt);
+  }
+  try {
+    const parsed = parseManifest<PackageManifest>(updated);
+    return parsed.devDependencies?.['@types/node'] === specifier ? updated : undefined;
+  } catch { return undefined; }
+}
+
+function hasDomLibrary(compilerOptions: Record<string, unknown> | undefined): boolean {
+  const libraries = compilerOptions?.lib;
+  return Array.isArray(libraries) && libraries.some((lib) => typeof lib === 'string'
+    && /^(?:lib\.)?dom(?:\.iterable)?(?:\.d\.ts)?$/i.test(lib));
+}
+
+function findNodeTypeUsage(source: string): { line: number; name: string } | undefined {
+  const patterns = [
+    new RegExp(`(?:\\b(?:from|import)\\s*|\\b(?:import|require)\\s*\\(\\s*)['"](?:node:)?(?:${NODE_BUILTIN_PATTERN})(?:/[^'"]*)?['"]`),
+    NODE_GLOBAL_PATTERN,
+  ];
+  const matches = patterns.map((pattern) => {
+    const match = pattern.exec(source);
+    return match?.index === undefined ? undefined : { index: match.index, text: match[0] };
+  }).filter((match): match is { index: number; text: string } => Boolean(match));
+  const first = matches.sort((a, b) => a.index - b.index)[0];
+  if (!first) return undefined;
+  const name = NODE_GLOBAL_PATTERN.exec(first.text)?.[0]
+    ?? /['"]([^'"]+)['"]/.exec(first.text)?.[1]
+    ?? 'Node API';
+  return { line: source.slice(0, first.index).split('\n').length, name };
 }
 
 async function inspectManifests(migration: Migration, cwd: string, excludedDirectories: readonly string[] = []): Promise<string[]> {
@@ -373,6 +1103,8 @@ async function migrateManifests(
   migration: Migration,
   options: RunOptions,
   manifestsWithChangedCode: Set<string>,
+  nodeTypesMajor?: number,
+  nodeTypesManifestPaths: Set<string> = new Set(),
 ): Promise<ManifestOutcome> {
   if (!migration.updateManifest) return { notes: [], changes: [], manual: [] };
   const notes: string[] = [];
@@ -396,11 +1128,15 @@ async function migrateManifests(
         line: 1,
         reason: 'This package.json is invalid JSON; its dependency version was left unchanged.',
         snippet: raw.split(/\r?\n/, 1)[0] ?? '',
+        reasonCode: 'manifest-refusal',
       });
       continue;
     }
 
     const before = structuredClone(manifest);
+    const addNodeTypes = nodeTypesMajor !== undefined && nodeTypesManifestPaths.has(manifestPath)
+      && !(['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+        .some((section) => typeof manifest[section]?.['@types/node'] === 'string');
     if (options.nodeRuntime !== undefined) {
       const major = options.nodeRuntime;
       if (manifest.engines !== undefined && (typeof manifest.engines !== 'object' || Array.isArray(manifest.engines) || manifest.engines === null)) {
@@ -409,6 +1145,7 @@ async function migrateManifests(
           line: 1,
           reason: `engines must be an object in package.json before --node-runtime ${major} can add a Node.js range.`,
           snippet: 'engines',
+          reasonCode: 'manifest-refusal',
         });
         continue;
       }
@@ -419,12 +1156,27 @@ async function migrateManifests(
           line: 1,
           reason: `engines.node is already declared as ${JSON.stringify(declared)}. Review and update it manually for Node.js ${major} before migrating ${migration.id}; --node-runtime never overrides a declared range.`,
           snippet: `engines.node: ${declared}`,
+          reasonCode: 'manifest-refusal',
         });
         continue;
       }
       if (declared === undefined) manifest.engines = { ...manifest.engines, node: `>=${major}` };
     }
     const fileNotes = migration.updateManifest(manifest);
+    const versionChanged = (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+      .some((section) => before[section]?.[migration.packageName] !== manifest[section]?.[migration.packageName]);
+    const deferredForRuntime = fileNotes.some((note) => /requires Node\.js \d+ or (?:later|newer)/i.test(note));
+    if (!versionChanged && !deferredForRuntime) {
+      notes.push(...fileNotes.filter((note) => !note.includes(' → ')));
+      manual.push({ file: relativePath, line: 1,
+        reason: `The ${migration.packageName} dependency version could not be updated safely; the package was left unchanged.`,
+        snippet: `${migration.packageName} dependency update withheld`, reasonCode: 'manifest-refusal' });
+      continue;
+    }
+    if (addNodeTypes) {
+      manifest.devDependencies = { ...manifest.devDependencies, '@types/node': `^${nodeTypesMajor}.0.0` };
+      fileNotes.push(`Added @types/node ^${nodeTypesMajor}.0.0 after detecting Node API use; the isolated verifier must pass typecheck before commit.`);
+    }
     if (options.nodeRuntime !== undefined && before.engines?.node === undefined) {
       fileNotes.unshift(`\`${relativePath}\`: added \`engines.node\` = \`>=${options.nodeRuntime}\` after explicit --node-runtime ${options.nodeRuntime} confirmation.`);
     }
@@ -434,9 +1186,10 @@ async function migrateManifests(
     }
 
     const versionUpdated = preserveManifestFormatting(raw, before, manifest, migration.packageName);
-    const updated = versionUpdated && options.nodeRuntime !== undefined && before.engines?.node === undefined
+    let updated = versionUpdated && options.nodeRuntime !== undefined && before.engines?.node === undefined
       ? addNodeEngineToManifest(versionUpdated, options.nodeRuntime)
       : versionUpdated;
+    if (updated && addNodeTypes) updated = addNodeTypesDependency(updated, nodeTypesMajor!);
     if (updated === undefined) {
       notes.push(...fileNotes.filter((note) => !note.includes(' → ')));
       manual.push({
@@ -444,13 +1197,35 @@ async function migrateManifests(
         line: 1,
         reason: 'The dependency version could not be updated without rewriting or ambiguously editing package.json; update it manually.',
         snippet: `${migration.packageName} dependency update withheld`,
+        reasonCode: 'manifest-refusal',
       });
       continue;
     }
 
+    if (options.analysisOnly && hasUnsafeDependencySpecs(manifest)) {
+      manual.push({ file: relativePath, line: 1,
+        reason: 'This package uses Git, URL, local, aliased, or override dependency specs; the lockfile cannot be regenerated safely for this migration.',
+        snippet: 'dependency repair withheld', reasonCode: 'lockfile-refusal' });
+      continue;
+    }
+    if (options.analysisOnly) {
+      const rendered = updated;
+      changes.push({ absolutePath: manifestPath, relativePath, before: raw, after: rendered });
+      notes.push(...fileNotes);
+      notes.push(`Lockfiles for ${relativePath} were not proposed during source-only analysis.`);
+      continue;
+    }
     const existingLocks = await findLockfiles(options.cwd, path.dirname(manifestPath));
     let lockChange: ManifestFileChange | undefined;
     if (existingLocks.length > 0) {
+      const unsafeLock = existingLocks.find((lock) => !isSafeProjectFile(options.cwd, path.resolve(options.cwd, lock)));
+      if (unsafeLock) {
+        notes.push(...fileNotes.filter((note) => !note.includes(' → ')));
+        manual.push({ file: path.resolve(options.cwd, unsafeLock), line: 1,
+          reason: 'This package lockfile is symlinked or resolves outside the project; it was not read or regenerated.',
+          snippet: 'lockfile update withheld', reasonCode: 'lockfile-refusal' });
+        continue;
+      }
       const lockResult = existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'package-lock.json'
         ? await regeneratePackageLock(manifestPath, path.resolve(options.cwd, existingLocks[0]!), updated, options.cwd, options.registryBefore)
         : existingLocks.length === 1 && path.basename(existingLocks[0]!) === 'pnpm-lock.yaml'
@@ -467,6 +1242,7 @@ async function migrateManifests(
           line: 1,
           reason: `${lockResult.reason} The dependency and lockfile were left unchanged.`,
           snippet: `${migration.packageName} dependency update withheld`,
+          reasonCode: 'lockfile-refusal',
         });
         continue;
       }
@@ -785,6 +1561,8 @@ async function exists(file: string): Promise<boolean> {
 }
 
 async function findLockfiles(root: string, packageDirectory: string): Promise<string[]> {
+  root = path.resolve(root);
+  packageDirectory = path.resolve(packageDirectory);
   const names = ['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock'];
   const found: string[] = [];
   let directory = packageDirectory;
@@ -824,7 +1602,69 @@ function findPackageManifests(root: string, excludedDirectories: readonly string
   return found;
 }
 
-function addNodeEngineToManifest(raw: string, major: number): string | undefined {
+function closestManifest(sourcePath: string, manifests: readonly string[]): string | undefined {
+  const source = path.resolve(sourcePath);
+  return manifests
+    .filter((manifest) => {
+      const directory = path.dirname(path.resolve(manifest));
+      return source === directory || source.startsWith(directory + path.sep);
+    })
+    .sort((left, right) => path.dirname(path.resolve(right)).length - path.dirname(path.resolve(left)).length)[0];
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`);
+}
+
+function isSafeProjectFile(root: string, candidate: string): boolean {
+  const absoluteRoot = path.resolve(root);
+  const absolute = path.resolve(candidate);
+  if (!isPathWithin(absoluteRoot, absolute)) return false;
+  try {
+    let current = absoluteRoot;
+    for (const part of path.relative(absoluteRoot, absolute).split(path.sep).filter(Boolean)) {
+      current = path.join(current, part);
+      const metadata = lstatSync(current);
+      if (metadata.isSymbolicLink()) return false;
+    }
+    return statSync(absolute).isFile() && isPathWithin(realpathSync(absoluteRoot), realpathSync(absolute));
+  } catch { return false; }
+}
+
+function unsafeTsconfigReference(root: string, initialConfig: string): boolean {
+  const visited = new Set<string>();
+  const visit = (configPath: string): boolean => {
+    const absolute = path.resolve(configPath);
+    if (!isPathWithin(root, absolute) || !isSafeProjectFile(root, absolute)) return true;
+    const canonical = realpathSync(absolute);
+    if (visited.has(canonical)) return true;
+    visited.add(canonical);
+    let parsed: ReturnType<typeof ts.parseConfigFileTextToJson>;
+    try { parsed = ts.parseConfigFileTextToJson(absolute, readFileSync(absolute, 'utf8')); }
+    catch { return false; }
+    if (parsed.error || !parsed.config || typeof parsed.config !== 'object') return false;
+    const extendsValue: unknown = parsed.config.extends;
+    const references = typeof extendsValue === 'string' ? [extendsValue]
+      : Array.isArray(extendsValue) ? extendsValue.filter((entry): entry is string => typeof entry === 'string') : [];
+    for (const reference of references) {
+      let base: string | undefined;
+      if (reference.startsWith('.') || path.isAbsolute(reference)) {
+        const target = path.resolve(path.dirname(absolute), reference);
+        const candidates = path.extname(target) ? [target] : [target, `${target}.json`, path.join(target, 'tsconfig.json')];
+        base = candidates.find((candidate) => { try { return statSync(candidate).isFile(); } catch { return false; } }) ?? target;
+      } else {
+        base = ts.resolveModuleName(reference, absolute, {}, ts.sys).resolvedModule?.resolvedFileName;
+        if (!base) return true;
+      }
+      if (visit(base)) return true;
+    }
+    return false;
+  };
+  return visit(initialConfig);
+}
+
+export function addNodeEngineToManifest(raw: string, major: number): string | undefined {
   const rootStart = raw.charCodeAt(0) === 0xfeff ? 1 : 0;
   if (raw[rootStart] !== '{') return undefined;
   const engineMember = findJsonObjectMember(raw, rootStart, 'engines');
@@ -852,7 +1692,7 @@ function addNodeEngineToManifest(raw: string, major: number): string | undefined
   }
 }
 
-function preserveManifestFormatting(
+export function preserveManifestFormatting(
   raw: string,
   before: PackageManifest,
   after: PackageManifest,
