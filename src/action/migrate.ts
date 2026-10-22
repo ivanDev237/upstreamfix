@@ -29,7 +29,10 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
   const project = path.resolve(projectRoot);
   const output = path.resolve(outputRoot);
   if (output === project || output.startsWith(`${project}${path.sep}`)) throw new Error('Reports and bundles must be outside the client checkout.');
-  if (!['schedule', 'workflow_dispatch'].includes(eventName)) throw new Error('Only schedule and workflow_dispatch can prepare migrations.');
+  // repository_dispatch comes from the UpstreamFix GitHub App; the reusable workflow only runs it when the
+  // payload names this repository, its default branch and its current head commit.
+  if (!['schedule', 'workflow_dispatch', 'repository_dispatch'].includes(eventName))
+    throw new Error('Only schedule, workflow_dispatch and repository_dispatch can prepare migrations.');
   const configFile = path.join(project, '.upstreamfix.yml');
   const configInfo = await lstat(configFile).catch(() => undefined);
   if (configInfo && !configInfo.isFile()) throw new Error('.upstreamfix.yml must be a regular file.');
