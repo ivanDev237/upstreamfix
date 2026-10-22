@@ -569,6 +569,7 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
   }
   const assignments = new Map<MorphSymbol, Node[]>();
   const escapedClients = new Set<MorphSymbol>();
+  const escapeReasons = new Map<MorphSymbol, string>();
   const escapeCandidates = new Set<MorphSymbol>();
   const escapedClassFields = new Map<Node, Set<string>>();
   const markAssignmentTarget = (target: Node): void => {
@@ -682,15 +683,31 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     // Type-only references do not pass or expose the runtime client value.
     if (current.getFirstAncestor((ancestor) => Node.isTypeNode(ancestor))) return true;
     let parent = current.getParent();
-    while (parent && Node.isPropertyAccessExpression(parent) && parent.getExpression() === current) {
-      if (['call', 'apply', 'bind'].includes(parent.getName())) return false;
-      current = parent;
-      parent = current.getParent();
+    while (parent) {
+      if ((Node.isParenthesizedExpression(parent) || Node.isNonNullExpression(parent)
+        || Node.isAsExpression(parent) || Node.isTypeAssertion(parent) || Node.isSatisfiesExpression(parent))
+        && parent.getExpression() === current) {
+        current = parent;
+        parent = current.getParent();
+        continue;
+      }
+      if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === current) {
+        if (['call', 'apply', 'bind'].includes(parent.getName())) return false;
+        current = parent;
+        parent = current.getParent();
+        continue;
+      }
+      break;
     }
     if (!parent) return false;
     if (Node.isVariableDeclaration(parent) && parent.getNameNode() === current) return true;
     if (Node.isParameterDeclaration(parent) || Node.isImportSpecifier(parent) || Node.isImportClause(parent)) return true;
-    if (Node.isExportSpecifier(parent)) return true;
+    if (Node.isExportSpecifier(parent)) {
+      const declaration = parent.getFirstAncestorByKind(SyntaxKind.ExportDeclaration);
+      const specifier = declaration?.getModuleSpecifierValue();
+      return Boolean(declaration && (!specifier || resolveLocalImport(file, specifier)));
+    }
+    if (Node.isExportAssignment(parent)) return !parent.isExportEquals();
     if (Node.isCallExpression(parent) && parent.getExpression() === current) return true;
     if (Node.isBinaryExpression(parent) && parent.getLeft() === current
       && parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken && Node.isPropertyAccessExpression(current)) {
@@ -702,9 +719,26 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     return false;
   };
   for (const symbol of new Set([...clients, ...complexClients])) {
-    if ((referencesBySymbol.get(symbol) ?? []).some((reference) => !isAllowedClientReference(reference))) {
+    const escapedReference = (referencesBySymbol.get(symbol) ?? []).find((reference) => !isAllowedClientReference(reference));
+    if (escapedReference) {
       escapedClients.add(symbol);
+      const consumer = escapedReference.getFirstAncestor((ancestor) =>
+        (Node.isCallExpression(ancestor) || Node.isNewExpression(ancestor))
+        && ancestor.getArguments().some((argument) => argument === escapedReference
+          || argument.getDescendants().includes(escapedReference)));
+      if (consumer && (Node.isCallExpression(consumer) || Node.isNewExpression(consumer))) {
+        const target = consumer.getExpression().getText();
+        escapeReasons.set(symbol, `The OpenAI client is passed to ${target}; verify that ${target} does not modify it before migrating this call.`);
+      }
     }
+  }
+  for (const access of file.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)) {
+    if (access.getExpression().getKind() !== SyntaxKind.ThisKeyword || !isClassThisBinding(access)) continue;
+    const owner = access.getFirstAncestor((ancestor) => Node.isClassDeclaration(ancestor) || Node.isClassExpression(ancestor));
+    if (!owner || !classFields.get(owner)?.has(access.getName()) || isAllowedClientReference(access)) continue;
+    const fields = escapedClassFields.get(owner) ?? new Set<string>();
+    fields.add(access.getName());
+    escapedClassFields.set(owner, fields);
   }
   for (const symbol of escapeCandidates) if (clients.has(symbol) || complexClients.has(symbol)) escapedClients.add(symbol);
   for (let pass = 0; pass < file.getDescendantsOfKind(SyntaxKind.VariableDeclaration).length; pass++) {
@@ -1174,7 +1208,8 @@ function transformFile(file: SourceFile, result: MigrationResult, exportedClient
     const rootSymbol = root?.getSymbol();
     const methodPath = parts.join('.');
     if (rootSymbol && escapedClients.has(rootSymbol)) {
-      addManual(result, file, call, 'The OpenAI client escapes through a use the migration cannot prove safe; review this affected call manually.');
+      addManual(result, file, call, escapeReasons.get(rootSymbol)
+        ?? 'The OpenAI client escapes through a use the migration cannot prove safe; review this affected call manually.');
       continue;
     }
     const method = parts.join('.');
@@ -1314,7 +1349,10 @@ export const openaiV5: Migration = {
     const referencesBySymbol = new Map<MorphSymbol, Node[]>();
     for (const source of project.getSourceFiles()) {
       for (const identifier of source.getDescendantsOfKind(SyntaxKind.Identifier)) {
-        const symbol = identifier.getSymbol();
+        const shorthand = identifier.getParent();
+        const symbol = Node.isShorthandPropertyAssignment(shorthand) && shorthand.getNameNode() === identifier
+          ? project.getTypeChecker().getShorthandAssignmentValueSymbol(shorthand) ?? identifier.getSymbol()
+          : identifier.getSymbol();
         if (!symbol) continue;
         const references = referencesBySymbol.get(symbol) ?? [];
         references.push(identifier);
