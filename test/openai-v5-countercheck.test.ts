@@ -38,6 +38,20 @@ describe('OpenAI v5 counter-verification', () => {
     });
     expect(result.fileUpdates?.some((item) => item.file === '/consumer.ts')).toBe(false);
     expect(result.manual.some((finding) => finding.file === '/consumer.ts')).toBe(true);
+    const defaultExport = graph({
+      'lib.ts': "import OpenAI from 'openai'; const client = new OpenAI(); export default client; export { client };",
+      'mutation.ts': "import c from './lib'; (c as any).files = fake;",
+      'consumer.ts': "import { client } from './lib'; client.files.del('id');",
+    });
+    expect(defaultExport.fileUpdates?.some((item) => item.file === '/consumer.ts')).toBe(false);
+    expect(defaultExport.manual.some((finding) => finding.file === '/consumer.ts')).toBe(true);
+    const commonJs = graph({
+      'lib.ts': "import OpenAI from 'openai'; const client = new OpenAI(); module.exports = { client };",
+      'mutation.ts': "const { client } = require('./lib'); (client as any).files = fake;",
+      'consumer.ts': "const { client } = require('./lib'); client.files.del('id');",
+    });
+    expect(commonJs.fileUpdates?.some((item) => item.file === '/consumer.ts')).toBe(false);
+    expect(commonJs.manual.some((finding) => finding.file === '/consumer.ts')).toBe(true);
   });
 
   it('3 holds class fields passed, returned, aliased or mutated through Object.assign', () => {
