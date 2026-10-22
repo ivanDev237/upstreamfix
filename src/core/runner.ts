@@ -55,6 +55,7 @@ interface ScopedProject {
   project: Project;
   manual: ManualItem[];
   manifestBySource: Map<string, string>;
+  escapeOnlySources: Set<string>;
 }
 
 function loadScopedProject(root: string, migration: Migration, excludedDirectories: readonly string[] = [], nodeRuntime?: number): ScopedProject {
@@ -75,8 +76,9 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
   const manual: ManualItem[] = [];
   const runtimeBlocked = new Map<string, ManualItem>();
   const manifestBySource = new Map<string, string>();
+  const escapeOnlySources = new Set<string>();
 
-  for (const sourcePath of findSourceFiles(root, migration.packageName, excludedDirectories)) {
+  for (const sourcePath of findSourceFiles(root, migration.packageName, excludedDirectories, escapeOnlySources)) {
     if (statSync(sourcePath).size > MAX_SOURCE_BYTES) {
       manual.push({ file: sourcePath, line: 1, reason: 'Source file exceeds the 2 MiB analysis size limit; review this SDK usage manually.', snippet: '' });
       continue;
@@ -118,6 +120,10 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
       continue;
     }
     if (!declaration) {
+      if (migration.id === 'openai@5' && escapeOnlySources.has(sourcePath)) {
+        project.addSourceFileAtPath(sourcePath);
+        continue;
+      }
       if (migration.packageName === 'stripe' && !hasLikelyStripeSdkUsage(sourcePath)) continue;
       manual.push({
         file: sourcePath,
@@ -158,7 +164,7 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
   }
 
   manual.push(...runtimeBlocked.values());
-  return { project, manual, manifestBySource };
+  return { project, manual, manifestBySource, escapeOnlySources };
 }
 
 function hasLikelyStripeSdkUsage(sourcePath: string): boolean {
@@ -220,8 +226,8 @@ export function lockfileCommandEnvironment(home: string): NodeJS.ProcessEnv {
   };
 }
 
-function findSourceFiles(root: string, packageName: string, excludedDirectories: readonly string[] = []): string[] {
-  if (packageName === 'openai') return findOpenAiSourceFiles(root, excludedDirectories);
+function findSourceFiles(root: string, packageName: string, excludedDirectories: readonly string[] = [], escapeOnlySources = new Set<string>()): string[] {
+  if (packageName === 'openai') return findOpenAiSourceFiles(root, excludedDirectories, escapeOnlySources);
   const found: string[] = [];
   const visit = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -245,7 +251,7 @@ function findSourceFiles(root: string, packageName: string, excludedDirectories:
   return found;
 }
 
-function findOpenAiSourceFiles(root: string, excludedDirectories: readonly string[]): string[] {
+function findOpenAiSourceFiles(root: string, excludedDirectories: readonly string[], escapeOnlySources: Set<string>): string[] {
   const smallFiles = findAllSourceFiles(root, excludedDirectories);
   const contents = new Map(smallFiles.map((file) => [file, readFileSync(file, 'utf8')]));
   const tsconfigs: string[] = [];
@@ -258,18 +264,41 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
     }
   };
   findTsconfigs(root);
-  const pathMappings: Array<{ base: string; paths: Record<string, string[]> }> = [];
+  const pathMappings: Array<{ directory: string; configPath: string; base: string; paths: Record<string, string[]> }> = [];
   for (const configPath of tsconfigs) {
     try {
-      const parsed = ts.parseConfigFileTextToJson(configPath, readFileSync(configPath, 'utf8'));
-      const options = parsed.config?.compilerOptions;
-      if (!options || typeof options !== 'object' || !options.paths || typeof options.paths !== 'object') continue;
-      const base = typeof options.baseUrl === 'string' ? path.resolve(path.dirname(configPath), options.baseUrl) : path.dirname(configPath);
-      pathMappings.push({ base, paths: options.paths as Record<string, string[]> });
+      const config = ts.readConfigFile(configPath, ts.sys.readFile);
+      if (config.error || !config.config) continue;
+      const options = ts.parseJsonConfigFileContent(config.config, ts.sys, path.dirname(configPath), undefined, configPath).options;
+      const base = options.baseUrl ?? (typeof options.pathsBasePath === 'string' ? options.pathsBasePath : path.dirname(configPath));
+      const paths = options.paths ?? {};
+      pathMappings.push({ directory: path.dirname(configPath), configPath, base, paths });
     } catch { /* An unresolved or malformed config cannot safely establish a local source link. */ }
   }
   const retained = new Set<string>();
-  for (const [file, source] of contents) if (/openai/i.test(source)) retained.add(file);
+  const hasDirectSdkSpecifier = (file: string, source: string): boolean => {
+    const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
+      /\.tsx$/.test(file) ? ts.ScriptKind.TSX : /\.jsx$/.test(file) ? ts.ScriptKind.JSX : ts.ScriptKind.TS);
+    let found = false;
+    const isSdk = (value: string): boolean => value === 'openai' || value.startsWith('openai/');
+    const visit = (node: ts.Node): void => {
+      if (found) return;
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
+        && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier) && isSdk(node.moduleSpecifier.text)) found = true;
+      else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)
+        && node.moduleReference.expression && ts.isStringLiteral(node.moduleReference.expression)
+        && isSdk(node.moduleReference.expression.text)) found = true;
+      else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)
+        && ts.isStringLiteral(node.argument.literal) && isSdk(node.argument.literal.text)) found = true;
+      else if (ts.isCallExpression(node) && node.arguments.length > 0 && ts.isStringLiteral(node.arguments[0]!)
+        && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+          || ts.isIdentifier(node.expression) && node.expression.text === 'require') && isSdk(node.arguments[0]!.text)) found = true;
+      else ts.forEachChild(node, visit);
+    };
+    visit(ast);
+    return found;
+  };
+  for (const [file, source] of contents) if (hasDirectSdkSpecifier(file, source)) retained.add(file);
   const largeFiles: string[] = [];
   const visit = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -282,6 +311,7 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
   };
   visit(root);
   for (const file of largeFiles) retained.add(file);
+  const seedRetained = new Set(retained);
 
   const exportedClients = new Map<string, Set<string>>();
   const directExports = (source: string): Set<string> => {
@@ -326,7 +356,10 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
   const resolveLocal = (file: string, specifier: string): string | undefined => {
     const bases = specifier.startsWith('.') ? [path.resolve(path.dirname(file), specifier)] : [];
     if (!specifier.startsWith('.')) {
-      for (const mapping of pathMappings) {
+      const mapping = pathMappings.filter((item) => file.startsWith(`${item.directory}${path.sep}`))
+        .sort((left, right) => right.directory.length - left.directory.length
+          || Number(path.basename(right.configPath) === 'tsconfig.json') - Number(path.basename(left.configPath) === 'tsconfig.json'))[0];
+      if (mapping) {
         for (const [pattern, targets] of Object.entries(mapping.paths)) {
           const wildcard = pattern.indexOf('*');
           const prefix = wildcard < 0 ? pattern : pattern.slice(0, wildcard);
@@ -347,13 +380,6 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
   for (const [file, source] of contents) {
     const names = directExports(source);
     if (names.size > 0) exportedClients.set(file, names);
-  }
-  // A separate module can mutate an exported SDK client without spelling
-  // "openai" or importing the client by name. Include module-object consumers
-  // and derived classes so the migration can inspect cross-file escapes.
-  if (retained.size > 0) for (const [file, source] of contents) {
-    if ((exportedClients.size > 0 && /\b(?:import\s*\*\s*as\s+\w+\s+from\s*|import\s*\(|require\s*\()\s*['"][.#@]/.test(source))
-      || (/\bextends\s+\w+/.test(source) && /\bfrom\s*['"][.#@]/.test(source))) retained.add(file);
   }
   for (const [file, source] of contents) {
     for (const match of source.matchAll(/\bexport\s+(?:type\s+)?(?:\*|\{([^}]+)\})\s*from\s*['"]([^'"]+)['"]/g)) {
@@ -401,6 +427,102 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
       }
     }
   }
+  type LocalLink = { specifier: string; exportedNames: string[]; localBindings: string[]; moduleObject: boolean };
+  const structuralLinks = new Map<string, { links: LocalLink[]; classBases: Set<string>;
+    mutatedNames: Set<string>; mutatedSpecifiers: Set<string> }>();
+  for (const [file, source] of contents) {
+    const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
+      /\.tsx$/.test(file) ? ts.ScriptKind.TSX : /\.jsx$/.test(file) ? ts.ScriptKind.JSX : ts.ScriptKind.TS);
+    const links: LocalLink[] = [];
+    const classBases = new Set<string>();
+    const mutatedNames = new Set<string>();
+    const mutatedSpecifiers = new Set<string>();
+    const collectIdentifiers = (node: ts.Node): void => {
+      if (ts.isIdentifier(node)) classBases.add(node.text);
+      ts.forEachChild(node, collectIdentifiers);
+    };
+    const collectMutationTarget = (node: ts.Node): void => {
+      if (ts.isIdentifier(node)) mutatedNames.add(node.text);
+      if (ts.isCallExpression(node) && node.arguments.length > 0 && ts.isStringLiteral(node.arguments[0]!)
+        && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+          || ts.isIdentifier(node.expression) && node.expression.text === 'require'))
+        mutatedSpecifiers.add(node.arguments[0]!.text);
+      ts.forEachChild(node, collectMutationTarget);
+    };
+    const visit = (node: ts.Node): void => {
+      if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+        const clause = node.importClause;
+        const named = clause?.namedBindings;
+        links.push({ specifier: node.moduleSpecifier.text,
+          exportedNames: named && ts.isNamedImports(named) ? named.elements.map((element) => element.propertyName?.text ?? element.name.text) : [],
+          localBindings: [...(clause?.name ? [clause.name.text] : []),
+            ...(named && ts.isNamedImports(named) ? named.elements.map((element) => element.name.text) : []),
+            ...(named && ts.isNamespaceImport(named) ? [named.name.text] : [])],
+          moduleObject: Boolean(named && ts.isNamespaceImport(named)) });
+      }
+      if (ts.isCallExpression(node) && node.arguments.length > 0 && ts.isStringLiteral(node.arguments[0]!)
+        && (node.expression.kind === ts.SyntaxKind.ImportKeyword || ts.isIdentifier(node.expression) && node.expression.text === 'require')) {
+        const thenAccess = node.parent;
+        const thenCall = thenAccess && ts.isPropertyAccessExpression(thenAccess) && thenAccess.name.text === 'then'
+          && ts.isCallExpression(thenAccess.parent) ? thenAccess.parent : undefined;
+        const callback = thenCall?.arguments[0];
+        const parameter = callback && (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback)) ? callback.parameters[0] : undefined;
+        links.push({ specifier: node.arguments[0]!.text, exportedNames: [],
+          localBindings: parameter && ts.isIdentifier(parameter.name) ? [parameter.name.text] : [], moduleObject: true });
+      }
+      if ((ts.isClassDeclaration(node) || ts.isClassExpression(node)) && node.heritageClauses)
+        for (const clause of node.heritageClauses) if (clause.token === ts.SyntaxKind.ExtendsKeyword)
+          for (const type of clause.types) collectIdentifiers(type.expression);
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken)
+        collectMutationTarget(node.left);
+      if (ts.isCallExpression(node) && ['Object.assign', 'Reflect.set', 'Object.defineProperty', 'Reflect.defineProperty'].includes(node.expression.getText(ast)))
+        if (node.arguments[0]) collectMutationTarget(node.arguments[0]);
+      ts.forEachChild(node, visit);
+    };
+    visit(ast);
+    structuralLinks.set(file, { links, classBases, mutatedNames, mutatedSpecifiers });
+  }
+  const manifests = findPackageManifests(root, excludedDirectories);
+  const manifestOpenAiCache = new Map<string, boolean>();
+  const declaresOpenAi = (file: string): boolean => {
+    const owner = closestManifest(file, manifests);
+    if (!owner) return false;
+    const cached = manifestOpenAiCache.get(owner);
+    if (cached !== undefined) return cached;
+    try {
+      const manifest = parseManifest<PackageManifest>(readFileSync(owner, 'utf8'));
+      const declared = (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+        .some((section) => typeof manifest[section]?.openai === 'string');
+      manifestOpenAiCache.set(owner, declared);
+      return declared;
+    } catch { manifestOpenAiCache.set(owner, false); return false; }
+  };
+  for (let pass = 0; pass < contents.size; pass++) {
+    let added = false;
+    for (const [file, info] of structuralLinks) {
+      if (retained.has(file)) continue;
+      const linked = info.links.some((link) => {
+        const dependency = resolveLocal(file, link.specifier);
+        if (!dependency || !retained.has(dependency)) return false;
+        const exported = exportedClients.get(dependency);
+        const clientLink = exported && (link.moduleObject || link.exportedNames.some((name) => exported.has(name) || exported.has('*')));
+        const classLink = link.localBindings.some((name) => info.classBases.has(name));
+        return Boolean(clientLink || classLink);
+      });
+      // Unresolved module writes are deliberately analyzed only inside a
+      // package that actually declares OpenAI; an unrelated package cannot
+      // taint every client merely by importing an unresolved local module.
+      const uncertainWrite = declaresOpenAi(file) && info.links.some((link) =>
+        link.moduleObject && !resolveLocal(file, link.specifier)
+        && (link.specifier.startsWith('.') || link.specifier.startsWith('#')
+          || link.specifier.startsWith('@/') || link.specifier.startsWith('~/'))
+        && (info.mutatedSpecifiers.has(link.specifier)
+          || link.localBindings.some((name) => info.mutatedNames.has(name))));
+      if (linked || uncertainWrite) { retained.add(file); added = true; }
+    }
+    if (!added) break;
+  }
+  for (const file of retained) if (!seedRetained.has(file) && !declaresOpenAi(file)) escapeOnlySources.add(file);
   return [...retained].sort();
 }
 
@@ -487,6 +609,22 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     project.getSourceFiles().map(async (file): Promise<[string, string]> => [file.getFilePath(), await readFile(file.getFilePath(), 'utf8')]),
   ));
   const result = migration.transform(project);
+  if (scoped.escapeOnlySources.size > 0) {
+    for (const sourcePath of scoped.escapeOnlySources) {
+      const source = project.getSourceFile(sourcePath);
+      if (source && hasAffectedOpenAiV5Call(source)
+        && !result.manual.some((finding) => finding.file === sourcePath && finding.reasonCode === 'openai-affected-call')) result.manual.push({
+        file: sourcePath, line: 1,
+        reason: 'This source uses an OpenAI client exported by another package; review its affected call before upgrading the owner package.',
+        snippet: source.getFullText().slice(0, 500), reasonCode: 'openai-affected-call',
+      });
+    }
+    result.fileUpdates = result.fileUpdates?.filter((update) => !scoped.escapeOnlySources.has(update.file));
+    result.filesChanged = result.filesChanged.filter((file) => !scoped.escapeOnlySources.has(file));
+    result.changes = result.changes.filter((change) => !scoped.escapeOnlySources.has(change.file));
+    result.manual = result.manual.filter((finding) => !scoped.escapeOnlySources.has(finding.file)
+      || finding.reasonCode === 'openai-affected-call');
+  }
   result.manual.unshift(...scoped.manual);
   if (migration.id === 'openai@5' && !migration.declarativeRecipe) {
     result.manual.push(...inspectOpenAiTypeEnvironment(options.cwd, options.excludedDirectories));

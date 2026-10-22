@@ -408,7 +408,10 @@ function globallyEscapedReceivers(project: Project, exportedClients: Map<string,
       Node.isClassDeclaration(node) || Node.isClassExpression(node))
       ?? baseExpression.getSymbol()?.getDeclarations().find((node) =>
         Node.isClassDeclaration(node) || Node.isClassExpression(node));
-    const candidates = declaration ? [declaration] : namedClasses.get(baseExpression.getText()) ?? [];
+    const mixinBase = Node.isCallExpression(baseExpression)
+      ? baseExpression.getArguments().find((argument) => Node.isIdentifier(unwrapTransparentExpression(argument))) : undefined;
+    const baseName = mixinBase ? unwrapTransparentExpression(mixinBase).getText() : baseExpression.getText();
+    const candidates = declaration ? [declaration] : namedClasses.get(baseName) ?? [];
     if (candidates.length === 1) markClassHierarchy(candidates[0]!, field, visited);
     else uncertainFieldNames.add(field);
   };
@@ -420,7 +423,8 @@ function globallyEscapedReceivers(project: Project, exportedClients: Map<string,
     }
     const target = unwrapTransparentExpression(node);
     for (const access of [target, ...target.getDescendantsOfKind(SyntaxKind.PropertyAccessExpression)]) {
-      if (!Node.isPropertyAccessExpression(access) || access.getExpression().getKind() !== SyntaxKind.ThisKeyword) continue;
+      if (!Node.isPropertyAccessExpression(access)
+        || ![SyntaxKind.ThisKeyword, SyntaxKind.SuperKeyword].includes(access.getExpression().getKind())) continue;
       const owner = access.getFirstAncestor((ancestor) => Node.isClassDeclaration(ancestor) || Node.isClassExpression(ancestor));
       if (!owner) continue;
       const symbol = access.getNameNode().getSymbol();
