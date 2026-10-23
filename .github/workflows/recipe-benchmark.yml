@@ -48,7 +48,7 @@ jobs:
           --only ${{ matrix.only }} --memory-mb 4096
           --report "${{ runner.temp }}/${{ matrix.label }}-recipe-report.md" --yes
       - if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0 # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: recipe-report-${{ matrix.label }}
           path: ${{ runner.temp }}/${{ matrix.label }}-recipe-report.md
