@@ -389,6 +389,19 @@ describe('public repository benchmark helpers', () => {
     expect(() => parseBenchmarkArgs(['--memory-mb', '99999'])).toThrow('--memory-mb');
   });
 
+  it('selects an experimental YAML recipe and its pinned real-project corpus', async () => {
+    const recipePath = path.resolve('docs/recipes/apollo-client-v4.yml');
+    const { loadRecipe } = await import('../src/recipes/index.js');
+    const recipe = await loadRecipe(recipePath);
+    const options = parseBenchmarkArgs(['--recipe', recipePath, '--only', 'streaming-platform-frontend-nextjs-apollo', '--estimate-only']);
+    const config = resolveBenchmarkConfig(options, process.cwd(), recipe);
+    expect(config.migration.id).toBe('@apollo/client@4');
+    expect(config.migration.experimental).toBe(true);
+    expect(config.reposPath).toBe(path.resolve('benchmark/apollo-client-4-repos.json'));
+    expect(() => parseBenchmarkArgs(['--recipe', recipePath, '--migration', 'stripe@23'])).toThrow('Choose either');
+    expect(renderBenchmarkReport([], 'complete', 0, recipe)).not.toContain('OpenAI v5');
+  });
+
   it('runs benchmark installs inside a credential-free Docker container without exposing the Git directory', () => {
     const args = buildBenchmarkInstallDockerArgs('/tmp/checkout', '/tmp/checkout/functions', 'npm', ['ci', '--ignore-scripts'], '/tmp/cache/npm', { memoryMb: 1024, tempMb: 128 });
     expect(args.slice(0, 2)).toEqual(['run', '--rm']);

@@ -24,6 +24,7 @@ export interface RecipeDefinition {
   title: string;
   guideUrl: string;
   nodeMajor: number;
+  requiredPackage?: string;
   rules: RecipeRule[];
 }
 
@@ -368,6 +369,9 @@ function sourceTransform(project: Project, recipe: RecipeDefinition): MigrationR
 }
 
 export function createRecipeMigration(recipe: RecipeDefinition): Migration {
+  const missingRequiredPackage = (manifest: PackageManifest): boolean => Boolean(recipe.requiredPackage) &&
+    !(['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+      .some((section) => typeof manifest[section]?.[recipe.requiredPackage!] === 'string');
   return {
     id: recipe.id,
     packageName: recipe.package,
@@ -381,10 +385,18 @@ export function createRecipeMigration(recipe: RecipeDefinition): Migration {
     declarativeRecipe: true,
     requiredNodeMajor: recipe.nodeMajor,
     transform: (project) => sourceTransform(project, recipe),
-    inspectManifest: (manifest) => guaranteesNodeMajor(manifest.engines?.node ?? '', recipe.nodeMajor)
-      ? [] : [`${recipe.package} v${recipe.toMajor} requires Node.js ${recipe.nodeMajor} or later; declare a compatible engines.node range before applying this recipe.`],
+    inspectManifest: (manifest) => [
+      ...(!guaranteesNodeMajor(manifest.engines?.node ?? '', recipe.nodeMajor)
+        ? [`${recipe.package} v${recipe.toMajor} requires Node.js ${recipe.nodeMajor} or later; declare a compatible engines.node range before applying this recipe.`] : []),
+      ...(missingRequiredPackage(manifest)
+        ? [`${recipe.package} v${recipe.toMajor} requires ${recipe.requiredPackage}; declare it in package.json before applying this recipe.`] : []),
+    ],
     updateManifest(manifest: PackageManifest): string[] {
       const notes: string[] = [];
+      if (missingRequiredPackage(manifest)) {
+        notes.push(`${recipe.package} v${recipe.toMajor} requires ${recipe.requiredPackage}; package.json was left unchanged.`);
+        return notes;
+      }
       if (!guaranteesNodeMajor(manifest.engines?.node ?? '', recipe.nodeMajor)) {
         notes.push(`${recipe.package} v${recipe.toMajor} requires Node.js ${recipe.nodeMajor} or later; package.json was left unchanged.`);
         return notes;
