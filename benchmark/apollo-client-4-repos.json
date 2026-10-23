@@ -1,14 +1,12 @@
 [
   {
-    "name": "hecate",
-    "url": "https://github.com/Whispergate/Hecate",
+    "name": "streaming-platform-frontend-nextjs-apollo",
+    "url": "https://github.com/ruslanparkhomchuk/streaming-platform-frontend-nextjs-apollo",
     "branch": "main",
-    "commit": "f299ef8ade700d130e24a9443ea077ad17e1f043",
-    "packageManager": "npm",
+    "commit": "70d3ca6478f65396a4e989e6130dba4c0721455d",
+    "packageManager": "pnpm",
     "reviewed": true,
-    "reviewNote": "Static review at pinned commit: 142-file Vite TypeScript app with @apollo/client ^3.14.0 and package-lock.json. src/App.tsx imports ApolloProvider from the root package, so the recipe has a real target. Run only the pure tsc --noEmit typecheck; do not run the app or build. The project does not declare rxjs or engines.node, so a v4 upgrade must remain manual until those requirements and other API changes are reviewed.",
-    "typecheckScript": "typecheck",
-    "typecheckScriptText": "tsc --noEmit",
+    "reviewNote": "Static review at pinned commit: small Next.js TypeScript app with @apollo/client ^3.14.1 and pnpm-lock.yaml. ApolloProvider is already imported from @apollo/client/react; other root imports and runtime changes need manual review. Run only the inferred tsconfig typecheck, not build/codegen or tests requiring a backend.",
     "typecheckPath": "."
   }
 ]

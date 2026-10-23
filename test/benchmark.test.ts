@@ -393,7 +393,7 @@ describe('public repository benchmark helpers', () => {
     const recipePath = path.resolve('docs/recipes/apollo-client-v4.yml');
     const { loadRecipe } = await import('../src/recipes/index.js');
     const recipe = await loadRecipe(recipePath);
-    const options = parseBenchmarkArgs(['--recipe', recipePath, '--only', 'hecate', '--estimate-only']);
+    const options = parseBenchmarkArgs(['--recipe', recipePath, '--only', 'streaming-platform-frontend-nextjs-apollo', '--estimate-only']);
     const config = resolveBenchmarkConfig(options, process.cwd(), recipe);
     expect(config.migration.id).toBe('@apollo/client@4');
     expect(config.migration.experimental).toBe(true);
