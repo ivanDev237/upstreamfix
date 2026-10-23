@@ -25,7 +25,11 @@ jobs:
           - recipe: docs/recipes/firebase-admin-v14.yml
             repos: benchmark/repos.json
             only: resell-backend
-            label: firebase
+            label: firebase-resell
+          - recipe: docs/recipes/firebase-admin-v14.yml
+            repos: benchmark/repos.json
+            only: riverchat
+            label: firebase-riverchat
           - recipe: docs/recipes/apollo-client-v4.yml
             repos: benchmark/apollo-client-4-repos.json
             only: streaming-platform-frontend-nextjs-apollo
