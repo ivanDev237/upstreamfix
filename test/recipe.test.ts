@@ -15,6 +15,7 @@ import { renderMarkdownReport } from '../src/core/report.js';
 
 const directories: string[] = [];
 const recipePath = path.resolve('docs/recipes/firebase-admin-v14.yml');
+const apolloRecipePath = path.resolve('docs/recipes/apollo-client-v4.yml');
 const execFile = promisify(execFileCallback);
 
 async function fixture(source: string): Promise<string> {
@@ -32,6 +33,29 @@ afterEach(async () => {
 });
 
 describe('declarative recipes', () => {
+  it('moves a standalone ApolloProvider import while keeping the local binding', async () => {
+    const cwd = await fixture("import { ApolloProvider as Provider } from '@apollo/client';\nexport const Wrapper = Provider;\n");
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { '@apollo/client': '^3.14.1', rxjs: '^7.8.0', graphql: '^16.0.0' }, engines: { node: '>=20' } }));
+    const result = await runMigration(await loadRecipe(apolloRecipePath), { cwd, dryRun: true });
+    expect(result.manual).toHaveLength(0);
+    expect(result.proposedFiles.find((file) => file.relativePath === 'server.ts')?.after)
+      .toContain("import { ApolloProvider as Provider } from '@apollo/client/react';");
+  });
+  it('withholds a mixed Apollo root import until all exports can be reviewed', async () => {
+    const cwd = await fixture("import { ApolloProvider, ApolloClient } from '@apollo/client';\nconsole.log(ApolloProvider, ApolloClient);\n");
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { '@apollo/client': '^3.14.1' }, engines: { node: '>=20' } }));
+    const result = await runMigration(await loadRecipe(apolloRecipePath), { cwd, dryRun: true });
+    expect(result.manual.length).toBeGreaterThan(0);
+    expect(result.proposedFiles).toHaveLength(0);
+  });
+  it('refuses an Apollo v4 manifest upgrade when the required rxjs peer is absent', async () => {
+    const cwd = await fixture("import { ApolloProvider } from '@apollo/client';\nexport const Wrapper = ApolloProvider;\n");
+    await writeFile(path.join(cwd, 'package.json'), JSON.stringify({ dependencies: { '@apollo/client': '^3.14.1' }, engines: { node: '>=20' } }));
+    const result = await runMigration(await loadRecipe(apolloRecipePath), { cwd, dryRun: true });
+    expect(result.manual.some((item) => item.reason.includes('dependency version could not be updated'))).toBe(true);
+    expect(result.proposedFiles.some((file) => file.relativePath === 'package.json')).toBe(false);
+    expect(result.manifestNotes.some((note) => note.includes('requires rxjs'))).toBe(true);
+  });
   it.each(["admin.apps = [];", "admin.apps++;"])('W8 reports an SDK namespace-property write: %s', async (statement) => {
     const cwd = await fixture(`import * as admin from 'firebase-admin';\n${statement}\n`);
     const result = await runMigration(await loadRecipe(recipePath), { cwd, dryRun: true });

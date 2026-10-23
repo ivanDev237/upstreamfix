@@ -1,0 +1,12 @@
+[
+  {
+    "name": "streaming-platform-frontend-nextjs-apollo",
+    "url": "https://github.com/ruslanparkhomchuk/streaming-platform-frontend-nextjs-apollo",
+    "branch": "main",
+    "commit": "70d3ca6478f65396a4e989e6130dba4c0721455d",
+    "packageManager": "pnpm",
+    "reviewed": true,
+    "reviewNote": "Static review at pinned commit: small Next.js TypeScript app with @apollo/client ^3.14.1 and pnpm-lock.yaml. ApolloProvider is already imported from @apollo/client/react; other root imports and runtime changes need manual review. Run only the inferred tsconfig typecheck, not build/codegen or tests requiring a backend.",
+    "typecheckPath": "."
+  }
+]

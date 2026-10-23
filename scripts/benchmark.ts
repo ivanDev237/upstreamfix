@@ -16,6 +16,7 @@ import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from '../src/core
 import { guaranteesNodeMajor } from '../src/core/node-range.js';
 import { firebaseAdminV14 } from '../src/migrations/firebase-admin-v14/index.js';
 import { migrations } from '../src/migrations/index.js';
+import { loadRecipe } from '../src/recipes/index.js';
 
 const execFile = promisify(execFileCallback);
 const repoRoot = process.cwd();
@@ -840,7 +841,9 @@ function addsNodeTypes(files: readonly { relativePath: string; before: string; a
 }
 
 async function main(): Promise<void> {
-  const config = resolveBenchmarkConfig(parseBenchmarkArgs(process.argv.slice(2)));
+  const options = parseBenchmarkArgs(process.argv.slice(2));
+  const recipe = options.recipePath ? await loadRecipe(options.recipePath) : undefined;
+  const config = resolveBenchmarkConfig(options, repoRoot, recipe);
   const { migration, reposPath, reportPath: outputPath, only, memoryMb, yes, estimateOnly } = config;
   const corpus = await readBenchmarkRepos(reposPath);
   const repos = only ? corpus.filter((repo) => repo.name === only) : corpus;
@@ -889,6 +892,7 @@ async function main(): Promise<void> {
 
 export interface BenchmarkOptions {
   migrationId: string;
+  recipePath?: string;
   reposPath?: string;
   reportPath?: string;
   only?: string;
@@ -907,10 +911,10 @@ export interface ResolvedBenchmarkConfig {
   estimateOnly?: boolean;
 }
 
-export function resolveBenchmarkConfig(options: BenchmarkOptions, root = repoRoot): ResolvedBenchmarkConfig {
-  const migration = migrations.find((candidate) => candidate.id === options.migrationId);
+export function resolveBenchmarkConfig(options: BenchmarkOptions, root = repoRoot, recipe?: Migration): ResolvedBenchmarkConfig {
+  const migration = recipe ?? migrations.find((candidate) => candidate.id === options.migrationId);
   if (!migration) throw new Error(`Unknown migration "${options.migrationId}". Available: ${migrations.map(({ id }) => id).join(', ')}`);
-  const slug = migration.id.replace(/[^A-Za-z0-9_.-]/g, '-');
+  const slug = migration.id.replace(/[^A-Za-z0-9_.-]/g, '-').replace(/^-+|-+$/g, '');
   return {
     migration,
     only: options.only,
@@ -946,7 +950,7 @@ export function parseBenchmarkArgs(args: string[]): BenchmarkOptions {
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!;
     if (argument === '--help' || argument === '-h') {
-      console.log('Usage: npm run benchmark -- [--migration <id>] [--repos <json-file>] [--report <markdown-file>] [--only <repo-name>] [--memory-mb <512-4096>] [--estimate-only | --yes]');
+      console.log('Usage: npm run benchmark -- [--migration <id> | --recipe <yaml-file>] [--repos <json-file>] [--report <markdown-file>] [--only <repo-name>] [--memory-mb <512-4096>] [--estimate-only | --yes]');
       console.log(`Available migrations: ${migrations.map(({ id }) => id).join(', ')}`);
       console.log('--estimate-only prints the transfer estimate without cloning or downloading. --yes is required to start a benchmark.');
       process.exit(0);
@@ -956,10 +960,11 @@ export function parseBenchmarkArgs(args: string[]): BenchmarkOptions {
       else options.estimateOnly = true;
       continue;
     }
-    if (!['--migration', '--repos', '--report', '--only', '--memory-mb'].includes(argument)) throw new Error(`Unknown benchmark option "${argument}".`);
+    if (!['--migration', '--recipe', '--repos', '--report', '--only', '--memory-mb'].includes(argument)) throw new Error(`Unknown benchmark option "${argument}".`);
     const value = args[index + 1];
     if (!value || value.startsWith('--')) throw new Error(`${argument} requires a value.`);
     if (argument === '--migration') options.migrationId = value;
+    if (argument === '--recipe') options.recipePath = path.resolve(repoRoot, value);
     if (argument === '--repos') options.reposPath = path.resolve(repoRoot, value);
     if (argument === '--report') options.reportPath = path.resolve(repoRoot, value);
     if (argument === '--only') options.only = value;
@@ -971,6 +976,7 @@ export function parseBenchmarkArgs(args: string[]): BenchmarkOptions {
     index += 1;
   }
   if (options.yes && options.estimateOnly) throw new Error('Choose either --yes or --estimate-only.');
+  if (options.recipePath && args.includes('--migration')) throw new Error('Choose either --recipe or --migration.');
   return options;
 }
 
