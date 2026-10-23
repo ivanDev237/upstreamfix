@@ -399,6 +399,7 @@ describe('public repository benchmark helpers', () => {
     expect(config.migration.experimental).toBe(true);
     expect(config.reposPath).toBe(path.resolve('benchmark/apollo-client-4-repos.json'));
     expect(() => parseBenchmarkArgs(['--recipe', recipePath, '--migration', 'stripe@23'])).toThrow('Choose either');
+    expect(renderBenchmarkReport([], 'complete', 0, recipe)).not.toContain('OpenAI v5');
   });
 
   it('runs benchmark installs inside a credential-free Docker container without exposing the Git directory', () => {

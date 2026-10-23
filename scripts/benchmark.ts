@@ -715,8 +715,10 @@ export function renderBenchmarkReport(
     `Automatic migration rate: **${rate}** (${migrated} of ${detected} detected migration items).`,
     `Criterion rate excluding legitimate manual items: **${eligibleRate}** (${migrated} of ${eligible} eligible items; ${legitimateManual} legitimate manual items excluded).`,
     `Rate excluding benchmark-generated compiler regressions as well: **${eligibleWithoutBenchRegressionsRate}** (${migrated} of ${eligibleWithoutBenchRegressions} items; ${benchmarkRegressions} generated regressions excluded separately).`,
-    `Packages requiring explicit \`--node-runtime 20\` confirmation: **${runtimeConfirmations}**.`,
-    `Packages whose engines.node blocks OpenAI v5: **${runtimeBlocks}**.`,
+    ...(migration.id === 'openai@5' ? [
+      `Packages requiring explicit \`--node-runtime 20\` confirmation: **${runtimeConfirmations}**.`,
+      `Packages whose engines.node blocks OpenAI v5: **${runtimeBlocks}**.`,
+    ] : []),
     'The denominator counts migration change groups plus manual findings, including potential edits withheld in files with manual findings and up to five new compiler diagnostics per previously passing project; it does not count individual API callsites. Runtime confirmation is an explicit user decision in the migration flow and is counted separately from migration success.', '',
     '| Repository | Pinned commit | Status | Detected items | Migrated | Manual | Types before | Types after | Tests before | Tests after | Details |',
     '|---|---|---:|---:|---:|---:|---|---|---|---|---|',
