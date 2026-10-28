@@ -14,6 +14,10 @@ export function renderMarkdownReport(
 
   lines.push(`# Migration report: ${migration.title}`);
   lines.push('');
+  if (migration.reportNotices?.length) {
+    for (const notice of migration.reportNotices) lines.push(`> ${escapeMarkdownText(notice).replace(/\r?\n/g, ' ')}`);
+    lines.push('');
+  }
   if (migration.experimental) lines.push('> **Experimental migration:** real-project validation is incomplete. Review every proposed edit and verification failure before using it.\n');
   if (dryRun) lines.push('> Dry run: no file was written.\n');
   lines.push(`- Findings: **${total}**`);
@@ -93,7 +97,7 @@ export function renderMarkdownReport(
   lines.push('');
   if (dryRun) {
     lines.push('1. Review the preview and the official migration guide before applying changes to a repository.');
-    lines.push('2. After review, use --write to verify and commit supported changes on a new Git branch. The command refuses manual findings and failed or missing checks.');
+    lines.push('2. After review, use --write to verify and commit supported changes on a new Git branch. The command refuses manual findings and failed, inconclusive, or missing checks.');
     lines.push('3. Use the official migration guide and handle the items listed under "Needs your attention" manually.');
   } else {
     lines.push('1. Review the applied changes (`git diff`).');

@@ -13,6 +13,8 @@ import { IGNORED_PROJECT_DIRECTORIES, isSupportedSourceMajor } from './project-d
 import { parseManifest } from './manifest.js';
 import { guaranteesNodeMajor } from './node-range.js';
 import { hasAffectedOpenAiV5Call } from '../migrations/openai-v5/index.js';
+import { BREVO_V6_BREAKING_METHODS } from '../migrations/brevo-v6/index.js';
+import { resolveFirebasePeers, type FirebasePeerRegistry } from './firebase-peer-compat.js';
 
 const execFile = promisify(execFileCallback);
 
@@ -58,7 +60,7 @@ interface ScopedProject {
   escapeOnlySources: Set<string>;
 }
 
-function loadScopedProject(root: string, migration: Migration, excludedDirectories: readonly string[] = [], nodeRuntime?: number): ScopedProject {
+function loadScopedProject(root: string, migration: Migration, excludedDirectories: readonly string[] = [], nodeRuntime?: number, sourceMajor?: number): ScopedProject {
   const project = new Project({
     skipAddingFilesFromTsConfig: true,
     compilerOptions: { allowJs: true },
@@ -120,6 +122,10 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
       continue;
     }
     if (!declaration) {
+      if (migration.id === '@getbrevo/brevo@6' && hasBrevoV3Specifier(sourcePath)) {
+        project.addSourceFileAtPath(sourcePath);
+        continue;
+      }
       if (migration.id === 'openai@5' && escapeOnlySources.has(sourcePath)) {
         project.addSourceFileAtPath(sourcePath);
         continue;
@@ -134,14 +140,28 @@ function loadScopedProject(root: string, migration: Migration, excludedDirectori
       });
       continue;
     }
-    if (!isSupportedSourceMajor(declaration.range, migration.fromMajor)) {
+    if (migration.id === '@getbrevo/brevo@6' && isSupportedSourceMajor(declaration.range, 3)
+      && hasBrevoV3Specifier(sourcePath)) {
+      project.addSourceFileAtPath(sourcePath);
+      continue;
+    }
+    const supportedRange = sourceMajor !== undefined
+      ? isSupportedSourceMajor(declaration.range, migration.toMajor)
+      : [migration.fromMajor, ...(migration.additionalFromMajors ?? [])].some((major) => isSupportedSourceMajor(declaration.range, major));
+    if (!supportedRange) {
       manual.push({
         file: sourcePath,
         line: 1,
-        reason: `${migration.packageName} is declared as \`${declaration.range}\` in ${path.relative(root, declaration.file)}; this migration only analyzes major v${migration.fromMajor} ranges.`,
+        reason: `${migration.packageName} is declared as \`${declaration.range}\` in ${path.relative(root, declaration.file)}; this migration only analyzes major v${sourceMajor !== undefined ? migration.toMajor : [migration.fromMajor, ...(migration.additionalFromMajors ?? [])].join('/v')} ranges${sourceMajor !== undefined ? ' on a dependency-bot follow-up' : ''}.`,
         snippet: readFileSync(sourcePath, 'utf8').split(/\r?\n/, 1)[0] ?? '',
         reasonCode: 'manifest-refusal',
       });
+      continue;
+    }
+    if (sourceMajor !== undefined && !guaranteesNodeMajor(declaration.manifest.engines?.node ?? '', 22)) {
+      manual.push({ file: declaration.file, line: 1,
+        reason: 'The robot already updated firebase-admin, but engines.node does not guarantee Node.js 22; review the runtime before applying a source-only follow-up.',
+        snippet: `engines.node: ${declaration.manifest.engines?.node ?? 'not declared'}`, reasonCode: 'runtime-confirmation' });
       continue;
     }
     if (!migration.declarativeRecipe && migration.id === 'openai@5' && !guaranteesNodeMajor(declaration.manifest.engines?.node ?? '', 20)
@@ -181,11 +201,17 @@ function hasLikelyStripeSdkUsage(sourcePath: string): boolean {
     resources.has(access.getName()) && ['stripe', 'this.stripe'].includes(access.getExpression().getText()));
 }
 
+const registryIdentifier = String.raw`[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*`;
+const registryVersion = String.raw`(?:v?\d+\.\d+\.\d+(?:-${registryIdentifier}(?:\+${registryIdentifier})?|\+${registryIdentifier})|v?\d+(?:\.(?:\d+|x|\*)){0,2})`;
+const registryComparator = String.raw`(?:\^|~|>=?|<=?|=)?\s*${registryVersion}`;
+const registryRange = new RegExp(String.raw`^${registryComparator}(?:\s*(?:\|\|\s*${registryComparator}|-\s*${registryVersion}|\s+(?:<|>|<=|>=)\s*${registryVersion}))*$`);
+
 function isRegistryVersionSpec(spec: string): boolean {
-  // A deliberately narrow subset: registry dist-tags or ordinary semver ranges.
+  // A deliberately narrow subset: registry dist-tags or ordinary semver ranges,
+  // including complete versions with prerelease/build identifiers.
   // Anything that can name a path, URL, Git host, workspace, alias, or patch is manual.
   if (/^(?:latest|next|beta|canary|rc)$/i.test(spec)) return true;
-  return /^(?:\^|~|>=?|<=?|=)?\s*v?\d+(?:\.\d+|\.x|\.\*){0,2}(?:\s*(?:\|\||-\s*v?\d+(?:\.\d+|\.x|\.\*){0,2}|\s+(?:<|>|<=|>=)\s*v?\d+(?:\.\d+|\.x|\.\*){0,2}))*$/.test(spec.trim());
+  return registryRange.test(spec.trim());
 }
 
 export function hasUnsafeDependencySpecs(manifest: PackageManifest): boolean {
@@ -228,6 +254,16 @@ export function lockfileCommandEnvironment(home: string): NodeJS.ProcessEnv {
 
 function findSourceFiles(root: string, packageName: string, excludedDirectories: readonly string[] = [], escapeOnlySources = new Set<string>()): string[] {
   if (packageName === 'openai') return findOpenAiSourceFiles(root, excludedDirectories, escapeOnlySources);
+  if (packageName === '@getbrevo/brevo') {
+    const manifests = findPackageManifests(root, excludedDirectories);
+    const declared = brevoEligibleManifests(root, excludedDirectories);
+    return findAllSourceFiles(root, excludedDirectories).filter((file) => {
+      const source = readFileSync(file, 'utf8');
+      return source.includes(packageName) && hasBrevoPackageSpecifier(file)
+        || source.includes('sib-api-v3-sdk') && hasBrevoV3Specifier(file)
+        || declared.has(closestManifest(file, manifests) ?? '') && hasBrevoBreakingCall(file);
+    });
+  }
   const found: string[] = [];
   const visit = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -248,6 +284,98 @@ function findSourceFiles(root: string, packageName: string, excludedDirectories:
     }
   };
   visit(root);
+  return found;
+}
+
+function brevoEligibleManifests(root: string, excludedDirectories: readonly string[]): Set<string> {
+  const eligible = new Set<string>();
+  for (const file of findPackageManifests(root, excludedDirectories)) {
+    try {
+      const manifest = parseManifest<PackageManifest>(readFileSync(file, 'utf8'));
+      const ranges = (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+        .map((section) => manifest[section]?.['@getbrevo/brevo'])
+        .filter((range): range is string => typeof range === 'string');
+      if (ranges.length > 0 && new Set(ranges).size === 1
+        && [4, 5].some((major) => isSupportedSourceMajor(ranges[0]!, major))) eligible.add(file);
+    } catch { /* Invalid manifests are handled by scoped loading. */ }
+  }
+  return eligible;
+}
+
+function hasBrevoBreakingCall(sourcePath: string): boolean {
+  if (statSync(sourcePath).size > MAX_SOURCE_BYTES) return true;
+  const source = readFileSync(sourcePath, 'utf8');
+  if (![...BREVO_V6_BREAKING_METHODS].some((name) => source.includes(name))) return false;
+  const ast = ts.createSourceFile(sourcePath, source, ts.ScriptTarget.Latest, true);
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && BREVO_V6_BREAKING_METHODS.has(node.expression.name.text)) found = true;
+    else ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  return found;
+}
+
+function brevoVersionOnlyManifests(root: string, excludedDirectories: readonly string[]): Set<string> {
+  const eligible = brevoEligibleManifests(root, excludedDirectories);
+  if (eligible.size === 0) return eligible;
+  for (const source of findAllSourceFiles(root, excludedDirectories)) {
+    // An SDK client may cross package boundaries. Without proving the import
+    // graph, a matching call anywhere in the checkout forbids a version-only claim.
+    if (hasBrevoBreakingCall(source)) return new Set<string>();
+  }
+  return eligible;
+}
+
+function hasBrevoPackageSpecifier(sourcePath: string): boolean {
+  const ast = ts.createSourceFile(sourcePath, readFileSync(sourcePath, 'utf8'), ts.ScriptTarget.Latest, true);
+  let found = false;
+  const matches = (specifier: string): boolean => specifier === '@getbrevo/brevo' || specifier.startsWith('@getbrevo/brevo/');
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier
+      && ts.isStringLiteral(node.moduleSpecifier) && matches(node.moduleSpecifier.text)) found = true;
+    else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)
+      && ts.isStringLiteral(node.argument.literal) && matches(node.argument.literal.text)) found = true;
+    else if (ts.isCallExpression(node) && node.arguments[0] && ts.isStringLiteral(node.arguments[0])
+      && matches(node.arguments[0].text)
+      && (node.expression.kind === ts.SyntaxKind.ImportKeyword || ts.isIdentifier(node.expression) && node.expression.text === 'require')) found = true;
+    else ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  return found;
+}
+
+function hasBrevoV3Specifier(sourcePath: string): boolean {
+  const source = readFileSync(sourcePath, 'utf8');
+  const ast = ts.createSourceFile(sourcePath, source, ts.ScriptTarget.Latest, true);
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier
+      && ts.isStringLiteral(node.moduleSpecifier) && (
+        node.moduleSpecifier.text === 'sib-api-v3-sdk'
+        || node.moduleSpecifier.text === '@getbrevo/brevo' && ts.isImportDeclaration(node)
+          && node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)
+          && node.importClause.namedBindings.elements.some((element) =>
+            ['TransactionalEmailsApi', 'SendSmtpEmail', 'ContactsApi', 'CampaignsApi', 'SMTPApi', 'AccountApi', 'WebhooksApi']
+              .includes(element.propertyName?.text ?? element.name.text))
+      )) found = true;
+    else if (ts.isCallExpression(node) && node.arguments[0] && ts.isStringLiteral(node.arguments[0])
+      && node.arguments[0].text === 'sib-api-v3-sdk'
+      && (node.expression.kind === ts.SyntaxKind.ImportKeyword || ts.isIdentifier(node.expression) && node.expression.text === 'require')) found = true;
+    else if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name)
+      && node.initializer && ts.isCallExpression(node.initializer)
+      && ts.isIdentifier(node.initializer.expression) && node.initializer.expression.text === 'require'
+      && node.initializer.arguments[0] && ts.isStringLiteral(node.initializer.arguments[0])
+      && node.initializer.arguments[0].text === '@getbrevo/brevo'
+      && node.name.elements.some((element) => ['TransactionalEmailsApi', 'SendSmtpEmail', 'ContactsApi', 'CampaignsApi', 'SMTPApi', 'AccountApi', 'WebhooksApi']
+        .includes(element.propertyName && ts.isIdentifier(element.propertyName) ? element.propertyName.text : element.name.getText(ast)))) found = true;
+    else ts.forEachChild(node, visit);
+  };
+  visit(ast);
   return found;
 }
 
@@ -527,14 +655,14 @@ function findOpenAiSourceFiles(root: string, excludedDirectories: readonly strin
   return [...retained].sort();
 }
 
-function findAllSourceFiles(root: string, excludedDirectories: readonly string[] = []): string[] {
+function findAllSourceFiles(root: string, excludedDirectories: readonly string[] = [], includeDeclarations = false): string[] {
   const found: string[] = [];
   const visit = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const absolutePath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
         if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name) && !isExcludedDirectory(root, absolutePath, excludedDirectories)) visit(absolutePath);
-      } else if (entry.isFile() && !entry.name.endsWith('.d.ts')
+      } else if (entry.isFile() && (includeDeclarations || !/\.d\.[cm]?ts$/.test(entry.name))
         && SOURCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())
         && statSync(absolutePath).size <= MAX_SOURCE_BYTES) {
         found.push(absolutePath);
@@ -575,6 +703,10 @@ export interface RunOptions {
   analysisOnly?: boolean;
   /** Registry snapshot cutoff shared with independent publication verification. */
   registryBefore?: string;
+  /** Original major on a reviewed dependency-bot PR whose head already declares the target major. */
+  sourceMajor?: number;
+  /** Test seam for npm peer metadata; production uses the public npm registry. */
+  peerRegistry?: FirebasePeerRegistry;
 }
 
 export interface RunOutcome extends MigrationResult {
@@ -604,7 +736,10 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   if (options.nodeRuntime && !((!migration.declarativeRecipe && options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (!migration.declarativeRecipe && options.nodeRuntime === 20 && migration.id === 'openai@5') || options.nodeRuntime === migration.requiredNodeMajor)) {
     throw new Error('--node-runtime 22 applies to firebase-admin@14; --node-runtime 20 applies to openai@5; recipes require their declared nodeMajor.');
   }
-  const scoped = loadScopedProject(options.cwd, migration, options.excludedDirectories, options.nodeRuntime);
+  if (options.sourceMajor !== undefined && (migration.id !== 'firebase-admin@14' || ![12, 13].includes(options.sourceMajor))) {
+    throw new Error('--source-major is supported only for firebase-admin@14 from major 12 or 13.');
+  }
+  const scoped = loadScopedProject(options.cwd, migration, options.excludedDirectories, options.nodeRuntime, options.sourceMajor);
   const project = scoped.project;
   const originalSources = new Map<string, string>(await Promise.all(
     project.getSourceFiles().map(async (file): Promise<[string, string]> => [file.getFilePath(), await readFile(file.getFilePath(), 'utf8')]),
@@ -633,6 +768,27 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   const manifestsWithChangedCode = new Set(
     result.filesChanged.map((sourcePath) => scoped.manifestBySource.get(sourcePath)).filter((file): file is string => Boolean(file)),
   );
+  const peerUpgradesByManifest = new Map<string, Map<string, string>>();
+  const peerNotes: string[] = [];
+  if (migration.id === 'firebase-admin@14' && !migration.declarativeRecipe && result.manual.length === 0) {
+    for (const manifestPath of manifestsWithChangedCode) {
+      const peers = await resolveFirebasePeers(manifestPath, options.peerRegistry, options.cwd);
+      result.manual.push(...peers.manual);
+      if (options.sourceMajor !== undefined && peers.upgrades.size) {
+        result.manual.push({ file: manifestPath, line: 1,
+          reason: 'The dependency-bot PR still declares firebase-functions below the v14-compatible range; update that bot PR to firebase-functions ^7.3.0 before a source-only follow-up.',
+          snippet: 'firebase-functions peer dependency', reasonCode: 'manifest-refusal' });
+      } else {
+        peerNotes.push(...peers.notes);
+        if (peers.upgrades.size) peerUpgradesByManifest.set(manifestPath, peers.upgrades);
+      }
+    }
+  }
+  const unusedSearch = migration.removeUnusedDependency
+    ? findUnusedDependencyManifests(options.cwd, migration, new Set(scoped.manifestBySource.values()), options.excludedDirectories)
+    : { unused: new Set<string>(), manual: [] as ManualItem[] };
+  result.manual.push(...unusedSearch.manual);
+  const unusedDependencyManifests = unusedSearch.unused;
   const nodeTypesRepair = migration.id === 'openai@5' && !migration.declarativeRecipe
     ? await prepareNodeTypesRepair(options, manifestsWithChangedCode)
     : { notes: [], changes: [], manual: [] } satisfies ManifestOutcome;
@@ -659,6 +815,10 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   const compatibilityNotes = migration.inspectManifest
     ? await inspectManifests(migration, options.cwd, options.excludedDirectories)
     : [];
+  if (peerUpgradesByManifest.size > 0) {
+    for (let index = compatibilityNotes.length - 1; index >= 0; index--)
+      if (compatibilityNotes[index]?.startsWith('firebase-functions `')) compatibilityNotes.splice(index, 1);
+  }
   if (options.analysisOnly && options.nodeRuntime === 20 && !migration.declarativeRecipe && migration.id === 'openai@5') {
     for (let index = compatibilityNotes.length - 1; index >= 0; index--) {
       if (compatibilityNotes[index]?.includes('engines.node (not declared)')) compatibilityNotes.splice(index, 1);
@@ -670,17 +830,29 @@ export async function runMigration(migration: Migration, options: RunOptions): P
   const manualManifestPaths = new Set(result.manual.map((finding) => closestManifest(
     path.resolve(options.cwd, finding.file), findPackageManifests(options.cwd, options.excludedDirectories),
   )).filter((file): file is string => Boolean(file)));
+  const brevoVersionOnly = migration.id === '@getbrevo/brevo@6'
+    ? brevoVersionOnlyManifests(options.cwd, options.excludedDirectories ?? []) : new Set<string>();
+  const manifestCandidates = new Set([
+    ...manifestsWithChangedCode, ...unusedDependencyManifests,
+    ...(migration.id === '@getbrevo/brevo@6' ? scoped.manifestBySource.values() : []),
+    ...brevoVersionOnly,
+  ]);
   const manifestsEligibleForManifestChanges = options.analysisOnly
-    ? new Set([...manifestsWithChangedCode].filter((file) => !manualManifestPaths.has(file)))
-    : manifestsWithChangedCode;
-  const baseManifest = (!options.analysisOnly || migration.id === 'openai@5')
-      && (result.manual.length === 0 || options.analysisOnly) && result.changes.length > 0
+    ? new Set([...manifestCandidates].filter((file) => !manualManifestPaths.has(file)))
+    : manifestCandidates;
+  const baseManifest = options.sourceMajor !== undefined
+    ? { notes: ['The dependency bot already updated the manifest and lockfile; this follow-up changes source code only.'], changes: [], manual: [] }
+    : (!options.analysisOnly || migration.id === 'openai@5')
+      && (result.manual.length === 0 || options.analysisOnly) && (result.changes.length > 0 || unusedDependencyManifests.size > 0
+        || migration.id === '@getbrevo/brevo@6' && manifestCandidates.size > 0)
     ? await migrateManifests(
       migration,
       options,
       manifestsEligibleForManifestChanges,
       nodeTypesRepair.nodeTypesManifestPaths?.size ? 20 : undefined,
       nodeTypesRepair.nodeTypesManifestPaths ?? new Set<string>(),
+      unusedDependencyManifests,
+      peerUpgradesByManifest,
     )
     : {
         notes: [options.analysisOnly
@@ -692,7 +864,9 @@ export async function runMigration(migration: Migration, options: RunOptions): P
         manual: [],
       };
   const manifest: ManifestOutcome = {
-    notes: [...nodeTypesRepair.notes, ...baseManifest.notes],
+    notes: [...nodeTypesRepair.notes, ...peerNotes, ...baseManifest.notes,
+      ...baseManifest.changes.filter((change) => brevoVersionOnly.has(change.absolutePath))
+        .map((change) => `${path.relative(options.cwd, change.absolutePath)}: no v6 breaking API is used; a dependency-only upgrade was proposed.`)],
     changes: [
       ...nodeTypesRepair.changes.filter((change) => path.basename(change.absolutePath) !== 'package.json'),
       ...nodeTypesRepair.changes.filter((change) => path.basename(change.absolutePath) === 'package.json'),
@@ -710,9 +884,17 @@ export async function runMigration(migration: Migration, options: RunOptions): P
     }
   }
   const sourceUpdates = new Map((result.fileUpdates ?? []).map((update) => [update.file, update.contents]));
+  const additionalOriginals = new Map(nodeTypesRepair.changes.map((change) => [change.absolutePath, change.before]));
   const proposedFiles: ProposedFileChange[] = [];
   const proposedDiff = result.filesChanged.flatMap((filePath) => {
-    const before = originalSources.get(filePath);
+    let before = originalSources.get(filePath) ?? additionalOriginals.get(filePath);
+    if (before === undefined) {
+      try { lstatSync(filePath); throw new Error(`Migration proposed an existing unanalyzed file: ${filePath}`); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        before = '';
+      }
+    }
     const after = sourceUpdates.get(filePath);
     if (before === undefined || after === undefined) return [];
     const relativePath = projectPath(options.cwd, filePath);
@@ -747,7 +929,14 @@ export async function runMigration(migration: Migration, options: RunOptions): P
       ...result.filesChanged.map((file) => projectPath(options.cwd, file)),
       ...manifest.changes.map((change) => projectPath(options.cwd, change.absolutePath)),
     ])],
-    changes: result.changes.map((c) => ({ ...c, file: projectPath(options.cwd, c.file) })),
+    changes: [
+      ...result.changes.map((c) => ({ ...c, file: projectPath(options.cwd, c.file) })),
+      ...manifest.changes.filter((change) => unusedDependencyManifests.has(change.absolutePath)
+        && path.basename(change.absolutePath) === 'package.json').map((change) => ({
+        file: projectPath(options.cwd, change.absolutePath), line: 1, rule: 'remove-unused-dependency',
+        before: `${migration.packageName} declared but not imported`, after: `${migration.packageName} removed`,
+      })),
+    ],
     manual: [...result.manual, ...manifest.manual].map((m) => ({ ...m, file: projectPath(options.cwd, m.file) })),
     manifestNotes: [...new Set([...compatibilityNotes, ...manifest.notes])],
     proposedDiff,
@@ -1105,6 +1294,8 @@ async function migrateManifests(
   manifestsWithChangedCode: Set<string>,
   nodeTypesMajor?: number,
   nodeTypesManifestPaths: Set<string> = new Set(),
+  unusedDependencyManifests: ReadonlySet<string> = new Set(),
+  peerUpgradesByManifest: ReadonlyMap<string, ReadonlyMap<string, string>> = new Map(),
 ): Promise<ManifestOutcome> {
   if (!migration.updateManifest) return { notes: [], changes: [], manual: [] };
   const notes: string[] = [];
@@ -1162,7 +1353,18 @@ async function migrateManifests(
       }
       if (declared === undefined) manifest.engines = { ...manifest.engines, node: `>=${major}` };
     }
-    const fileNotes = migration.updateManifest(manifest);
+    const unusedDependency = unusedDependencyManifests.has(manifestPath);
+    const fileNotes = migration.updateManifest(manifest, { sourceUsed: !unusedDependency });
+    const sdkOnlyManifest = structuredClone(manifest);
+    const peerUpgrades = peerUpgradesByManifest.get(manifestPath);
+    for (const [name, version] of peerUpgrades ?? []) {
+      for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const) {
+        if (typeof manifest[section]?.[name] === 'string') {
+          fileNotes.push(`\`${section}.${name}\`: \`${manifest[section]![name]}\` → \`${version}\` to accept firebase-admin 14.`);
+          manifest[section]![name] = version;
+        }
+      }
+    }
     const versionChanged = (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
       .some((section) => before[section]?.[migration.packageName] !== manifest[section]?.[migration.packageName]);
     const deferredForRuntime = fileNotes.some((note) => /requires Node\.js \d+ or (?:later|newer)/i.test(note));
@@ -1185,7 +1387,11 @@ async function migrateManifests(
       continue;
     }
 
-    const versionUpdated = preserveManifestFormatting(raw, before, manifest, migration.packageName);
+    let versionUpdated = preserveManifestFormatting(raw, before, sdkOnlyManifest, migration.packageName,
+      migration.targetPackageName, unusedDependency);
+    for (const [name] of peerUpgrades ?? []) {
+      if (versionUpdated) versionUpdated = preserveManifestFormatting(versionUpdated, sdkOnlyManifest, manifest, name);
+    }
     let updated = versionUpdated && options.nodeRuntime !== undefined && before.engines?.node === undefined
       ? addNodeEngineToManifest(versionUpdated, options.nodeRuntime)
       : versionUpdated;
@@ -1602,6 +1808,78 @@ function findPackageManifests(root: string, excludedDirectories: readonly string
   return found;
 }
 
+function findUnusedDependencyManifests(
+  root: string,
+  migration: Migration,
+  manifestsWithImports: ReadonlySet<string>,
+  excludedDirectories: readonly string[] = [],
+): { unused: Set<string>; manual: ManualItem[] } {
+  const unused = new Set<string>();
+  const manual: ManualItem[] = [];
+  const sourcePaths = findAllSourceFiles(root, excludedDirectories);
+  for (const manifestPath of findPackageManifests(root, excludedDirectories)) {
+    if (manifestsWithImports.has(manifestPath) || !isSafeProjectFile(root, manifestPath)) continue;
+    let manifest: PackageManifest;
+    try { manifest = parseManifest<PackageManifest>(readFileSync(manifestPath, 'utf8')); }
+    catch { continue; }
+    const ranges = (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
+      .map((section) => manifest[section]?.[migration.packageName])
+      .filter((range): range is string => typeof range === 'string');
+    if (ranges.length === 0 || new Set(ranges).size !== 1 || !isSupportedSourceMajor(ranges[0]!, migration.fromMajor)) continue;
+    const directory = path.dirname(manifestPath);
+    const indirect = sourcePaths.filter((sourcePath) => sourcePath.startsWith(`${directory}${path.sep}`))
+      .map((sourcePath) => {
+        const contents = readFileSync(sourcePath, 'utf8');
+        if (!contents.includes(migration.packageName)) return undefined;
+        const line = indirectPackageReferenceLine(sourcePath, contents, migration.packageName);
+        return line === undefined ? undefined : { file: sourcePath, line };
+      }).find((item) => item !== undefined);
+    if (indirect) {
+      manual.push({ file: indirect.file, line: indirect.line,
+        reason: `An indirect ${migration.packageName} package reference prevents proving the dependency unused; review this file before removal.`,
+        snippet: '[package reference; values omitted]', reasonCode: 'manifest-refusal' });
+      continue;
+    }
+    unused.add(manifestPath);
+  }
+  return { unused, manual };
+}
+
+function indirectPackageReferenceLine(file: string, contents: string, packageName: string): number | undefined {
+  const ast = ts.createSourceFile(file, contents, ts.ScriptTarget.Latest, true);
+  const literal = (node: ts.Expression): string | undefined => {
+    if (ts.isStringLiteralLike(node)) return node.text;
+    if (ts.isParenthesizedExpression(node)) return literal(node.expression);
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      const left = literal(node.left), right = literal(node.right);
+      return left !== undefined && right !== undefined ? left + right : undefined;
+    }
+    return undefined;
+  };
+  const aliases = new Set<string>();
+  const collect = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+      && literal(node.initializer) === packageName) aliases.add(node.name.text);
+    ts.forEachChild(node, collect);
+  };
+  collect(ast);
+  let line: number | undefined;
+  const inspect = (node: ts.Node): void => {
+    if (line !== undefined) return;
+    if (ts.isCallExpression(node) && node.arguments[0]
+      && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+        || ts.isIdentifier(node.expression) && node.expression.text === 'require')) {
+      const argument = node.arguments[0]!;
+      if (!ts.isStringLiteralLike(argument)
+        && (literal(argument) === packageName || ts.isIdentifier(argument) && aliases.has(argument.text)))
+        line = ast.getLineAndCharacterOfPosition(node.getStart(ast)).line + 1;
+    }
+    ts.forEachChild(node, inspect);
+  };
+  inspect(ast);
+  return line;
+}
+
 function closestManifest(sourcePath: string, manifests: readonly string[]): string | undefined {
   const source = path.resolve(sourcePath);
   return manifests
@@ -1697,12 +1975,19 @@ export function preserveManifestFormatting(
   before: PackageManifest,
   after: PackageManifest,
   packageName: string,
+  targetPackageName?: string,
+  removeWithoutReplacement = false,
 ): string | undefined {
   let updated = raw;
   for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const) {
     const oldValue = before[section]?.[packageName];
     const newValue = after[section]?.[packageName];
-    if (typeof oldValue !== 'string' || typeof newValue !== 'string' || oldValue === newValue) continue;
+    const targetValue = targetPackageName ? after[section]?.[targetPackageName] : undefined;
+    const rename = !removeWithoutReplacement && targetPackageName && targetPackageName !== packageName
+      && typeof oldValue === 'string' && newValue === undefined && typeof targetValue === 'string';
+    const remove = removeWithoutReplacement && typeof oldValue === 'string'
+      && newValue === undefined;
+    if (typeof oldValue !== 'string' || (!rename && !remove && (typeof newValue !== 'string' || oldValue === newValue))) continue;
     const rootStart = updated.charCodeAt(0) === 0xfeff ? 1 : 0;
     const sectionMember = findJsonObjectMember(updated, rootStart, section);
     if (!sectionMember || updated[sectionMember.valueStart] !== '{') return undefined;
@@ -1715,15 +2000,44 @@ export function preserveManifestFormatting(
       return undefined;
     }
     if (decoded !== oldValue) return undefined;
-    updated =
-      updated.slice(0, dependencyMember.valueStart) +
-      JSON.stringify(newValue) +
-      updated.slice(dependencyMember.valueEnd);
+    if (remove) {
+      const commaAfter = skipWhitespace(updated, dependencyMember.valueEnd);
+      let start = dependencyMember.keyStart;
+      let end = dependencyMember.valueEnd;
+      if (updated[commaAfter] === ',') {
+        end = commaAfter + 1;
+        const lineStart = updated.lastIndexOf('\n', start - 1) + 1;
+        const ownsLine = /^[ \t]*$/.test(updated.slice(lineStart, start));
+        const followingNewline = /^[ \t]*\r?\n/.exec(updated.slice(end));
+        if (ownsLine && followingNewline) {
+          start = lineStart;
+          end += followingNewline[0].length;
+        }
+      } else {
+        const precedingComma = updated.lastIndexOf(',', start);
+        if (precedingComma > sectionMember.valueStart) start = precedingComma;
+        else start = sectionMember.valueStart + 1;
+      }
+      updated = updated.slice(0, start) + updated.slice(end);
+    } else if (rename) {
+      if (before[section]?.[targetPackageName] !== undefined || findJsonObjectMember(updated, sectionMember.valueStart, targetPackageName)) return undefined;
+      updated = updated.slice(0, dependencyMember.keyStart) + JSON.stringify(targetPackageName)
+        + updated.slice(dependencyMember.keyEnd, dependencyMember.valueStart) + JSON.stringify(targetValue)
+        + updated.slice(dependencyMember.valueEnd);
+    } else {
+      updated = updated.slice(0, dependencyMember.valueStart) + JSON.stringify(newValue)
+        + updated.slice(dependencyMember.valueEnd);
+    }
   }
+  try {
+    parseManifest<PackageManifest>(updated);
+  } catch { return undefined; }
   return updated;
 }
 
 interface JsonMemberRange {
+  keyStart: number;
+  keyEnd: number;
   valueStart: number;
   valueEnd: number;
 }
@@ -1736,6 +2050,7 @@ function findJsonObjectMember(text: string, objectStart: number, targetKey: stri
     cursor = skipWhitespace(text, cursor);
     if (text[cursor] === '}') return found;
     if (text[cursor] !== '"') return undefined;
+    const keyStart = cursor;
     const keyEnd = jsonStringEnd(text, cursor);
     if (keyEnd < 0) return undefined;
     let key: unknown;
@@ -1751,7 +2066,7 @@ function findJsonObjectMember(text: string, objectStart: number, targetKey: stri
     if (valueEnd < 0) return undefined;
     if (key === targetKey) {
       if (found) return undefined;
-      found = { valueStart, valueEnd };
+      found = { keyStart, keyEnd, valueStart, valueEnd };
     }
     cursor = skipWhitespace(text, valueEnd);
     if (text[cursor] === ',') cursor++;

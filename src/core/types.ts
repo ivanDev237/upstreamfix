@@ -48,6 +48,8 @@ export interface MigrationInfo {
   title: string;
   /** SDK major version this migration starts from. */
   fromMajor: number;
+  /** Additional source majors accepted by a single versioned migration. */
+  additionalFromMajors?: readonly number[];
   /** SDK major version this migration targets. */
   toMajor: number;
   /** ISO date when the upstream target release became available. */
@@ -57,6 +59,8 @@ export interface MigrationInfo {
   rules: string[];
   /** Requires an explicit opt-in because real-project verification remains incomplete. */
   experimental?: boolean;
+  /** Migration-owned report notices, rendered before the findings. */
+  reportNotices?: readonly string[];
   /** Loaded from a data-only recipe, not a catalog migration with special behavior. */
   declarativeRecipe?: boolean;
   /** Minimum Node.js major declared by a validated external recipe. */
@@ -65,9 +69,13 @@ export interface MigrationInfo {
 
 export interface Migration extends MigrationInfo {
   packageName: string;
+  /** Set when the migration replaces the npm package itself. */
+  targetPackageName?: string;
+  /** Allow removal of an unused legacy dependency without installing the target. */
+  removeUnusedDependency?: boolean;
   transform(project: Project): MigrationResult;
   /** Updates package.json in place and returns notes for the report. */
-  updateManifest?(manifest: PackageManifest): string[];
+  updateManifest?(manifest: PackageManifest, context?: { sourceUsed: boolean }): string[];
   /** Reports compatibility risks from installed packages, independently of code migration. */
   inspectManifest?(manifest: PackageManifest): string[];
 }

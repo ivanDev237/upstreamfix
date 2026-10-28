@@ -117,14 +117,16 @@ export function createProgram(): Command {
     .option('--verify', 'verify proposed changes in a temporary project copy')
     .option('--experimental', 'explicitly opt in to an experimental migration')
     .option('--node-runtime <major>', 'confirm Node.js 22 for Firebase Admin v14 or Node.js 20 for OpenAI v5; add engines.node when absent', parseNodeRuntime)
+    .option('--source-major <major>', 'analyze code on a dependency-bot PR whose manifest already declares firebase-admin v14', parsePositiveInteger)
     .option('--verify-timeout <seconds>', 'maximum time per verification command', parsePositiveInteger)
     .option('--allow-yarn-lock-install', 'allow a full Yarn Classic installation to regenerate yarn.lock (estimated 50–400 MB)')
     .option('--report <file>', 'write the Markdown report to this explicit path (relative paths use --cwd)')
-    .action(async (migrationId: string | undefined, options: { cwd: string; recipe?: string; write?: boolean; allowDirty?: boolean; verify?: boolean; experimental?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: number; allowYarnLockInstall?: boolean }) => {
+    .action(async (migrationId: string | undefined, options: { cwd: string; recipe?: string; write?: boolean; allowDirty?: boolean; verify?: boolean; experimental?: boolean; verifyTimeout?: number; report?: string; nodeRuntime?: number; sourceMajor?: number; allowYarnLockInstall?: boolean }) => {
       if (Boolean(migrationId) === Boolean(options.recipe)) throw new Error('Choose exactly one catalog migration identifier or --recipe <file>.');
       const migration = options.recipe ? await loadRecipe(path.resolve(options.recipe)) : migrations.find((candidate) => candidate.id === migrationId)!;
       if (migration.experimental && !options.experimental) throw new Error(`${options.recipe ? 'This recipe' : migration.id} is experimental. Re-run with --experimental after reviewing its limits.`);
       if (options.nodeRuntime && !((!migration.declarativeRecipe && options.nodeRuntime === 22 && migration.id === 'firebase-admin@14') || (!migration.declarativeRecipe && options.nodeRuntime === 20 && migration.id === 'openai@5') || options.nodeRuntime === migration.requiredNodeMajor)) throw new Error('--node-runtime 22 applies to firebase-admin@14; --node-runtime 20 applies to openai@5; recipes require their declared nodeMajor.');
+      if (options.sourceMajor !== undefined && (migration.id !== 'firebase-admin@14' || ![12, 13].includes(options.sourceMajor))) throw new Error('--source-major accepts only 12 or 13 for firebase-admin@14.');
       const cwd = path.resolve(options.cwd);
       if (options.allowYarnLockInstall) console.log('Yarn Classic lockfile regeneration may download about 50–400 MB without a warm cache.');
       if (options.allowDirty && !options.write) throw new Error('--allow-dirty can only be used together with --write.');
@@ -135,13 +137,15 @@ export function createProgram(): Command {
           cwd,
           allowDirty: options.allowDirty,
           nodeRuntime: options.nodeRuntime,
+          sourceMajor: options.sourceMajor,
           allowYarnLockInstall: options.allowYarnLockInstall,
           timeoutMs: (options.verifyTimeout ?? 300) * 1000,
         });
       }
-      const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: options.nodeRuntime, allowYarnLockInstall: options.allowYarnLockInstall });
+      const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: options.nodeRuntime,
+        sourceMajor: options.sourceMajor, allowYarnLockInstall: options.allowYarnLockInstall });
       const verification = writeResult?.verification ?? (options.verify
-        ? await verifyProposedMigration(cwd, outcome.proposedDiff, { packageName: migration.packageName, fileChanges: outcome.proposedFiles, timeoutMs: (options.verifyTimeout ?? 300) * 1000 })
+        ? await verifyProposedMigration(cwd, outcome.proposedDiff, { packageName: migration.targetPackageName ?? migration.packageName, removedPackageName: migration.targetPackageName ? migration.packageName : undefined, fileChanges: outcome.proposedFiles, timeoutMs: (options.verifyTimeout ?? 300) * 1000 })
         : undefined);
       const report = renderMarkdownReport(migration, outcome, !options.write, verification);
 
@@ -155,7 +159,7 @@ export function createProgram(): Command {
 
       if (writeResult) console.log(`Committed on branch ${writeResult.branch}: ${writeResult.commit}`);
 
-      if (verification?.status === 'failed') process.exitCode = 1;
+      if (verification?.status === 'failed' || verification?.status === 'inconclusive') process.exitCode = 1;
 
       if (!options.write) console.log(options.report ? 'Preview only. Only the requested report file was written.' : 'Preview only. No project files were written.');
     });
@@ -200,9 +204,9 @@ export function createProgram(): Command {
           }
           const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: (migration.id === 'firebase-admin@14' && options.nodeRuntime === 22) || (migration.id === 'openai@5' && options.nodeRuntime === 20) ? options.nodeRuntime : undefined, allowYarnLockInstall: options.allowYarnLockInstall });
           const verification = writeResult?.verification ?? (options.verify
-            ? await verifyProposedMigration(cwd, outcome.proposedDiff, { packageName: migration.packageName, fileChanges: outcome.proposedFiles, timeoutMs: (options.verifyTimeout ?? 300) * 1000 })
+            ? await verifyProposedMigration(cwd, outcome.proposedDiff, { packageName: migration.targetPackageName ?? migration.packageName, removedPackageName: migration.targetPackageName ? migration.packageName : undefined, fileChanges: outcome.proposedFiles, timeoutMs: (options.verifyTimeout ?? 300) * 1000 })
             : undefined);
-          if (verification?.status === 'failed') verificationFailed = true;
+          if (verification?.status === 'failed' || verification?.status === 'inconclusive') verificationFailed = true;
           reports.push(renderMarkdownReport(migration, outcome, !options.write, verification));
         }
       }, commits);
