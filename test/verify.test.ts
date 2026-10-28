@@ -1,5 +1,5 @@
 import { execFile as execFileCallback, spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat, writeFile, mkdir, symlink } from 'node:fs/promises';
+import { mkdtemp, open, readFile, rm, stat, writeFile, mkdir, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -59,6 +59,196 @@ afterEach(async () => {
 });
 
 describe('migration verification', () => {
+  const diagnostic = (line: number, code = 'TS2304', message = "Cannot find name 'PrismaClient'.") =>
+    `server.ts(${line},7): error ${code}: ${message}\n`;
+  const failing = (output: string) => Promise.reject(Object.assign(new Error('exit 2'), { stdout: output }));
+
+  async function baselineProject(
+    migratedOutput: string | undefined,
+    originalOutput: string | undefined,
+    options: { testsFail?: boolean } = {},
+  ) {
+    const cwd = await makeProject({ typecheck: 'tsc --noEmit', build: 'tsc', test: 'vitest run' });
+    await writeFile(path.join(cwd, 'server.ts'), 'const before = true;\n');
+    await execFile('git', ['add', 'server.ts'], { cwd });
+    const fileChange = { relativePath: 'server.ts', before: 'const before = true;\n', after: 'const migrated = true;\n' };
+    const calls: Array<{ phase: 'migrated' | 'baseline'; name: string; env: NodeJS.ProcessEnv; args: string[] }> = [];
+    const result = await verifyProposedMigration(cwd, [diff], {
+      fileChanges: [fileChange],
+      execute: async (command, args, directory, env, _timeout, allowInstallNetwork) => {
+        const phase = (await readFile(path.join(directory, 'server.ts'), 'utf8')).includes('migrated') ? 'migrated' : 'baseline';
+        const name = args.includes('typecheck') ? 'typecheck' : args.includes('build') ? 'build'
+          : args.includes('test') ? 'test' : 'install';
+        calls.push({ phase, name, env, args });
+        if (name === 'install') {
+          expect(allowInstallNetwork).toBe(true);
+          expect(args).toContain('--ignore-scripts');
+          expect(env.NPM_CONFIG_IGNORE_SCRIPTS).toBe('true');
+          expect(env.UPSTREAMFIX_TEST_TOKEN).toBeUndefined();
+          return { stdout: 'installed' };
+        }
+        if (name === 'test' && options.testsFail) return failing('1 test failed');
+        if (name === 'typecheck' || name === 'build') {
+          const output = phase === 'migrated' ? migratedOutput : originalOutput;
+          if (output !== undefined) return failing(output);
+        }
+        return { stdout: 'ok' };
+      },
+    });
+    return { result, calls };
+  }
+
+  it('accepts identical pre-existing TypeScript errors and reports their count', async () => {
+    const { result, calls } = await baselineProject(diagnostic(1), diagnostic(1));
+    expect(result.status).toBe('passed');
+    expect(result.note).toMatch(/pre-existing TypeScript failures unchanged/i);
+    expect(result.checks.find((check) => check.name === 'Typecheck (.)')?.output)
+      .toMatch(/1 pre-existing error.*0 introduced/i);
+    expect(result.checks.find((check) => check.name === 'Build (.)')?.status).toBe('passed');
+    expect(calls.filter((call) => call.phase === 'baseline').map((call) => call.name)).toEqual(['install', 'typecheck', 'build']);
+  });
+
+  it('never installs a removed package in the baseline copy', async () => {
+    const cwd = await makeProject({ typecheck: 'tsc --noEmit' });
+    const before = `${JSON.stringify({ name: 'fixture', dependencies: { express: '^4.21.0', 'legacy-sdk': '^1.0.3' }, scripts: { typecheck: 'tsc --noEmit' } }, null, 2)}\n`;
+    const after = `${JSON.stringify({ name: 'fixture', dependencies: { express: '^4.21.0' }, scripts: { typecheck: 'tsc --noEmit' } }, null, 2)}\n`;
+    await writeFile(path.join(cwd, 'package.json'), before);
+    await execFile('git', ['add', 'package.json'], { cwd });
+    const installs: Array<{ phase: string; dependencies: Record<string, string> }> = [];
+    const result = await verifyProposedMigration(cwd, [], {
+      packageName: '@acme/official-sdk',
+      removedPackageName: 'legacy-sdk',
+      fileChanges: [{ relativePath: 'package.json', before, after }],
+      execute: async (_command, args, directory) => {
+        if (!args.includes('typecheck') && !args.includes('--noEmit')) {
+          const manifest = JSON.parse(await readFile(path.join(directory, 'package.json'), 'utf8')) as { dependencies: Record<string, string> };
+          installs.push({ phase: directory.includes(`${path.sep}baseline`) ? 'baseline' : 'migrated', dependencies: manifest.dependencies });
+          return { stdout: 'installed' };
+        }
+        return failing(diagnostic(1));
+      },
+    });
+    expect(installs.map((install) => install.phase)).toEqual(['migrated', 'baseline']);
+    for (const install of installs) expect(install.dependencies).not.toHaveProperty('legacy-sdk');
+    expect(result.status).toBe('passed');
+  });
+
+  it('rejects a newly introduced TypeScript error and lists its diagnostic', async () => {
+    const { result } = await baselineProject(diagnostic(1) + diagnostic(2, 'TS2322', "Type 'string' is not assignable to type 'number'."), diagnostic(1));
+    expect(result.status).toBe('failed');
+    expect(result.checks.find((check) => check.name === 'Typecheck (.)')?.output).toContain('TS2322');
+  });
+
+  it('rejects a TypeScript failure when the original check passed', async () => {
+    const { result } = await baselineProject(diagnostic(2, 'TS2322', "Type 'string' is not assignable to type 'number'."), undefined);
+    expect(result.status).toBe('failed');
+    expect(result.checks.find((check) => check.name === 'Typecheck (.)')?.output).toContain('TS2322');
+  });
+
+  it('ignores line shifts in changed source files', async () => {
+    const { result } = await baselineProject(diagnostic(9), diagnostic(1));
+    expect(result.status).toBe('passed');
+  });
+
+  it('marks non-TypeScript failures before and after as inconclusive', async () => {
+    const { result } = await baselineProject('compiler crashed', 'compiler crashed');
+    expect(result.status).toBe('inconclusive');
+    expect(result.checks.find((check) => check.name === 'Build (.)')?.output)
+      .toContain('fails before and after the migration (not TypeScript diagnostics; often missing environment variables)');
+  });
+
+  it.each([
+    'echo "Error: no test specified" && exit 1',
+    'echo \\"Error: no test specified\\" && exit 1',
+    'echo   Error: no test specified   &&   exit   1',
+  ])('skips the npm init placeholder test script: %s', async (testScript) => {
+    const cwd = await makeProject({ test: testScript });
+    let ranTest = false;
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args) => {
+        if (args.includes('test')) ranTest = true;
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('passed');
+    expect(result.checks.find((check) => check.name === 'Smoke check (syntax and imports)')?.status).toBe('passed');
+    expect(result.checks.find((check) => check.name === 'Tests (.)')).toMatchObject({ status: 'skipped', command: 'not configured' });
+    expect(ranTest).toBe(false);
+  });
+
+  it('still executes a real failing test script', async () => {
+    const cwd = await makeProject({ test: 'echo "Error: no test specified" && exit 2' });
+    let runs = 0;
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args) => {
+        if (args.includes('test')) {
+          runs++;
+          return failing('real test failure');
+        }
+        return { stdout: 'ok' };
+      },
+    });
+    expect(runs).toBe(2);
+    expect(result.checks.find((check) => check.name === 'Tests (.)')?.status).toBe('inconclusive');
+  });
+
+  it('marks a non-TypeScript build failing before and after as inconclusive', async () => {
+    const cwd = await makeProject({ build: 'next build' });
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args) => args.includes('build')
+        ? failing('Please define the MONGODB_URI environment variable') : { stdout: 'ok' },
+    });
+    expect(result.status).toBe('inconclusive');
+    expect(result.checks.find((check) => check.name === 'Build (.)')).toMatchObject({
+      status: 'inconclusive', output: expect.stringContaining('fails before and after the migration (not TypeScript diagnostics; often missing environment variables)'),
+    });
+  });
+
+  it('marks a non-TypeScript typecheck failing before and after as inconclusive', async () => {
+    const cwd = await makeProject({ typecheck: 'node check.js' });
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args) => args.includes('typecheck')
+        ? failing('Missing required configuration') : { stdout: 'ok' },
+    });
+    expect(result.status).toBe('inconclusive');
+    expect(result.checks.find((check) => check.name === 'Typecheck (.)')?.output)
+      .toContain('fails before and after the migration (not TypeScript diagnostics; often missing environment variables)');
+  });
+
+  it('marks a custom check failing before and after as inconclusive', async () => {
+    const cwd = await makeProject();
+    const result = await verifyProposedMigration(cwd, [diff], {
+      customCommands: ['node check.js'],
+      execute: async (command) => command === '/bin/sh'
+        ? failing('Missing required configuration') : { stdout: 'ok' },
+    });
+    expect(result.status).toBe('inconclusive');
+    expect(result.checks.find((check) => check.name === 'Custom check 1')?.output)
+      .toContain('fails before and after the migration (not TypeScript diagnostics; often missing environment variables)');
+  });
+
+  it('fails a non-TypeScript build that passed before migration', async () => {
+    const cwd = await makeProject({ build: 'next build' });
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args, directory) => args.includes('build')
+        && (await readFile(path.join(directory, 'server.js'), 'utf8')).includes('migrated')
+        ? failing('Please define the MONGODB_URI environment variable') : { stdout: 'ok' },
+    });
+    expect(result.status).toBe('failed');
+    expect(result.checks.find((check) => check.name === 'Build (.)')?.status).toBe('failed');
+  });
+
+  it('marks tests failing in both copies inconclusive', async () => {
+    const { result } = await baselineProject(undefined, undefined, { testsFail: true });
+    expect(result.status).toBe('inconclusive');
+    expect(result.checks.find((check) => check.name === 'Tests (.)')?.status).toBe('inconclusive');
+  });
+
+  it('does not create or execute an original copy when migrated checks pass', async () => {
+    const { result, calls } = await baselineProject(undefined, undefined);
+    expect(result.status).toBe('passed');
+    expect(calls.some((call) => call.phase === 'baseline')).toBe(false);
+  });
   it('W3 excludes pnpm workspace code hooks and disables pnpmfile loading during installation', async () => {
     const cwd = await makeProject({ test: 'node -e "process.exit(0)"' }, 'pnpm@10.0.0');
     await writeFile(path.join(cwd, 'pnpm-workspace.yaml'), 'packages:\n  - .\npnpmfile: ./evil.cjs\nconfigDependencies:\n  evil: ./evil.cjs\n');
@@ -410,7 +600,7 @@ describe('migration verification', () => {
       },
     });
 
-    expect(result.status).toBe('failed');
+    expect(result.status).toBe('inconclusive');
     expect(result.checks.find((check) => check.name.startsWith('Typecheck'))?.output).toContain('TS2322');
     expect(result.checks.find((check) => check.name.startsWith('Tests'))?.output).toContain('1 failed');
   });
@@ -447,14 +637,195 @@ describe('migration verification', () => {
     expect(result.checks.find((check) => check.name.startsWith('Tests'))?.status).toBe('passed');
   });
 
-  it('reports projects without typecheck or test commands as skipped', async () => {
+  it('runs a JavaScript smoke check when no stronger check is configured', async () => {
     const cwd = await makeProject({});
+    const commands: string[][] = [];
     const result = await verifyProposedMigration(cwd, [diff], {
-      execute: async () => ({ stdout: 'installed' }),
+      execute: async (_command, args) => { commands.push(args); return { stdout: 'installed' }; },
     });
 
-    expect(result.status).toBe('skipped');
+    expect(result.status).toBe('passed');
+    expect(result.note).toContain('only a smoke check was available: no typecheck, build or tests are configured');
+    expect(result.checks.find((check) => check.name === 'Smoke check (syntax and imports)')?.status).toBe('passed');
+    expect(commands.some((args) => args.includes('--check'))).toBe(true);
     expect(result.checks.filter((check) => check.status === 'skipped')).toHaveLength(2);
+  });
+
+  it('does not accept a major firebase-functions companion upgrade on a smoke check alone', async () => {
+    const cwd = await makeProject({});
+    const before = await readFile(path.join(cwd, 'package.json'), 'utf8');
+    const after = before.replace('"firebase-admin":"^14.0.0"', '"firebase-admin":"^14.0.0","firebase-functions":"^7.3.0"');
+    const oldManifest = before.replace('"firebase-admin":"^14.0.0"', '"firebase-admin":"^13.0.0","firebase-functions":"^6.0.0"');
+    await writeFile(path.join(cwd, 'package.json'), oldManifest);
+    const result = await verifyProposedMigration(cwd, [], { fileChanges: [
+      { relativePath: 'package.json', before: oldManifest, after },
+      { relativePath: 'server.js', before: 'const original = true;\n', after: 'const migrated = true;\n' },
+    ], execute: async () => ({ stdout: 'ok' }) });
+    expect(result.status).toBe('inconclusive');
+    expect(result.checks.find((check) => check.name === 'Firebase Functions compatibility')?.output).toContain('syntax-only smoke check is insufficient');
+  });
+
+  it('copies and reports an unchanged file above 20 MiB', async () => {
+    const cwd = await makeProject({ typecheck: 'tsc --noEmit' });
+    const asset = path.join(cwd, 'namma-craft.apk');
+    const handle = await open(asset, 'w');
+    try { await handle.truncate(20 * 1024 * 1024 + 1); } finally { await handle.close(); }
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, _args, directory) => {
+        if (directory.includes(`${path.sep}project`)) await expect(stat(path.join(directory, 'namma-craft.apk'))).resolves.toMatchObject({ size: 20 * 1024 * 1024 + 1 });
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.status).toBe('passed');
+    expect(result.checks.find((check) => check.name === 'Copied large files')?.output).toContain('namma-craft.apk');
+  });
+
+  it('copies an unchanged large data file outside assets up to the 500 MiB total budget', async () => {
+    const cwd = await makeProject();
+    await mkdir(path.join(cwd, 'db-commands'), { recursive: true });
+    const data = path.join(cwd, 'db-commands', 'botv2.json');
+    const handle = await open(data, 'w');
+    try { await handle.truncate(21 * 1024 * 1024); } finally { await handle.close(); }
+    const copied = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-data-copy-'));
+    temporaryDirectories.push(copied);
+    const largeCopied: string[] = [];
+    await copyProject(cwd, copied, '--verify', [], largeCopied);
+    expect(largeCopied).toEqual(['db-commands/botv2.json']);
+    expect((await stat(path.join(copied, 'db-commands', 'botv2.json'))).size).toBe(21 * 1024 * 1024);
+  });
+
+  it('refuses an unchanged large file when it exceeds the 500 MiB total budget', async () => {
+    const cwd = await makeProject();
+    const handle = await open(path.join(cwd, 'data.json'), 'w');
+    try { await handle.truncate(501 * 1024 * 1024); } finally { await handle.close(); }
+    const copied = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-overbudget-copy-'));
+    temporaryDirectories.push(copied);
+    await expect(copyProject(cwd, copied)).rejects.toThrow('500 MiB');
+  });
+
+  it('excludes a large asset directory when total size exceeds 100 MiB', async () => {
+    const cwd = await makeProject();
+    await mkdir(path.join(cwd, 'public', 'art'), { recursive: true });
+    for (let index = 0; index < 12; index++) {
+      const handle = await open(path.join(cwd, 'public', 'art', `image-${index}.png`), 'w');
+      try { await handle.truncate(10 * 1024 * 1024); } finally { await handle.close(); }
+    }
+    const copied = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-asset-copy-'));
+    temporaryDirectories.push(copied);
+    const excluded = await copyProject(cwd, copied);
+    expect(excluded).toHaveLength(12);
+    expect(excluded[0]).toContain('public/art/image-');
+    await expect(stat(path.join(copied, 'server.js'))).resolves.toBeDefined();
+    await expect(stat(path.join(copied, 'public', 'art', 'image-0.png'))).rejects.toThrow();
+  });
+
+  it('still refuses a project with more than 100 MiB of source code', async () => {
+    const cwd = await makeProject();
+    await mkdir(path.join(cwd, 'src'), { recursive: true });
+    for (let index = 0; index < 6; index++) {
+      const handle = await open(path.join(cwd, 'src', `large-${index}.ts`), 'w');
+      try { await handle.truncate(18 * 1024 * 1024); } finally { await handle.close(); }
+    }
+    const copied = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-source-copy-'));
+    temporaryDirectories.push(copied);
+    await expect(copyProject(cwd, copied)).rejects.toThrow('project copy larger than 100 MiB');
+  });
+
+  it.each(['namma-craft.apk', 'package.json', 'package-lock.json', 'src/main.js'])
+  ('refuses an oversized protected file: %s', async (name) => {
+    const cwd = await makeProject();
+    await mkdir(path.dirname(path.join(cwd, name)), { recursive: true });
+    const handle = await open(path.join(cwd, name), 'w');
+    try { await handle.truncate(20 * 1024 * 1024 + 1); } finally { await handle.close(); }
+    const copied = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-large-copy-'));
+    temporaryDirectories.push(copied);
+    await expect(copyProject(cwd, copied, '--verify',
+      ['namma-craft.apk', 'src/main.js'].includes(name) ? [name] : [])).rejects.toThrow('refused a file larger than 20 MiB');
+  });
+
+  it('skips a tsconfig typecheck when TypeScript is not installed', async () => {
+    const cwd = await makeProject({});
+    await writeFile(path.join(cwd, 'tsconfig.json'), '{}\n');
+    const commands: string[][] = [];
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (_command, args) => { commands.push(args); return { stdout: 'ok' }; },
+    });
+    expect(result.checks.find((check) => check.name === 'Typecheck (.)')).toMatchObject({
+      status: 'skipped', output: 'TypeScript is not installed in this project',
+    });
+    expect(commands.some((args) => args.includes('--noEmit'))).toBe(false);
+  });
+
+  it('uses a TypeScript compiler installed as an in-copy npm bin symlink', async () => {
+    const cwd = await makeProject({});
+    await writeFile(path.join(cwd, 'tsconfig.json'), '{}\n');
+    const commands: string[] = [];
+    const result = await verifyProposedMigration(cwd, [diff], {
+      execute: async (command, args, directory) => {
+        if (args[0] === 'install') {
+          const binary = path.join(directory, 'node_modules', 'typescript', 'bin', 'tsc');
+          await mkdir(path.dirname(binary), { recursive: true });
+          await mkdir(path.join(directory, 'node_modules', '.bin'), { recursive: true });
+          await writeFile(binary, '#!/usr/bin/env node\n');
+          await symlink('../typescript/bin/tsc', path.join(directory, 'node_modules', '.bin', 'tsc'));
+        } else commands.push(command);
+        return { stdout: 'ok' };
+      },
+    });
+    expect(result.checks.find((check) => check.name === 'Typecheck (.)')?.status).toBe('passed');
+    expect(commands.some((command) => command.endsWith('/node_modules/.bin/tsc'))).toBe(true);
+  });
+
+  it('keeps a TypeScript-only edit skipped when no typecheck is available', async () => {
+    const cwd = await makeProject({});
+    await writeFile(path.join(cwd, 'server.ts'), 'const before = true;\n');
+    const result = await verifyProposedMigration(cwd, [], {
+      fileChanges: [{ relativePath: 'server.ts', before: 'const before = true;\n', after: 'const after = true;\n' }],
+      execute: async () => ({ stdout: 'ok' }),
+    });
+    expect(result.status).toBe('skipped');
+    expect(result.checks.some((check) => check.name === 'Smoke check (syntax and imports)')).toBe(false);
+  });
+
+  it('fails the smoke check for invalid JavaScript syntax', async () => {
+    const cwd = await makeProject({});
+    const result = await verifyProposedMigration(cwd, [], {
+      fileChanges: [{ relativePath: 'server.js', before: 'const original = true;\n', after: 'const broken = ;\n' }],
+      execute: async (command, args, directory) => args[0] === '--check'
+        ? execFile(command, args, { cwd: directory }) : { stdout: 'installed' },
+    });
+    expect(result.status).toBe('failed');
+    expect(result.checks.find((check) => check.name === 'Smoke check (syntax and imports)')?.status).toBe('failed');
+  });
+
+  it('resolves migrated package imports and requires from each changed file', async () => {
+    const cwd = await makeProject({});
+    await writeFile(path.join(cwd, 'worker.cjs'), 'const original = true;\n');
+    const changes = [
+      { relativePath: 'server.js', before: 'const original = true;\n', after: "import { initializeApp } from 'firebase-admin/app';\n" },
+      { relativePath: 'worker.cjs', before: 'const original = true;\n', after: "require('firebase-admin/firestore');\n" },
+    ];
+    const verify = async (includeFirestore: boolean) => verifyProposedMigration(cwd, [], {
+      fileChanges: changes,
+      execute: async (command, args, directory) => {
+        if (args[0] === 'install') {
+          const packageDir = path.join(directory, 'node_modules', 'firebase-admin');
+          await mkdir(packageDir, { recursive: true });
+          await writeFile(path.join(packageDir, 'package.json'), JSON.stringify({
+            name: 'firebase-admin', exports: { './app': './app.js', ...(includeFirestore ? { './firestore': './firestore.js' } : {}) },
+          }));
+          await writeFile(path.join(packageDir, 'app.js'), 'module.exports = {};\n');
+          if (includeFirestore) await writeFile(path.join(packageDir, 'firestore.js'), 'module.exports = {};\n');
+          return { stdout: 'installed' };
+        }
+        return args[0] === '--check' ? execFile(command, args, { cwd: directory }) : { stdout: 'ok' };
+      },
+    });
+    expect((await verify(true)).status).toBe('passed');
+    const unresolved = await verify(false);
+    expect(unresolved.status).toBe('failed');
+    expect(unresolved.checks.find((check) => check.name === 'Smoke check (syntax and imports)')?.output)
+      .toContain('firebase-admin/firestore');
   });
 
   it('rejects patch paths that escape the copy on POSIX or Windows', async () => {
@@ -498,8 +869,8 @@ describe('migration verification', () => {
       execute: async (_command, args) => args[0] === 'install' ? { stdout: 'dependency install mocked for offline test' } : undefined,
     });
 
-    expect(result.status).toBe('failed');
-    expect(result.checks.find((check) => check.name.startsWith('Tests'))?.status).toBe('failed');
+    expect(result.status).toBe('inconclusive');
+    expect(result.checks.find((check) => check.name.startsWith('Tests'))?.status).toBe('inconclusive');
   });
 
   it('uses pnpm to run scripts when the project declares pnpm', async () => {

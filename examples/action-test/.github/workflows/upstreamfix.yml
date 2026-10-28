@@ -3,7 +3,7 @@ name: UpstreamFix API migrations
 on:
   workflow_dispatch:
   repository_dispatch:
-    types: [upstreamfix.migrate]
+    types: [upstreamfix.migrate, bot-pr-followup]
   schedule:
     - cron: '17 5 * * 1'
 

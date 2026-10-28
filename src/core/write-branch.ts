@@ -15,6 +15,9 @@ export interface WriteBranchOptions {
   cwd: string;
   allowDirty?: boolean;
   nodeRuntime?: number;
+  sourceMajor?: number;
+  /** Reserved for the dependency-bot follow-up workflow. */
+  followupPullNumber?: number;
   registryBefore?: string;
   allowYarnLockInstall?: boolean;
   timeoutMs?: number;
@@ -58,7 +61,12 @@ export async function writeMigrationOnBranch(
   }
 
   const safeId = migration.id.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
-  const branch = `upstreamfix/${safeId}`;
+  if (options.followupPullNumber !== undefined && (migration.id !== 'firebase-admin@14'
+    || !Number.isSafeInteger(options.followupPullNumber) || options.followupPullNumber < 1 || options.sourceMajor === undefined)) {
+    throw new Error('Invalid dependency-bot follow-up branch request.');
+  }
+  const branch = options.followupPullNumber === undefined ? `upstreamfix/${safeId}`
+    : `upstreamfix/firebase-admin-14-followup-${options.followupPullNumber}`;
   if ((await git(repositoryRoot, ['branch', '--list', '--format=%(refname:short)', branch])).trim()) {
     throw new Error(`Branch ${branch} already exists; remove or rename it before retrying.`);
   }
@@ -79,7 +87,9 @@ export async function writeMigrationOnBranch(
     await git(repositoryRoot, ['worktree', 'add', '--detach', worktree, head]);
     worktreeAdded = true;
     const projectCopy = projectRelative ? path.join(worktree, projectRelative) : worktree;
-    const outcome = await runMigration(migration, { cwd: projectCopy, dryRun: true, nodeRuntime: options.nodeRuntime, allowYarnLockInstall: options.allowYarnLockInstall, excludedDirectories: options.excludedDirectories, registryBefore: options.registryBefore });
+    const outcome = await runMigration(migration, { cwd: projectCopy, dryRun: true, nodeRuntime: options.nodeRuntime,
+      sourceMajor: options.sourceMajor, allowYarnLockInstall: options.allowYarnLockInstall,
+      excludedDirectories: options.excludedDirectories, registryBefore: options.registryBefore });
     if (outcome.manual.length > 0) {
       throw new Error(`Migration has ${outcome.manual.length} manual review item(s); no branch or commit was created.`);
     }
@@ -87,7 +97,8 @@ export async function writeMigrationOnBranch(
     await assertChangedSourcesUseTargetSdk(projectCopy, migration, outcome);
 
     const verification = await verifyProposedMigration(projectCopy, outcome.proposedDiff, {
-      packageName: migration.packageName,
+      packageName: migration.targetPackageName ?? migration.packageName,
+      removedPackageName: migration.targetPackageName ? migration.packageName : undefined,
       fileChanges: outcome.proposedFiles,
       timeoutMs: options.timeoutMs,
       ...options.verificationOptions,
@@ -96,8 +107,8 @@ export async function writeMigrationOnBranch(
     if (requiresNodeTypesTypecheck(outcome.proposedFiles)
       && !verification.checks.some((check) => check.name.startsWith('Typecheck (') && check.status === 'passed')) {
       const typecheck = verification.checks.find((check) => check.name.startsWith('Typecheck ('));
-      throw new Error(typecheck?.status === 'failed'
-        ? 'The isolated typecheck failed; no branch or commit was created.'
+      throw new Error(typecheck?.status === 'failed' || typecheck?.status === 'inconclusive'
+        ? 'The isolated typecheck failed or was inconclusive; no branch or commit was created.'
         : 'The Node type repair requires a configured isolated typecheck; no branch or commit was created.');
     }
     if (verification.status !== 'passed') {
@@ -178,7 +189,10 @@ async function removeUncommittedBranch(repositoryRoot: string, branch: string, o
 /** Do not commit vNext source code while its containing manifest still installs vOld. */
 export async function assertChangedSourcesUseTargetSdk(projectRoot: string, migration: Migration, outcome: RunOutcome): Promise<void> {
   const proposed = new Map(outcome.proposedFiles.map((file) => [path.resolve(projectRoot, file.relativePath), file.after]));
-  const targetPattern = new RegExp(`^\\s*[~^]?${migration.toMajor}(?:\\.(?:\\d+|x|\\*)){0,2}\\s*$`, 'i');
+  const targetPackageName = migration.targetPackageName ?? migration.packageName;
+  const targetPattern = migration.targetPackageName
+    ? new RegExp(`^${migration.toMajor}\\.\\d+\\.\\d+$`)
+    : new RegExp(`^\\s*[~^]?${migration.toMajor}(?:\\.(?:\\d+|x|\\*)){0,2}\\s*$`, 'i');
   for (const relativeFile of outcome.filesChanged) {
     if (!/\.(?:[cm]?jsx?|[cm]?tsx?)$/i.test(relativeFile) || relativeFile.endsWith('.d.ts')) continue;
     const source = path.resolve(projectRoot, relativeFile);
@@ -199,7 +213,7 @@ export async function assertChangedSourcesUseTargetSdk(projectRoot: string, migr
         try { manifest = parseManifest<PackageManifest>(raw); }
         catch { throw new Error('Unsafe package.json: manifest could not be parsed safely.'); }
         const ranges = (['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const)
-          .map((section) => manifest[section]?.[migration.packageName])
+          .map((section) => manifest[section]?.[targetPackageName])
           .filter((range): range is string => typeof range === 'string');
         if (ranges.length > 0) {
           foundRange = ranges[0];
@@ -210,7 +224,7 @@ export async function assertChangedSourcesUseTargetSdk(projectRoot: string, migr
             if (!migration.declarativeRecipe && migration.id === 'firebase-admin@14') {
               throw new Error(`${relativeFile} cannot be committed: ${path.relative(projectRoot, manifestFile)} still declares ${migration.packageName} ${ranges.join(', ')}. Its engines.node range (${manifest.engines?.node}) may include Node.js versions below 22; review and update the range to guarantee Node.js 22 or newer, then preview again.`);
             }
-            throw new Error(`${relativeFile} cannot be committed: ${path.relative(projectRoot, manifestFile)} does not declare ${migration.packageName} v${migration.toMajor} in every dependency section.`);
+            throw new Error(`${relativeFile} cannot be committed: ${path.relative(projectRoot, manifestFile)} does not declare ${targetPackageName} v${migration.toMajor} in every dependency section.`);
           }
           break;
         }
@@ -218,7 +232,7 @@ export async function assertChangedSourcesUseTargetSdk(projectRoot: string, migr
       if (directory === projectRoot) break;
       directory = path.dirname(directory);
     }
-    if (!foundRange) throw new Error(`${relativeFile} cannot be committed: no containing package.json declares ${migration.packageName} v${migration.toMajor}.`);
+    if (!foundRange) throw new Error(`${relativeFile} cannot be committed: no containing package.json declares ${targetPackageName} v${migration.toMajor}.`);
   }
 }
 

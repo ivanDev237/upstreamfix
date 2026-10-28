@@ -327,6 +327,22 @@ function validateManifestDelta(beforeText: string, afterText: string, packageNam
       record(normalized[section])![packageName] = oldValue;
     }
   }
+  if (packageName === 'firebase-admin' && targetMajor === 14) {
+    const beforeAdmin = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
+      .map((section) => record(before[section])?.['firebase-admin']).find((value) => typeof value === 'string');
+    const afterAdmin = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
+      .map((section) => record(after[section])?.['firebase-admin']).find((value) => typeof value === 'string');
+    for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+      const oldValue = record(before[section])?.['firebase-functions'];
+      const nextValue = record(after[section])?.['firebase-functions'];
+      if (oldValue === nextValue) continue;
+      if (typeof oldValue !== 'string' || !/^\s*[~^]?(?:[0-6](?:\.\d+){0,2}|7\.[0-2](?:\.\d+)?)\s*$/.test(oldValue) || nextValue !== '^7.3.0' ||
+        typeof beforeAdmin !== 'string' || !isSupportedSourceMajor(beforeAdmin, 13) || afterAdmin !== '^14.0.0') {
+        throw new Error('Bundle package.json changes firebase-functions outside the approved v14 peer repair.');
+      }
+      record(normalized[section])!['firebase-functions'] = oldValue;
+    }
+  }
   const beforeEngines = record(before.engines);
   const afterEngines = record(after.engines);
   if (beforeEngines?.node === undefined && typeof afterEngines?.node === 'string') {
