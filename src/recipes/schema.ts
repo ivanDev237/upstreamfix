@@ -15,6 +15,7 @@ export const recipeSchema = {
     "title": { "type": "string", "minLength": 1, "maxLength": 500 },
     "guideUrl": { "type": "string", "minLength": 1, "maxLength": 500 },
     "nodeMajor": { "type": "integer", "minimum": 1, "maximum": 99 },
+    "requiredPackage": { "type": "string", "minLength": 1, "maxLength": 500 },
     "rules": {
       "type": "array", "minItems": 1, "maxItems": 256,
       "items": {
