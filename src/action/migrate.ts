@@ -87,11 +87,12 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
         timeoutMs: 10 * 60 * 1000,
         ...(process.env.UPSTREAMFIX_CONTAINER_VERIFY === '1' ? { verificationOptions: { execute: executeClientCommand } } : {}),
       });
+      if (result.verification.status !== 'passed') throw new Error('A migration branch requires passed verification.');
       const bundle = path.join(output, `${migration.id.replace(/[^A-Za-z0-9._-]+/g, '-')}.bundle`);
       await execFile('git', ['bundle', 'create', bundle, `${base}..${result.branch}`], { cwd: project, timeout: 30_000 });
       proposals.push({
         ...common, status: 'ready', commit: result.commit, files: result.outcome.filesChanged,
-        verification: result.verification.status,
+        verification: 'passed',
         report: renderMarkdownReport(migration, result.outcome, false, result.verification,
           process.env.UPSTREAMFIX_CONTAINER_VERIFY === '1' ? 'network-isolated-container' : 'restricted-host', 'github-app'),
       });

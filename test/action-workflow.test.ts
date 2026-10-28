@@ -27,11 +27,29 @@ describe('client migration workflow security boundary', () => {
     expect(source).toContain('timeout-minutes:');
   });
 
-  it('accepts only reviewed tool commits on main or an official release tag in both jobs', () => {
+  it('accepts only reviewed tool commits on main or an official release tag in every tool job', () => {
     const source = workflow();
-    expect(source.match(/merge-base --is-ancestor/g)).toHaveLength(2);
-    expect(source.match(/tag --points-at/g)).toHaveLength(2);
-    expect((source.match(/fetch-depth: 0/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    for (const name of ['migrate', 'publish', 'bot_followup_migrate', 'bot_followup_publish']) {
+      const job = source.split(`\n  ${name}:`)[1]?.split(/\n  [a-z_]+:/)[0];
+      expect(job, `${name} must exist`).toBeDefined();
+      expect(job).toContain('repository: ivanDev237/upstreamfix');
+      expect(job).toContain('merge-base --is-ancestor HEAD refs/remotes/origin/main');
+      expect(job).toContain("tag --points-at HEAD --list 'v[0-9]*'");
+      expect(job).toContain('fetch-depth: 0');
+    }
+  });
+
+  it('never exposes a token or secret in the step that executes customer verification', () => {
+    const job = workflow().split('\n  bot_followup_migrate:')[1]!.split('\n  bot_followup_publish:')[0]!;
+    const revalidation = job.split('      - name: Revalidate bot PR before executing client code')[1]!
+      .split('      - name: Migrate and verify current bot PR head')[0]!;
+    const migration = job.split('      - name: Migrate and verify current bot PR head')[1]!
+      .split('      - name: Upload bounded follow-up artifact')[0]!;
+    expect(revalidation).toContain('GITHUB_TOKEN:');
+    expect(revalidation).toContain('bot-followup-migrate-cli.js revalidate');
+    expect(migration).not.toContain('GITHUB_TOKEN:');
+    expect(migration).not.toContain('secrets.');
+    expect(migration).not.toContain('github.token');
   });
 
   it('uses workflow_call input SHA, cancels stale PR runs, and covers supporting source paths', () => {

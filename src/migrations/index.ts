@@ -6,9 +6,10 @@ import { firebaseAdminV14 } from './firebase-admin-v14/index.js';
 import { stripeV22 } from './stripe-v22/index.js';
 import { stripeV23 } from './stripe-v23/index.js';
 import { openaiV5 } from './openai-v5/index.js';
+import { brevoV6 } from './brevo-v6/index.js';
 
 /** The shipped migration catalog. Adding a migration requires registering it here, not in core or the CLI. */
-export const migrations: readonly Migration[] = [firebaseAdminV14, stripeV22, stripeV23, openaiV5];
+export const migrations: readonly Migration[] = [firebaseAdminV14, stripeV22, stripeV23, openaiV5, brevoV6];
 
 export async function findApplicableMigrations(cwd: string, options: { includeExperimental?: boolean } = {}): Promise<Migration[]> {
   const manifests = await readManifests(path.resolve(cwd));
@@ -16,7 +17,7 @@ export async function findApplicableMigrations(cwd: string, options: { includeEx
     const sections = [manifest.dependencies, manifest.devDependencies, manifest.peerDependencies, manifest.optionalDependencies];
     return sections.some((section) => {
       const range = section?.[migration.packageName];
-      return typeof range === 'string' && isSupportedSourceMajor(range, migration.fromMajor);
+      return typeof range === 'string' && [migration.fromMajor, ...(migration.additionalFromMajors ?? [])].some((major) => isSupportedSourceMajor(range, major));
     });
   }));
 }

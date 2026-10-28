@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   migrate:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'repository_dispatch' && github.event.client_payload.head_sha == github.sha && github.event.client_payload.branch == github.event.repository.default_branch && format('{0}', github.event.client_payload.repository_id) == format('{0}', github.event.repository.id) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'repository_dispatch' && github.event.action == 'upstreamfix.migrate' && github.event.client_payload.head_sha == github.sha && github.event.client_payload.branch == github.event.repository.default_branch && format('{0}', github.event.client_payload.repository_id) == format('{0}', github.event.repository.id) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
@@ -95,7 +95,7 @@ jobs:
 
   publish:
     needs: migrate
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'repository_dispatch' && github.event.client_payload.head_sha == github.sha && github.event.client_payload.branch == github.event.repository.default_branch && format('{0}', github.event.client_payload.repository_id) == format('{0}', github.event.repository.id) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || (github.event_name == 'repository_dispatch' && github.event.action == 'upstreamfix.migrate' && github.event.client_payload.head_sha == github.sha && github.event.client_payload.branch == github.event.repository.default_branch && format('{0}', github.event.client_payload.repository_id) == format('{0}', github.event.repository.id) && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -147,3 +147,131 @@ jobs:
           UPSTREAMFIX_BASE_SHA: ${{ github.sha }}
           UPSTREAMFIX_CLIENT_CI_WORKFLOW: ${{ inputs.ci_workflow }}
         run: node tool/dist/action/publish-cli.js
+
+  bot_followup_migrate:
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'bot-pr-followup' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Validate immutable source reference
+        shell: bash
+        env:
+          UPSTREAMFIX_SOURCE_SHA: ${{ inputs.upstreamfix_sha }}
+        run: |
+          [[ "$UPSTREAMFIX_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+      - name: Checkout reviewed UpstreamFix source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ivanDev237/upstreamfix
+          ref: ${{ inputs.upstreamfix_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: tool
+      - name: Refuse unreviewed tool commits
+        shell: bash
+        run: |
+          if ! git -C tool merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            [[ -n "$(git -C tool tag --points-at HEAD --list 'v[0-9]*')" ]] || exit 1
+          fi
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install reviewed tool without lifecycle scripts
+        working-directory: tool
+        run: npm ci --ignore-scripts --no-audit --no-fund && npm run build
+      - name: Validate current bot PR via read-only GitHub API
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          UPSTREAMFIX_OUTPUT_ROOT: ${{ runner.temp }}/upstreamfix-bot
+          UPSTREAMFIX_PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+          UPSTREAMFIX_HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+          UPSTREAMFIX_HEAD_REF: ${{ github.event.client_payload.head_ref }}
+          UPSTREAMFIX_PACKAGE: ${{ github.event.client_payload.package }}
+        run: mkdir -p "$UPSTREAMFIX_OUTPUT_ROOT" && node tool/dist/action/bot-followup-migrate-cli.js validate
+      - name: Checkout validated dependency bot head without stored credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.client_payload.head_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: client
+      - name: Prepare pinned verification image quietly
+        run: docker pull --quiet node:24.22.0-bookworm-slim@sha256:a5f4366e834695d5f363b920c104953a535d3a9864d1bdf74566a0ebe01daee5
+      - name: Revalidate bot PR before executing client code
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          UPSTREAMFIX_OUTPUT_ROOT: ${{ runner.temp }}/upstreamfix-bot
+          UPSTREAMFIX_PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+          UPSTREAMFIX_HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+          UPSTREAMFIX_HEAD_REF: ${{ github.event.client_payload.head_ref }}
+          UPSTREAMFIX_PACKAGE: ${{ github.event.client_payload.package }}
+        run: node tool/dist/action/bot-followup-migrate-cli.js revalidate
+      - name: Migrate and verify current bot PR head
+        env:
+          UPSTREAMFIX_OUTPUT_ROOT: ${{ runner.temp }}/upstreamfix-bot
+          UPSTREAMFIX_PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+          UPSTREAMFIX_HEAD_SHA: ${{ github.event.client_payload.head_sha }}
+          UPSTREAMFIX_HEAD_REF: ${{ github.event.client_payload.head_ref }}
+          UPSTREAMFIX_PACKAGE: ${{ github.event.client_payload.package }}
+          UPSTREAMFIX_CLIENT_ROOT: ${{ github.workspace }}/client
+          UPSTREAMFIX_CONTAINER_VERIFY: '1'
+          GIT_AUTHOR_NAME: upstreamfix[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: upstreamfix[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: node tool/dist/action/bot-followup-migrate-cli.js prepare
+      - name: Upload bounded follow-up artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upstreamfix-bot-followup
+          path: ${{ runner.temp }}/upstreamfix-bot/bot-followup.*
+          if-no-files-found: error
+          retention-days: 7
+
+  bot_followup_publish:
+    needs: bot_followup_migrate
+    if: github.event_name == 'repository_dispatch' && github.event.action == 'bot-pr-followup'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+    steps:
+      - name: Checkout reviewed UpstreamFix source only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ivanDev237/upstreamfix
+          ref: ${{ inputs.upstreamfix_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: tool
+      - name: Refuse unreviewed tool commits
+        shell: bash
+        run: |
+          if ! git -C tool merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            [[ -n "$(git -C tool tag --points-at HEAD --list 'v[0-9]*')" ]] || exit 1
+          fi
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install reviewed publisher without lifecycle scripts
+        working-directory: tool
+        run: npm ci --ignore-scripts --no-audit --no-fund && npm run build
+      - name: Download follow-up artifact outside workspace
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/upstreamfix-bot-input"
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name upstreamfix-bot-followup --dir "$RUNNER_TEMP/upstreamfix-bot-input"
+      - name: Revalidate bot PR and publish verified follow-up
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          UPSTREAMFIX_INPUT_ROOT: ${{ runner.temp }}/upstreamfix-bot-input
+        run: node tool/dist/action/bot-followup-publish-cli.js

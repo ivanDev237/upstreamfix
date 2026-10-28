@@ -73,6 +73,46 @@ afterEach(async () => {
 });
 
 describe('verified Git branch writes', () => {
+  it('allows a branch when isolated TypeScript failures are unchanged from the original', async () => {
+    const cwd = await makeRepository();
+    let installations = 0;
+    const result = await writeMigrationOnBranch(firebaseAdminV14, {
+      cwd,
+      verificationOptions: {
+        execute: async (command, args) => {
+          if (command === 'npm' && args[0] === 'install') {
+            installations++;
+            expect(args).toContain('--ignore-scripts');
+            return { stdout: 'installed' };
+          }
+          if (args.includes('typecheck')) throw Object.assign(new Error('typecheck failed'), {
+            stdout: "index.js(1,1): error TS2304: Cannot find name 'PrismaClient'.\n",
+          });
+          return { stdout: 'ok' };
+        },
+      },
+    });
+    expect(result.verification.status).toBe('passed');
+    expect(result.verification.checks.find((check) => check.name === 'Typecheck (.)')?.output)
+      .toMatch(/1 pre-existing error.*0 introduced/i);
+    expect(installations).toBe(2);
+    expect(await git(cwd, 'branch', '--list', result.branch)).toBe(result.branch);
+  });
+
+  it('refuses a branch when tests fail on both the original and migrated copies', async () => {
+    const cwd = await makeRepository();
+    await expect(writeMigrationOnBranch(firebaseAdminV14, {
+      cwd,
+      verificationOptions: {
+        execute: async (command, args) => {
+          if (command === 'npm' && args[0] === 'install') return { stdout: 'installed' };
+          if (args.includes('test')) throw new Error('existing test failure');
+          return { stdout: 'ok' };
+        },
+      },
+    })).rejects.toThrow('verification did not pass (inconclusive)');
+    expect(await git(cwd, 'branch', '--list', 'upstreamfix/firebase-admin-14')).toBe('');
+  });
   it('W4 refuses a symlinked package manifest without exposing its target contents', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-manifest-link-'));
     roots.push(root);
@@ -234,8 +274,17 @@ describe('verified Git branch writes', () => {
 
   it('refuses writes when the project has no configured checks', async () => {
     const cwd = await makeRepository(undefined, false);
+    await git(cwd, 'mv', 'index.js', 'index.ts');
+    await git(cwd, 'commit', '-qm', 'use TypeScript without a configured typecheck');
     await expect(writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions }))
       .rejects.toThrow('verification did not pass (skipped)');
+    expect(await git(cwd, 'branch', '--list', 'upstreamfix/*')).toBe('');
+  });
+
+  it('refuses writes when the only available JavaScript smoke check fails', async () => {
+    const cwd = await makeRepository(undefined, false);
+    await expect(writeMigrationOnBranch(firebaseAdminV14, { cwd, verificationOptions }))
+      .rejects.toThrow('verification did not pass (failed)');
     expect(await git(cwd, 'branch', '--list', 'upstreamfix/*')).toBe('');
   });
 
