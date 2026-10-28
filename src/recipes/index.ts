@@ -16,6 +16,7 @@ const fields: Record<string, 'string' | 'number' | 'array'> = {
   schemaVersion: 'number', id: 'string', package: 'string', fromMajor: 'number',
   toMajor: 'number', releasedAt: 'string', title: 'string', guideUrl: 'string',
   nodeMajor: 'number', rules: 'array',
+  requiredPackage: 'string',
 };
 const ruleFields: Record<string, 'string' | 'boolean'> = {
   kind: 'string', id: 'string', name: 'string', to: 'string', from: 'string',
@@ -91,6 +92,7 @@ function validateRecipe(value: unknown): RecipeDefinition {
   const record = objectAt(value, '$');
   for (const [key, kind] of Object.entries(fields)) {
     const field = record[key];
+    if (field === undefined && key === 'requiredPackage') continue;
     if (field === undefined) fail(`$.${key}`, 'is required by the JSON schema.');
     if (kind === 'array' ? !Array.isArray(field) : typeof field !== kind) fail(`$.${key}`, `expected ${kind}.`);
     if (typeof field === 'string' && (field.length === 0 || field.length > 500)) fail(`$.${key}`, 'must contain 1–500 characters.');
@@ -99,6 +101,7 @@ function validateRecipe(value: unknown): RecipeDefinition {
   for (const key of Object.keys(record)) if (!Object.hasOwn(fields, key)) fail(`$.${key}`, 'unknown field.');
   if (record.schemaVersion !== 1) fail('$.schemaVersion', 'only schema version 1 is supported.');
   if (!SAFE_PACKAGE.test(record.package as string)) fail('$.package', 'expected a valid npm package name without a path or URL.');
+  if (record.requiredPackage !== undefined && !SAFE_PACKAGE.test(record.requiredPackage as string)) fail('$.requiredPackage', 'expected a valid npm package name.');
   if (['constructor', 'prototype', '__proto__'].includes(record.package as string)) fail('$.package', 'prototype names are not valid recipe packages.');
   if (!/^[a-z0-9][a-z0-9._-]*@[1-9][0-9]*$/.test(record.id as string) &&
       !/^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*@[1-9][0-9]*$/.test(record.id as string)) fail('$.id', 'expected package@targetMajor.');

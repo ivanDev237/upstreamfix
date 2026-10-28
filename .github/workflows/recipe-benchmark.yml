@@ -1,0 +1,59 @@
+name: Reviewed YAML recipe benchmark
+
+on:
+  pull_request:
+    branches: [develop]
+    paths:
+      - '.github/workflows/recipe-benchmark.yml'
+      - 'docs/recipes/**'
+      - 'src/recipes/**'
+      - 'scripts/benchmark.ts'
+      - 'benchmark/apollo-client-4-repos.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recipes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - recipe: docs/recipes/firebase-admin-v14.yml
+            repos: benchmark/repos.json
+            only: resell-backend
+            label: firebase-resell
+          - recipe: docs/recipes/firebase-admin-v14.yml
+            repos: benchmark/repos.json
+            only: riverchat
+            label: firebase-riverchat
+          - recipe: docs/recipes/apollo-client-v4.yml
+            repos: benchmark/apollo-client-4-repos.json
+            only: streaming-platform-frontend-nextjs-apollo
+            label: apollo
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci --ignore-scripts
+      - name: Run recipe against pinned public project in isolated Docker
+        env:
+          UPSTREAMFIX_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          npm run benchmark -- --recipe ${{ matrix.recipe }} --repos ${{ matrix.repos }}
+          --only ${{ matrix.only }} --memory-mb 4096
+          --report "${{ runner.temp }}/${{ matrix.label }}-recipe-report.md" --yes
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: recipe-report-${{ matrix.label }}
+          path: ${{ runner.temp }}/${{ matrix.label }}-recipe-report.md
+          if-no-files-found: warn

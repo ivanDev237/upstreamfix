@@ -14,6 +14,10 @@ The [JSON schema](recipe.schema.json) defines the closed set of fields. Unknown 
 
 `id` must equal `package@toMajor`. `fromMajor` and `toMajor` describe the package transition. `nodeMajor` is the minimum runtime: the project must declare a compatible `engines.node`, or the developer must explicitly pass `--node-runtime <major>` after checking production. The manifest dependency changes only when source edits are safe and the Node requirement is met. `releasedAt`, `title`, and `guideUrl` appear in reports.
 
+`requiredPackage` is optional. Use it when the target SDK needs a new peer dependency: the tool refuses the SDK version update until that package is declared. The [experimental Apollo Client 4 recipe](recipes/apollo-client-v4.yml) uses `requiredPackage: rxjs`; it only moves a standalone `ApolloProvider` import, and all other v4 changes require review.
+
+Run a recipe against a pinned public-project corpus in the CI benchmark with `npm run benchmark -- --recipe docs/recipes/firebase-admin-v14.yml --repos benchmark/repos.json --only resell-backend --yes`. `--estimate-only` prints the expected transfer range without downloading anything. The repository's recipe benchmark workflow runs both Firebase and Apollo cases in isolated CI containers and uploads the reports.
+
 Each rule has a lowercase `id` for reporting, a `kind`, and a source `name`. Several patterns can share an `id`; the combination of kind and name must be unique:
 
 | Kind | Other fields | Meaning |

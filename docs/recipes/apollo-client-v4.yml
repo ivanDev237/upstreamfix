@@ -1,0 +1,16 @@
+# Experimental, deliberately narrow: other v4 API changes need human review.
+schemaVersion: 1
+id: '@apollo/client@4'
+package: '@apollo/client'
+fromMajor: 3
+toMajor: 4
+releasedAt: 2025-09-03
+title: Apollo Client v3 → v4 (provider import only)
+guideUrl: https://www.apollographql.com/docs/react/migrating/apollo-client-4-migration
+nodeMajor: 20
+requiredPackage: rxjs
+rules:
+  - kind: import-move
+    id: react-provider-import
+    name: ApolloProvider
+    from: '@apollo/client/react'

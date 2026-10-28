@@ -30,4 +30,5 @@ describe('.upstreamfix.yml', () => {
     expect(shouldRunOnSchedule('weekly', new Date('2026-10-20T09:00:00Z'))).toBe(false);
     expect(shouldRunOnSchedule('manual', new Date('2026-10-19T09:00:00Z'))).toBe(false);
   });
+
 });

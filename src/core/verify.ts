@@ -1,4 +1,5 @@
 import { execFile as execFileCallback, spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { copyFile, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import os from 'node:os';
@@ -6,6 +7,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { StringDecoder } from 'node:string_decoder';
 import { applyPatch, parsePatch } from 'diff';
+import { Node, Project, SyntaxKind } from 'ts-morph';
 import type { ProposedFileChange } from './types.js';
 import { registerTemporaryCleanup, terminateProcessGroup, trackProcessGroup } from './process-cleanup.js';
 import { IGNORED_PROJECT_DIRECTORIES } from './project-discovery.js';
@@ -15,9 +17,15 @@ const ignoredFiles = new Set(['.npmrc', '.yarnrc', '.yarnrc.yml', '.pnpmfile.cjs
 const maxOutputLength = 4_000;
 const maxCopyBytes = 100 * 1024 * 1024;
 const maxCopyFileBytes = 20 * 1024 * 1024;
+// Unchanged large project data can be needed by build/tests, but the isolated
+// copy remains bounded even when the source repository contains large binaries.
+const maxTotalCopyBytes = 500 * 1024 * 1024;
+const lockfileNames = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml']);
+const sourceExtensions = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts', '.vue', '.svelte', '.astro']);
+const largeAssetExtensions = new Set(['.apk', '.aab', '.ipa', '.zip', '.tar', '.gz', '.7z', '.jar', '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.avif', '.ico', '.mp3', '.mp4', '.mov', '.webm', '.wav', '.woff', '.woff2', '.ttf', '.otf', '.bin', '.wasm', '.sqlite', '.db', '.csv', '.dat', '.data', '.jsonl']);
 const execFile = promisify(execFileCallback);
 
-export type VerificationStatus = 'passed' | 'failed' | 'skipped';
+export type VerificationStatus = 'passed' | 'failed' | 'skipped' | 'inconclusive';
 
 export interface VerificationCheck {
   name: string;
@@ -39,6 +47,8 @@ export interface VerificationOptions {
   customCommands?: readonly string[];
   /** Package whose installed version makes this migration applicable. Defaults to firebase-admin for compatibility. */
   packageName?: string;
+  /** Source package removed without a replacement in a changed manifest. */
+  removedPackageName?: string;
   /** Exact migration results. When present these are applied directly; unified diffs are for display only. */
   fileChanges?: ProposedFileChange[];
   /** Override the UpstreamFix pnpm cache location (primarily for offline tests). */
@@ -73,6 +83,7 @@ export async function verifyProposedMigration(
     ? path.join(temporaryRoot, 'pnpm-store')
     : path.join(os.homedir(), '.cache', 'upstreamfix', 'pnpm-store'));
   const checks: VerificationCheck[] = [];
+  const executedControls: Array<{ check: VerificationCheck; command: string; args: string[]; directory: string; output: string }> = [];
   const unregisterCleanup = registerTemporaryCleanup(() => rm(temporaryRoot, { recursive: true, force: true }));
 
   try {
@@ -85,12 +96,24 @@ export async function verifyProposedMigration(
       writeFile(path.join(isolatedHome, 'npmrc.user'), '', 'utf8'),
       writeFile(path.join(isolatedHome, 'npmrc.global'), '', 'utf8'),
     ]);
-    await copyProject(cwd, projectCopy);
+    const changedFiles = changedSourcePaths(diffs, options.fileChanges);
+    const copiedLarge: string[] = [];
+    const excluded = await copyProject(cwd, projectCopy, '--verify', [...changedFiles], copiedLarge);
+    if (excluded.length) checks.push({ name: 'Excluded oversized files', command: 'copy isolated project', status: 'skipped',
+      durationMs: 0, output: `Non-code assets excluded from the isolated copy because of file or project size limits: ${excluded.join(', ')}` });
+    if (copiedLarge.length) checks.push({ name: 'Copied large files', command: 'copy isolated project', status: 'skipped',
+      durationMs: 0, output: `Unchanged files larger than 20 MiB copied within the 500 MiB total budget: ${copiedLarge.join(', ')}` });
     if (options.fileChanges) await applyProposedFiles(projectCopy, options.fileChanges);
     else await applyProposedDiffs(projectCopy, diffs);
 
     const packageName = options.packageName ?? 'firebase-admin';
-    const packageDirs = await findRelevantPackageDirs(projectCopy, packageName);
+    const removedPackageDirs = options.removedPackageName && options.fileChanges
+      ? await findRemovedPackageDirs(projectCopy, options.fileChanges, options.removedPackageName, packageName)
+      : [];
+    const packageDirs = [...new Set([
+      ...await findRelevantPackageDirs(projectCopy, packageName),
+      ...removedPackageDirs,
+    ])];
     if (packageDirs.length === 0) {
       return { status: 'skipped', checks, note: `No package.json declaring ${packageName} was found in the temporary project copy.` };
     }
@@ -134,42 +157,199 @@ export async function verifyProposedMigration(
     }
     checks.push(...installChecks);
 
+    for (const directory of removedPackageDirs) {
+      const relative = path.relative(projectCopy, directory) || '.';
+      const candidateRoots = new Set([directory, ...installedRoots]);
+      let current = directory;
+      while (current !== projectCopy) {
+        current = path.dirname(current);
+        candidateRoots.add(current);
+      }
+      const installed = (await Promise.all([...candidateRoots].map(async (candidate) => {
+        try {
+          await lstat(path.join(candidate, 'node_modules', ...options.removedPackageName!.split('/')));
+          return true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+          throw error;
+        }
+      }))).some(Boolean);
+      const manifest = await readPackageJson(directory, projectCopy);
+      const declared = declaresPackage(manifest, options.removedPackageName!);
+      const check: VerificationCheck = {
+        name: `Confirm ${options.removedPackageName} is absent (${relative})`,
+        command: 'inspect isolated installation',
+        status: installed || declared ? 'failed' : 'passed',
+        durationMs: 0,
+        output: installed ? `${options.removedPackageName} is still installed in the temporary copy.`
+          : declared ? `${options.removedPackageName} is still declared in the migrated package.json.`
+            : `${options.removedPackageName} is absent from the migrated package and its installation.`,
+      };
+      checks.push(check);
+      if (check.status === 'failed') return { status: 'failed', checks, note: check.output };
+    }
+
     for (const directory of packageDirs) await readRegularFile(path.join(directory, 'package.json'), projectCopy);
 
     const checkDirs = await findCheckDirs(projectCopy, packageDirs);
+    const runControl = async (name: string, command: string, args: string[], directory: string): Promise<void> => {
+      let output = '';
+      const check = await runCheck(name, command, args, directory, env, timeoutMs, options.execute, false, (value) => { output = value; });
+      checks.push(check);
+      executedControls.push({ check, command, args, directory, output });
+    };
     for (const directory of checkDirs) {
       const pkg = await readPackageJson(directory, projectCopy);
       const relative = path.relative(projectCopy, directory) || '.';
       if (pkg.scripts?.typecheck) {
         const script = await scriptCommand(projectCopy, directory, pkg, 'typecheck');
-        checks.push(await runCheck(`Typecheck (${relative})`, script.command, script.args, directory, env, timeoutMs, options.execute));
+        await runControl(`Typecheck (${relative})`, script.command, script.args, directory);
       } else if (await fileExists(path.join(directory, 'tsconfig.json'))) {
         const binary = path.join(projectCopy, 'node_modules', '.bin', 'tsc');
         const packageBinary = path.join(directory, 'node_modules', '.bin', 'tsc');
-        const compiler = await fileExists(packageBinary) ? packageBinary : binary;
-        checks.push(await runCheck(`Typecheck (${relative})`, compiler, ['--noEmit'], directory, env, timeoutMs, options.execute));
+        const compiler = await installedCompiler(packageBinary, projectCopy) ? packageBinary
+          : await installedCompiler(binary, projectCopy) ? binary : undefined;
+        if (compiler) await runControl(`Typecheck (${relative})`, compiler, ['--noEmit'], directory);
+        else checks.push({ name: `Typecheck (${relative})`, command: 'not configured', status: 'skipped',
+          durationMs: 0, output: 'TypeScript is not installed in this project' });
       } else {
         checks.push({ name: `Typecheck (${relative})`, command: 'not configured', status: 'skipped', durationMs: 0, output: 'No typecheck script or tsconfig.json was found.' });
       }
 
-      if (pkg.scripts?.test) {
+      if (pkg.scripts?.build) {
+        const script = await scriptCommand(projectCopy, directory, pkg, 'build');
+        await runControl(`Build (${relative})`, script.command, script.args, directory);
+      }
+
+      if (pkg.scripts?.test && !isNpmInitPlaceholderTestScript(pkg.scripts.test)) {
         const script = await scriptCommand(projectCopy, directory, pkg, 'test');
-        checks.push(await runCheck(`Tests (${relative})`, script.command, script.args, directory, env, timeoutMs, options.execute));
+        await runControl(`Tests (${relative})`, script.command, script.args, directory);
       } else {
-        checks.push({ name: `Tests (${relative})`, command: 'not configured', status: 'skipped', durationMs: 0, output: 'No test script was found.' });
+        checks.push({ name: `Tests (${relative})`, command: 'not configured', status: 'skipped', durationMs: 0,
+          output: pkg.scripts?.test ? 'The npm init placeholder test script is not configured.' : 'No test script was found.' });
       }
     }
 
     for (const [index, command] of (options.customCommands ?? []).entries()) {
       if (!command.trim() || command.length > 200) throw new Error('A custom verification command is empty or too long.');
-      checks.push(await runCheck(`Custom check ${index + 1}`, '/bin/sh', ['-c', command], projectCopy, env, timeoutMs, options.execute));
+      await runControl(`Custom check ${index + 1}`, '/bin/sh', ['-c', command], projectCopy);
     }
 
-    const ranChecks = checks.filter((check) => /^(?:Typecheck|Tests|Custom check) /.test(check.name) && check.status !== 'skipped');
-    const status: VerificationStatus = ranChecks.length === 0
+    if (!executedControls.some(({ check }) => /^(?:Typecheck|Build|Tests) \(/.test(check.name))) {
+      const smoke = await runSmokeCheck(projectCopy, changedFiles, packageName, env, timeoutMs, options.execute);
+      if (smoke) checks.push(smoke);
+    }
+
+    const failedControls = executedControls.filter(({ check }) => check.status === 'failed');
+    let preExistingFailuresConfirmed = false;
+    if (failedControls.length > 0) {
+      const baselineCopy = path.join(temporaryRoot, 'baseline');
+      await mkdir(baselineCopy, { recursive: true });
+      await copyProject(cwd, baselineCopy, '--verify', [...changedFiles]);
+      // A removed package may be malicious: the baseline copy compares the original code without ever installing it.
+      if (options.removedPackageName) await stripDependency(baselineCopy, options.removedPackageName);
+      const baselineInstalls = new Set<string>();
+      for (const directory of installDirs) {
+        const baselineDir = path.join(baselineCopy, path.relative(projectCopy, directory));
+        const pkg = await readPackageJson(baselineDir, baselineCopy);
+        if (!hasDependencies(pkg)) continue;
+        const plan = await installCommand(baselineCopy, baselineDir, pkg);
+        if (baselineInstalls.has(plan.cwd)) continue;
+        baselineInstalls.add(plan.cwd);
+        if (plan.command === 'yarn' && plan.yarnMajor && plan.yarnMajor >= 2) {
+          const version = await runCheck('Baseline check Yarn version', 'yarn', ['--version'], plan.cwd, env, timeoutMs, options.execute, true);
+          checks.push(version);
+          const actualMajor = Number(/^\s*(\d+)\./.exec(version.output)?.[1]);
+          if (version.status !== 'passed' || !(actualMajor >= 2) || (plan.yarnExact && actualMajor !== plan.yarnMajor)) {
+            return { status: 'failed', checks, note: 'The original project could not be installed with the required Yarn version.' };
+          }
+        }
+        if (plan.command === 'pnpm') {
+          const cacheInfo = await lstat(persistentPnpmStore).catch(() => undefined);
+          if (cacheInfo?.isSymbolicLink() || (cacheInfo && !cacheInfo.isDirectory())) throw new Error('The private pnpm cache path is not a regular directory.');
+          await mkdir(persistentPnpmStore, { recursive: true, mode: 0o700 });
+          plan.args.push('--store-dir', persistentPnpmStore, '--prefer-offline');
+        }
+        const label = path.relative(baselineCopy, plan.cwd) || '.';
+        const install = await runCheck(`Baseline install dependencies (${label})`, plan.command, plan.args, plan.cwd, env, timeoutMs, options.execute, true);
+        checks.push(install);
+        if (install.status !== 'passed') return { status: 'failed', checks, note: 'The original project could not be installed for comparison.' };
+        await readRegularFile(path.join(plan.cwd, 'package.json'), baselineCopy);
+      }
+
+      for (const control of failedControls) {
+        const baselineDir = path.join(baselineCopy, path.relative(projectCopy, control.directory));
+        const baselineCommand = path.isAbsolute(control.command) && control.command.startsWith(`${projectCopy}${path.sep}`)
+          ? path.join(baselineCopy, path.relative(projectCopy, control.command)) : control.command;
+        let baselineOutput = '';
+        const baseline = await runCheck(`Baseline ${control.check.name}`, baselineCommand, control.args, baselineDir, env,
+          timeoutMs, options.execute, false, (value) => { baselineOutput = value; });
+        if (control.check.name.startsWith('Typecheck (') || control.check.name.startsWith('Build (')) {
+          const after = parseTypeScriptDiagnostics(control.output, projectCopy, changedFiles);
+          const before = baseline.status === 'failed'
+            ? parseTypeScriptDiagnostics(baselineOutput, baselineCopy, changedFiles) : undefined;
+          if (!await checksComparable(control.check.name, control.directory, baselineDir, projectCopy, baselineCopy)) {
+            continue;
+          }
+          if (!after) {
+            if (baseline.status === 'failed' && !control.output.startsWith('Timed out.') && !baselineOutput.startsWith('Timed out.')) {
+              control.check.status = 'inconclusive';
+              control.check.output = truncate(`${control.check.output}\n${control.check.name.split(' ')[0]} fails before and after the migration (not TypeScript diagnostics; often missing environment variables).`);
+            } else if (baseline.status === 'passed') {
+              control.check.output = truncate(`${control.check.output}\nThis check passed before the migration.`);
+            }
+            continue;
+          }
+          if (!before) continue;
+          const introduced = [...after.entries()].filter(([key]) => !before.has(key)).map(([, value]) => value);
+          const label = control.check.name.startsWith('Typecheck (') ? 'Typecheck' : 'Build';
+          control.check.output = `${label}: ${before.size} pre-existing error${before.size === 1 ? '' : 's'}, `
+            + `${introduced.length === 0 ? 'unchanged' : 'compared'}; ${introduced.length} introduced by the migration.`
+            + (introduced.length ? `\nNew diagnostics (${Math.min(introduced.length, 20)} of ${introduced.length}):\n${introduced.slice(0, 20).join('\n')}` : '');
+          control.check.output = truncate(control.check.output);
+          if (introduced.length === 0) {
+            control.check.status = 'passed';
+            preExistingFailuresConfirmed = true;
+          }
+        } else if (control.check.name.startsWith('Tests (')
+          && (control.output.startsWith('Timed out.') || baselineOutput.startsWith('Timed out.'))) {
+          control.check.output = truncate(`${control.check.output}\nA timed-out test run cannot be treated as a pre-existing test failure.`);
+        } else if (control.check.name.startsWith('Tests (') && baseline.status === 'failed'
+          && !control.output.startsWith('Timed out.') && !baselineOutput.startsWith('Timed out.')) {
+          control.check.status = 'inconclusive';
+          control.check.output = truncate(`${control.check.output}\nTests fail before and after the migration; the effect of this migration is inconclusive.`);
+        } else if (baseline.status === 'passed') {
+          control.check.output = `${control.check.output}\nThis check passed before the migration.`;
+        } else if (control.check.name.startsWith('Custom check ') && baseline.status === 'failed'
+          && !control.output.startsWith('Timed out.') && !baselineOutput.startsWith('Timed out.')) {
+          control.check.status = 'inconclusive';
+          control.check.output = truncate(`${control.check.output}\nCustom check fails before and after the migration (not TypeScript diagnostics; often missing environment variables).`);
+        } else {
+          control.check.status = 'inconclusive';
+          control.check.output = 'This check fails before and after the migration; its result is inconclusive.';
+        }
+      }
+    }
+
+    const ranChecks = checks.filter((check) => /^(?:Typecheck|Build|Tests|Custom check|Smoke check) /.test(check.name) && check.status !== 'skipped');
+    let status: VerificationStatus = ranChecks.length === 0
       ? 'skipped'
-      : ranChecks.some((check) => check.status === 'failed') ? 'failed' : 'passed';
-    return { status, checks, ...(status === 'skipped' ? { note: 'No typecheck or test commands were configured.' } : {}) };
+      : ranChecks.some((check) => check.status === 'failed') ? 'failed'
+        : ranChecks.some((check) => check.status === 'inconclusive') ? 'inconclusive' : 'passed';
+    if (status === 'passed' && hasFirebaseFunctionsMajorBump(options.fileChanges)
+      && !checks.some((check) => /^(?:Typecheck|Build|Tests) \(/.test(check.name) && check.status === 'passed')) {
+      status = 'inconclusive';
+      checks.push({ name: 'Firebase Functions compatibility', command: 'require substantive project check',
+        status: 'inconclusive', durationMs: 0,
+        output: 'A major firebase-functions upgrade requires a passing typecheck, build, or test; a syntax-only smoke check is insufficient.' });
+    }
+    return { status, checks, ...(status === 'skipped' ? { note: 'No typecheck, build, or test commands were configured.' }
+      : status === 'passed' && checks.some((check) => check.name === 'Smoke check (syntax and imports)')
+        && !checks.some((check) => check.name.startsWith('Custom check '))
+        ? { note: 'only a smoke check was available: no typecheck, build or tests are configured' }
+      : status === 'passed' && preExistingFailuresConfirmed
+        ? { note: 'Passed (pre-existing TypeScript failures unchanged; no new diagnostics introduced by the migration).' }
+        : {}) };
   } catch (error) {
     return {
       status: 'failed',
@@ -182,7 +362,23 @@ export async function verifyProposedMigration(
   }
 }
 
-export async function copyProject(source: string, destination: string, operation = '--verify'): Promise<void> {
+function hasFirebaseFunctionsMajorBump(changes?: readonly ProposedFileChange[]): boolean {
+  return (changes ?? []).some((change) => {
+    if (!/(?:^|\/)package\.json$/.test(change.relativePath)) return false;
+    try {
+      const before = JSON.parse(change.before) as PackageJson;
+      const after = JSON.parse(change.after) as PackageJson;
+      for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies'] as const) {
+        const oldRange = before[section]?.['firebase-functions'];
+        const newRange = after[section]?.['firebase-functions'];
+        if (oldRange && newRange && /^\s*[~^]?[0-6](?:\.|$)/.test(oldRange) && /^\^7\.3\.0$/.test(newRange)) return true;
+      }
+    } catch { /* Invalid manifests are rejected earlier. */ }
+    return false;
+  });
+}
+
+export async function copyProject(source: string, destination: string, operation = '--verify', changedPaths: readonly string[] = [], copiedLarge: string[] = []): Promise<string[]> {
   let listing: string;
   try {
     ({ stdout: listing } = await execFile('git', [
@@ -197,6 +393,10 @@ export async function copyProject(source: string, destination: string, operation
     throw new Error(`${operation} requires a Git working tree so ignored and untracked files can be excluded safely.`);
   }
   let totalBytes = 0;
+  let largeBytes = 0;
+  const excluded: string[] = [];
+  const changed = new Set(changedPaths.map((file) => path.normalize(file).replaceAll('\\', '/')));
+  const candidates: Array<{ relative: string; portable: string; sourcePath: string; size: number; asset: boolean }> = [];
   for (const relative of listing.split('\0').filter(Boolean)) {
     const portable = relative.replaceAll('\\', '/');
     const parts = portable.split('/');
@@ -207,13 +407,36 @@ export async function copyProject(source: string, destination: string, operation
     if (path.isAbsolute(relativeCheck) || relativeCheck === '..' || relativeCheck.startsWith(`..${path.sep}`)) continue;
     const info = await lstat(sourcePath).catch(() => undefined);
     if (!info?.isFile() || info.isSymbolicLink()) continue;
-    if (info.size > maxCopyFileBytes) throw new Error(`--verify refused a file larger than ${maxCopyFileBytes / (1024 * 1024)} MiB: ${portable}`);
-    totalBytes += info.size;
-    if (totalBytes > maxCopyBytes) throw new Error(`--verify refused a project copy larger than ${maxCopyBytes / (1024 * 1024)} MiB.`);
-    const destinationPath = path.join(destination, relative);
-    await mkdir(path.dirname(destinationPath), { recursive: true });
-    await copyFile(sourcePath, destinationPath);
+    const name = parts.at(-1)!.toLowerCase();
+    const sizeLimited = changed.has(portable) || name === 'package.json' || lockfileNames.has(name);
+    const asset = !sizeLimited && !sourceExtensions.has(path.extname(name)) && (largeAssetExtensions.has(path.extname(name))
+      || parts.slice(0, -1).some((part) => ['public', 'assets'].includes(part.toLowerCase())));
+    if (info.size > maxCopyFileBytes) {
+      if (sizeLimited) throw new Error(`--verify refused a file larger than ${maxCopyFileBytes / (1024 * 1024)} MiB: ${portable}`);
+      largeBytes += info.size;
+      copiedLarge.push(portable);
+    } else {
+      totalBytes += info.size;
+    }
+    candidates.push({ relative, portable, sourcePath, size: info.size, asset });
   }
+  if (totalBytes > maxCopyBytes) {
+    for (const candidate of candidates) if (candidate.asset && candidate.size <= maxCopyFileBytes) {
+      totalBytes -= candidate.size;
+      excluded.push(candidate.portable);
+    }
+  }
+  if (totalBytes > maxCopyBytes) throw new Error(`--verify refused a project copy larger than ${maxCopyBytes / (1024 * 1024)} MiB after excluding non-code assets.`);
+  if (totalBytes + largeBytes > maxTotalCopyBytes)
+    throw new Error(`--verify refused a project copy larger than ${maxTotalCopyBytes / (1024 * 1024)} MiB including unchanged large files.`);
+  const excludedSet = new Set(excluded);
+  for (const candidate of candidates) {
+    if (excludedSet.has(candidate.portable)) continue;
+    const destinationPath = path.join(destination, candidate.relative);
+    await mkdir(path.dirname(destinationPath), { recursive: true });
+    await copyFile(candidate.sourcePath, destinationPath);
+  }
+  return excluded;
 }
 
 function isSensitivePath(relative: string): boolean {
@@ -267,7 +490,10 @@ export async function applyProposedFiles(projectCopy: string, changes: ProposedF
       });
       if (info?.isSymbolicLink()) throw new Error(`A proposed change crosses a symbolic link: ${change.relativePath}`);
     }
-    const current = await readFile(absolute, 'utf8').catch(() => undefined);
+    const current = await readFile(absolute, 'utf8').catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return '';
+      throw error;
+    });
     if (current !== change.before) throw new Error(`The temporary project does not match the migration input for ${change.relativePath}.`);
     await mkdir(path.dirname(absolute), { recursive: true });
     await writeFile(absolute, change.after, 'utf8');
@@ -289,6 +515,38 @@ async function findRelevantPackageDirs(root: string, packageName: string): Promi
   const rootPackage = await readPackageJson(root, root).catch(() => undefined);
   if (rootPackage?.workspaces && packageDirs.length > 0) return [root];
   return [...new Set(packageDirs)];
+}
+
+function declaresPackage(pkg: PackageJson, packageName: string): boolean {
+  return ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
+    .some((section) => Object.hasOwn((pkg as Record<string, Record<string, string>>)[section] ?? {}, packageName));
+}
+
+async function findRemovedPackageDirs(
+  root: string,
+  changes: ProposedFileChange[],
+  removedPackageName: string,
+  targetPackageName: string,
+): Promise<string[]> {
+  if (!/^(?:@[^/.][^/]*\/)?[^/.][^/]*$/.test(removedPackageName)) {
+    throw new Error('Invalid removed package name for verification.');
+  }
+  const directories: string[] = [];
+  for (const change of changes) {
+    if (path.basename(change.relativePath) !== 'package.json') continue;
+    const before = parseManifest<PackageJson>(change.before);
+    const after = parseManifest<PackageJson>(change.after);
+    if (!declaresPackage(before, removedPackageName) || declaresPackage(after, removedPackageName)
+      || declaresPackage(after, targetPackageName)) continue;
+    const directory = path.dirname(path.resolve(root, change.relativePath));
+    const relative = path.relative(root, directory);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw new Error('A proposed package.json is outside the temporary project copy.');
+    }
+    await readRegularFile(path.join(directory, 'package.json'), root);
+    directories.push(directory);
+  }
+  return [...new Set(directories)];
 }
 
 async function findCheckDirs(root: string, packageDirs: string[]): Promise<string[]> {
@@ -329,7 +587,31 @@ async function readPackageJson(directory: string, trustedRoot: string): Promise<
   }
 }
 
-export async function readRegularFile(file: string, trustedRoot?: string): Promise<string> {
+/** Removes a dependency from every package.json of a temporary copy, so that it is never installed there. */
+async function stripDependency(root: string, packageName: string): Promise<void> {
+  const visit = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const absolutePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!IGNORED_PROJECT_DIRECTORIES.has(entry.name)) await visit(absolutePath);
+      } else if (entry.isFile() && entry.name === 'package.json') {
+        const manifest = parseManifest<Record<string, unknown>>(await readRegularFile(absolutePath, root));
+        let changed = false;
+        for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+          const dependencies = manifest[section] as Record<string, unknown> | undefined;
+          if (dependencies && Object.hasOwn(dependencies, packageName)) {
+            delete dependencies[packageName];
+            changed = true;
+          }
+        }
+        if (changed) await writeFile(absolutePath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+      }
+    }
+  };
+  await visit(root);
+}
+
+export async function readRegularFile(file: string, trustedRoot?: string, maxBytes = 8 * 1024 * 1024): Promise<string> {
   const boundary = trustedRoot ? path.resolve(trustedRoot) : path.parse(path.resolve(file)).root;
   if (trustedRoot) {
     const relative = path.relative(boundary, path.resolve(file));
@@ -349,7 +631,7 @@ export async function readRegularFile(file: string, trustedRoot?: string): Promi
   try {
     const info = await handle.stat();
     if (!info.isFile()) throw new Error('Verification metadata must be a regular file.');
-    if (info.size > 8 * 1024 * 1024) throw new Error('Verification metadata exceeds the size limit.');
+    if (info.size > maxBytes) throw new Error('Verification metadata exceeds the size limit.');
     return await handle.readFile({ encoding: 'utf8' });
   } finally { await handle.close(); }
 }
@@ -357,6 +639,118 @@ export async function readRegularFile(file: string, trustedRoot?: string): Promi
 function hasDependencies(pkg: PackageJson): boolean {
   return ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
     .some((section) => Object.keys((pkg as Record<string, Record<string, string>>)[section] ?? {}).length > 0);
+}
+
+function isNpmInitPlaceholderTestScript(script: string): boolean {
+  const normalized = script.trim().replaceAll('\\"', '"');
+  return /^echo\s+(?:"Error:\s*no\s+test\s+specified"|'Error:\s*no\s+test\s+specified'|Error:\s*no\s+test\s+specified)\s*&&\s*exit\s+1$/.test(normalized);
+}
+
+function changedSourcePaths(diffs: string[], changes?: ProposedFileChange[]): Set<string> {
+  const paths = changes?.map((change) => change.relativePath) ?? diffs.flatMap((diff) =>
+    parsePatch(diff).map((patch) => patch.newFileName?.replace(/^b\//, '') ?? ''));
+  return new Set(paths.map((file) => path.normalize(file).replaceAll('\\', '/')));
+}
+
+async function runSmokeCheck(
+  root: string,
+  changedFiles: Set<string>,
+  packageName: string,
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+  execute: VerificationOptions['execute'],
+): Promise<VerificationCheck | undefined> {
+  const files = [...changedFiles].filter((file) => /\.(?:js|mjs|cjs)$/i.test(file)).sort();
+  if (files.length === 0) return undefined;
+  const started = Date.now();
+  const name = 'Smoke check (syntax and imports)';
+  const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { allowJs: true } });
+  let resolvedCount = 0;
+  for (const relative of files) {
+    const absolute = path.resolve(root, relative);
+    const within = path.relative(root, absolute);
+    if (within === '..' || within.startsWith(`..${path.sep}`) || path.isAbsolute(within)) {
+      return { name, command: 'node --check; resolve migrated package imports', status: 'failed',
+        durationMs: Date.now() - started, output: `Unsafe changed JavaScript path: ${relative}` };
+    }
+    const syntax = await runCheck(name, process.execPath, ['--check', absolute], path.dirname(absolute), env, timeoutMs, execute);
+    if (syntax.status !== 'passed') return { ...syntax, command: 'node --check; resolve migrated package imports',
+      output: truncate(`${relative}: ${syntax.output}`) };
+    try {
+      const source = project.createSourceFile(relative, await readRegularFile(absolute, root, maxCopyFileBytes));
+      const specifiers = new Set<string>();
+      for (const declaration of source.getImportDeclarations()) specifiers.add(declaration.getModuleSpecifierValue());
+      for (const declaration of source.getExportDeclarations()) {
+        const specifier = declaration.getModuleSpecifierValue();
+        if (specifier) specifiers.add(specifier);
+      }
+      for (const call of source.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+        const callee = call.getExpression();
+        if (callee.getText() !== 'require' && callee.getKind() !== SyntaxKind.ImportKeyword) continue;
+        const argument = call.getArguments()[0];
+        if (argument && (Node.isStringLiteral(argument) || Node.isNoSubstitutionTemplateLiteral(argument))) {
+          specifiers.add(argument.getLiteralValue());
+        }
+      }
+      const resolve = createRequire(absolute).resolve;
+      for (const specifier of specifiers) {
+        if (specifier !== packageName && !specifier.startsWith(`${packageName}/`)) continue;
+        try {
+          const target = resolve(specifier);
+          const location = path.relative(root, target);
+          if (location === '..' || location.startsWith(`..${path.sep}`) || path.isAbsolute(location)) {
+            throw new Error('resolved outside the isolated installation');
+          }
+        } catch (error) {
+          throw new Error(`Could not resolve ${specifier}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        resolvedCount++;
+      }
+    } catch (error) {
+      return { name, command: 'node --check; resolve migrated package imports', status: 'failed',
+        durationMs: Date.now() - started, output: truncate(`${relative}: ${error instanceof Error ? error.message : String(error)}`) };
+    }
+  }
+  return { name, command: 'node --check; resolve migrated package imports', status: 'passed',
+    durationMs: Date.now() - started,
+    output: `Checked syntax of ${files.length} changed JavaScript file${files.length === 1 ? '' : 's'} and resolved ${resolvedCount} migrated-package import${resolvedCount === 1 ? '' : 's'}.` };
+}
+
+function parseTypeScriptDiagnostics(output: string, root: string, changedFiles: Set<string>): Map<string, string> | undefined {
+  if (!output || output.includes('[middle of command output omitted]') || output.includes('Timed out.')) return undefined;
+  const diagnostics = new Map<string, string>();
+  const clean = output.replace(/\x1b\[[0-9;]*m/g, '');
+  let totalCodes = 0;
+  let parsedCodes = 0;
+  for (const line of clean.split(/\r?\n/)) {
+    if (/\berror\s+TS\d+:/.test(line)) totalCodes++;
+    const match = /^(.+?)\((\d+),(\d+)\):\s*error\s+(TS\d+):\s*(.+)$/.exec(line.trim())
+      ?? /^(.+?):(\d+):(\d+)\s*-\s*error\s+(TS\d+):\s*(.+)$/.exec(line.trim());
+    if (!match) continue;
+    parsedCodes++;
+    const filename = path.normalize(path.isAbsolute(match[1]!) ? path.relative(root, match[1]!) : match[1]!).replaceAll('\\', '/');
+    if (filename === '..' || filename.startsWith('../') || path.isAbsolute(filename)) return undefined;
+    const location = changedFiles.has(filename) ? '' : `:${match[2]}:${match[3]}`;
+    const message = match[5]!.replace(/\s+/g, ' ').trim();
+    const key = `${filename}${location} ${match[4]} ${message}`;
+    diagnostics.set(key, `${filename}${location}: ${match[4]}: ${message}`);
+  }
+  return diagnostics.size > 0 && parsedCodes === totalCodes ? diagnostics : undefined;
+}
+
+async function checksComparable(
+  checkName: string,
+  migratedDir: string,
+  baselineDir: string,
+  migratedRoot: string,
+  baselineRoot: string,
+): Promise<boolean> {
+  const script = checkName.startsWith('Typecheck (') ? 'typecheck' : 'build';
+  const [migrated, baseline] = await Promise.all([
+    readPackageJson(migratedDir, migratedRoot), readPackageJson(baselineDir, baselineRoot),
+  ]);
+  return migrated.scripts?.[script] === baseline.scripts?.[script]
+    && migrated.packageManager === baseline.packageManager;
 }
 
 async function installCommand(
@@ -431,6 +825,7 @@ async function runCheck(
   timeoutMs: number,
   execute: VerificationOptions['execute'],
   allowInstallNetwork = false,
+  captureOutput?: (output: string) => void,
 ): Promise<VerificationCheck> {
   const start = Date.now();
   const commandText = [command, ...args].join(' ');
@@ -440,11 +835,13 @@ async function runCheck(
       throw new Error('The supplied executor did not provide an installation result; refusing to run a real package install.');
     }
     const output = result ?? await executeWithProcessGroup(command, args, cwd, env, timeoutMs);
+    captureOutput?.(`${output.stdout ?? ''}${output.stderr ?? ''}`);
     return { name, command: commandText, status: 'passed', durationMs: Date.now() - start, output: truncate(`${output.stdout ?? ''}${output.stderr ?? ''}`) };
   } catch (error) {
     const cause = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; killed?: boolean; timedOut?: boolean };
     const output = `${cause.stdout ?? ''}${cause.stderr ?? ''}` || cause.message || 'Command failed without output.';
     const timedOut = cause.timedOut || cause.code === 'ETIMEDOUT' || cause.killed;
+    captureOutput?.(`${timedOut ? 'Timed out. ' : ''}${output}`);
     return { name, command: commandText, status: 'failed', durationMs: Date.now() - start, output: truncate(`${timedOut ? 'Timed out. ' : ''}${output}`) };
   }
 }
@@ -538,6 +935,17 @@ function truncate(output: string): string {
 async function fileExists(file: string): Promise<boolean> {
   try {
     return (await lstat(file)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+async function installedCompiler(file: string, projectRoot: string): Promise<boolean> {
+  try {
+    const target = await realpath(file);
+    const relative = path.relative(projectRoot, target);
+    return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+      && (await stat(target)).isFile();
   } catch {
     return false;
   }

@@ -5,6 +5,16 @@ series are experimental; review proposed migrations before applying them.
 
 ## Unreleased
 
+## 0.5.0
+
+- **Dependency-bot follow-ups.** When Dependabot or Renovate opens a major-upgrade pull request for a catalog SDK, the client workflow can now prepare the matching code changes. The new `bot-pr-followup` dispatch revalidates the pull request through the GitHub API (bot author, same-repository head, current head commit, real major bump) before checking it out; no token reaches the step that runs client code. Fixes land on a separate `upstreamfix/*` branch with a single comment on the bot pull request; the bot branch itself is never modified. `migrate --source-major` migrates code on a head whose manifest and lockfile are already upgraded, without touching them.
+- **Verification compares against the original project.** When a check fails, the same check runs on an unmigrated copy: type checks and builds pass only if the migration introduces no new TypeScript diagnostics; tests that fail before and after are reported as inconclusive and still block `--write`. The baseline copy never installs a package that the migration removes.
+- **More projects can be verified.** JavaScript projects without type checks, builds or tests get a smoke check (syntax and resolution of the migrated imports). The `npm init` placeholder test script is ignored, a `tsconfig.json` without TypeScript installed counts as not configured, large non-source assets are excluded, and large unchanged files are copied within a 500 MiB budget.
+- **firebase-admin 14 peer blockers.** The migration raises `firebase-functions` to `^7.3.0` when an older release would reject firebase-admin 14, and reports `firebase-functions-test` as a blocker (no published release accepts v14 yet) instead of failing with a raw `ERESOLVE`.
+- **Prerelease versions.** Dependency specs with prerelease or build identifiers (for example `multer@^1.4.5-lts.1`) no longer prevent lockfile regeneration.
+- **Experimental Brevo v6 migration.** `@getbrevo/brevo` v4 and v5 projects can be previewed with `migrate @getbrevo/brevo@6 --experimental`: direct, unambiguous rewrites only (`createBatchEvents`, balance parameters, `getAllCompanies` filters on `attributes.name`); other `filters` usages, removed parameters and changed response types are manual findings.
+- GitHub App issues for manual findings now describe the steps to take in the repository instead of suggesting `--write`. YAML recipes gained `requiredPackage`, and an experimental Apollo Client 4 recipe is benchmarked publicly.
+
 ## 0.4.0
 
 - The reusable client workflow now accepts `repository_dispatch` events from the UpstreamFix GitHub App. It runs only when the event names the receiving repository, its default branch and its current head commit; the event payload is never used to choose code, branches or migrations. Manual and scheduled runs are unchanged. The App itself is still in staging.
