@@ -5,6 +5,8 @@ series are experimental; review proposed migrations before applying them.
 
 ## Unreleased
 
+## 0.5.1
+
 - firebase-admin 14: CommonJS destructuring of a service's static exports is now migrated in place, for example `const { FieldValue, FieldPath: FP } = admin.firestore;` or `const { FieldPath } = require('firebase-admin').firestore;` become `require('firebase-admin/firestore')`, keeping scope, aliases and lazy loading. Rest elements, defaults, nested or computed names, members that are not static exports, ESM destructuring and assigned requires stay manual.
 - firebase-admin 14: the final check that no namespace reference remains now reads the migrated code instead of its text, so a comment such as `~/.secrets/project-admin.json` or a string no longer blocks a file.
 
