@@ -704,3 +704,77 @@ describe('firebase-admin v14 migration', () => {
     expect(notes.join('\n')).toContain('left unchanged to avoid downgrading');
   });
 });
+
+describe('firebase-admin v14 static destructuring', () => {
+  async function migrateSource(source: string, fileName = 'scripts.ts') {
+    const cwd = await makeProject();
+    await rm(path.join(cwd, 'server.ts'));
+    await writeFile(path.join(cwd, fileName), source);
+    const result = await runMigration(firebaseAdminV14, { cwd, dryRun: true });
+    const contents = result.fileUpdates?.find((update) => update.file.endsWith(fileName))?.contents;
+    const manual = result.manual.filter((item) => item.file.endsWith(fileName));
+    return { contents, manual };
+  }
+
+  it('rewrites CommonJS destructuring of a namespace service in place, keeping aliases and scope', async () => {
+    const { contents, manual } = await migrateSource([
+      "const admin = require('firebase-admin');",
+      'admin.initializeApp();',
+      'function run() {',
+      '  const db = admin.firestore();',
+      '  const { FieldValue, FieldPath: FP } = admin.firestore;',
+      '  return [db, FieldValue.serverTimestamp(), FP.documentId()];',
+      '}',
+      'module.exports = { run };',
+      '',
+    ].join('\n'));
+    expect(manual).toEqual([]);
+    expect(contents).toContain("  const { FieldValue, FieldPath: FP } = require('firebase-admin/firestore');");
+    expect(contents).toContain('const db = getFirestore();');
+    expect(contents).not.toMatch(/admin\./);
+  });
+
+  it('rewrites an inline require destructuring without a namespace alias', async () => {
+    const { contents, manual } = await migrateSource([
+      'async function backfill(db) {',
+      "  const { FieldPath } = require(\"firebase-admin\").firestore;",
+      '  return db.collection("users").orderBy(FieldPath.documentId()).get();',
+      '}',
+      'module.exports = { backfill };',
+      '',
+    ].join('\n'));
+    expect(manual).toEqual([]);
+    expect(contents).toContain('  const { FieldPath } = require("firebase-admin/firestore");');
+    expect(contents).not.toContain("require(\"firebase-admin\")");
+  });
+
+  it.each([
+    ['a member that is not a static export', "const { DocumentSnapshot } = admin.firestore;"],
+    ['a rest element', "const { FieldValue, ...rest } = admin.firestore;"],
+    ['a default value', "const { FieldValue = null } = admin.firestore;"],
+    ['a nested pattern', "const { FieldValue: { delete: remove } } = admin.firestore;"],
+    ['a computed property name', "const { ['FieldValue']: FV } = admin.firestore;"],
+  ])('keeps %s for manual review', async (_label, line) => {
+    const { contents, manual } = await migrateSource(`const admin = require('firebase-admin');\n${line}\n`);
+    expect(manual.length).toBeGreaterThan(0);
+    expect(contents).toBeUndefined();
+  });
+
+  it('keeps ESM destructuring of a namespace service for manual review', async () => {
+    const { contents, manual } = await migrateSource("import * as admin from 'firebase-admin';\nconst { FieldValue } = admin.firestore;\nexport const now = () => FieldValue.serverTimestamp();\n");
+    expect(manual.some((item) => /not a supported pattern/.test(item.reason))).toBe(true);
+    expect(contents).toBeUndefined();
+  });
+
+  it('keeps an assigned (lazy) require and an inline require used as a value for manual review', async () => {
+    for (const source of [
+      "let admin;\ntry {\n  admin = require('firebase-admin');\n} catch (error) {\n  admin = null;\n}\n",
+      "const store = require('firebase-admin').firestore;\n",
+      "const { DocumentSnapshot } = require('firebase-admin').firestore;\n",
+    ]) {
+      const { contents, manual } = await migrateSource(source);
+      expect(manual.some((item) => /Inline or destructured require/.test(item.reason))).toBe(true);
+      expect(contents).toBeUndefined();
+    }
+  });
+});

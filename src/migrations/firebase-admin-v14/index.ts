@@ -157,7 +157,16 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
   reportUnsupportedReferences(sourceFile, result.manual);
 
   const aliases = findAliases(sourceFile);
-  if (aliases.length === 0) return false;
+  const inlineEdits = inlineStaticDestructuringEdits(sourceFile);
+  if (aliases.length === 0) {
+    if (inlineEdits.length === 0 || result.manual.length > manualBefore) return false;
+    const transformed = applyTextEdits(sourceFile.getFullText(), inlineEdits);
+    for (const edit of inlineEdits) {
+      result.changes.push({ file, line: edit.line, rule: edit.rule, before: edit.before, after: edit.text } satisfies Change);
+    }
+    result.fileUpdates?.push({ file, contents: transformed });
+    return true;
+  }
 
   // A whole-project language-service reference query for each alias scales poorly
   // on large source files. Index local identifiers once and retain symbol identity.
@@ -221,7 +230,7 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
     return false;
   }
 
-  const edits: Edit[] = [];
+  const edits: Edit[] = [...inlineEdits];
   const aliasesWithManualUses = new Set<string>();
 
   for (const alias of aliases) {
@@ -267,7 +276,7 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
         continue;
       }
 
-      const classification = classify(ref);
+      const classification = classify(ref, alias.kind);
 
       if ('reason' in classification) {
         aliasesWithManualUses.add(alias.name);
@@ -379,14 +388,14 @@ function aliasMemberPattern(alias: string): RegExp {
   return new RegExp(`(?<![\\w$])${escaped}\\s*[.\\[]`);
 }
 
-function classify(ref: Identifier): Classification {
+function classify(ref: Identifier, kind: AliasKind): Classification {
   const parent = ref.getParent();
-  if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === ref) return classifyAccess(parent);
+  if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === ref) return classifyAccess(parent, kind);
   if (Node.isQualifiedName(parent) && parent.getLeft() === ref) return classifyQualified(parent);
   return { reason: 'The firebase-admin namespace is used as a value (passed around or destructured).' };
 }
 
-function classifyAccess(access: PropertyAccessExpression): Classification {
+function classifyAccess(access: PropertyAccessExpression, kind: AliasKind): Classification {
   const name = access.getName();
   const outer = access.getParent();
   const isCallee = Node.isCallExpression(outer) && outer.getExpression() === access;
@@ -410,6 +419,10 @@ function classifyAccess(access: PropertyAccessExpression): Classification {
         rule: 'service-static',
         imports: [{ module: service.module, name: member, typeOnly: false }],
       };
+    }
+    const destructuredModule = kind === 'cjs' ? staticDestructuringModule(access) : undefined;
+    if (destructuredModule) {
+      return { node: access, text: requireOf(access.getSourceFile(), destructuredModule), rule: 'service-static-destructuring', imports: [] };
     }
     return { reason: `\`${access.getText()}\` is not a supported pattern for this service.` };
   }
@@ -622,6 +635,7 @@ function reportUnsupportedReferences(sourceFile: SourceFile, manual: ManualItem[
       const declaration = call.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
       const name = declaration?.getNameNode();
       if (Node.isIdentifier(name) && knownRequireAliases.has(name.getText())) continue;
+      if (inlineStaticDestructuring(call)) continue;
       manual.push({
         file,
         line: call.getStartLineNumber(),
@@ -680,6 +694,65 @@ function declaredNames(sourceFile: SourceFile): Set<string> {
   }
   declaredNamesCache.set(sourceFile, names);
   return names;
+}
+
+/**
+ * CommonJS `const { FieldPath, FieldValue: FV } = admin.firestore;` reads static values that the
+ * modular entry point still exports. Every destructured property must be one of them; rest
+ * elements, defaults and nested patterns stay manual. Returns the modular module to require.
+ */
+function staticDestructuringModule(access: PropertyAccessExpression): string | undefined {
+  const service = Object.hasOwn(SERVICES, access.getName()) ? SERVICES[access.getName()] : undefined;
+  const declaration = access.getParent();
+  if (!service || !Node.isVariableDeclaration(declaration)) return undefined;
+  const initializer = declaration.getInitializer();
+  if (!initializer || initializer.getStart() !== access.getStart() || initializer.getEnd() !== access.getEnd()) return undefined;
+  const pattern = declaration.getNameNode();
+  if (!Node.isObjectBindingPattern(pattern) || pattern.getElements().length === 0) return undefined;
+  for (const element of pattern.getElements()) {
+    if (element.getDotDotDotToken() || element.getInitializer() || !Node.isIdentifier(element.getNameNode())) return undefined;
+    const property = element.getPropertyNameNode();
+    if (property && !Node.isIdentifier(property)) return undefined;
+    if (!service.statics.includes((property ?? element.getNameNode()).getText())) return undefined;
+  }
+  return service.module;
+}
+
+/** `require('firebase-admin').firestore` used only for static destructuring. */
+function inlineStaticDestructuring(call: Node): { access: PropertyAccessExpression; module: string } | undefined {
+  const access = call.getParent();
+  if (!Node.isPropertyAccessExpression(access) || access.getExpression() !== call) return undefined;
+  const module = staticDestructuringModule(access);
+  return module ? { access, module } : undefined;
+}
+
+/** Rewrites each inline `require('firebase-admin').<service>` destructuring in place, keeping its scope and laziness. */
+function inlineStaticDestructuringEdits(sourceFile: SourceFile): Edit[] {
+  const edits: Edit[] = [];
+  for (const call of sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+    const expression = call.getExpression();
+    const [argument] = call.getArguments();
+    const specifier = Node.isStringLiteral(argument) || Node.isNoSubstitutionTemplateLiteral(argument)
+      ? argument.getLiteralValue() : undefined;
+    if (!Node.isIdentifier(expression) || expression.getText() !== 'require' || specifier !== PKG) continue;
+    const inline = inlineStaticDestructuring(call);
+    if (!inline) continue;
+    edits.push({
+      start: inline.access.getStart(),
+      end: inline.access.getEnd(),
+      text: requireOf(sourceFile, inline.module),
+      rule: 'service-static-destructuring',
+      before: inline.access.getText(),
+      line: inline.access.getStartLineNumber(),
+      imports: [],
+    });
+  }
+  return edits;
+}
+
+function requireOf(sourceFile: SourceFile, module: string): string {
+  const quote = importQuote(sourceFile);
+  return `require(${quote}${module}${quote})`;
 }
 
 function hasImportCollision(sourceFile: SourceFile, needed: NeededImport): boolean {
