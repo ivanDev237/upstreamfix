@@ -6,6 +6,7 @@ import {
   type PropertyAccessExpression,
   type QualifiedName,
   type SourceFile,
+  ts,
 } from 'ts-morph';
 import type { Change, ManualItem, Migration, MigrationResult, PackageManifest } from '../../core/types.js';
 import { guaranteesNodeMajor } from '../../core/node-range.js';
@@ -353,7 +354,7 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
   textEdits.push(...aliasDeclarationRemovals(sourceFile, aliases, aliasesWithManualUses));
   const transformed = applyTextEdits(sourceFile.getFullText(), textEdits);
   for (const alias of aliases) {
-    if (!aliasesWithManualUses.has(alias.name) && aliasMemberPattern(alias.name).test(transformed)) {
+    if (!aliasesWithManualUses.has(alias.name) && hasAliasMemberAccess(transformed, file, alias.name)) {
       result.manual.push({
         file,
         line: alias.nameNode.getStartLineNumber(),
@@ -381,6 +382,31 @@ export function hasOverlappingEdits(edits: Array<{ start: number; end: number }>
     boundary = Math.max(boundary, edit.end);
   }
   return false;
+}
+
+/**
+ * True when the migrated code still reads `<alias>.x`, `<alias>[x]` or `<alias>.X` in a type.
+ * Parsed, not matched as text: a comment such as `~/.secrets/project-admin.json` or a string
+ * mentioning the alias must not block the migration.
+ */
+function hasAliasMemberAccess(text: string, fileName: string, alias: string): boolean {
+  const parsed = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true);
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))
+      && ts.isIdentifier(node.expression) && node.expression.text === alias) {
+      found = true;
+      return;
+    }
+    if (ts.isQualifiedName(node) && ts.isIdentifier(node.left) && node.left.text === alias) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  return found;
 }
 
 function aliasMemberPattern(alias: string): RegExp {

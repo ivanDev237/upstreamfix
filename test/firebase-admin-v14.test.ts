@@ -770,6 +770,39 @@ describe('firebase-admin v14 static destructuring', () => {
     expect(contents).not.toMatch(/require\('firebase-admin'\)/);
   });
 
+  it('is not blocked by the alias name in a comment or a string', async () => {
+    const { contents, manual } = await migrateSource([
+      '/**',
+      ' *   export GOOGLE_APPLICATION_CREDENTIALS=~/.secrets/project-admin.json',
+      ' */',
+      'function main() {',
+      "  const admin = require('firebase-admin');",
+      '  admin.initializeApp();',
+      '  const db = admin.firestore();',
+      '  const { Timestamp } = admin.firestore;',
+      "  console.log('connected with admin.json credentials', Timestamp.now());",
+      '  return db;',
+      '}',
+      'module.exports = { main };',
+      '',
+    ].join('\n'));
+    expect(manual).toEqual([]);
+    expect(contents).toContain("const { Timestamp } = require('firebase-admin/firestore');");
+    expect(contents).toContain('project-admin.json');
+  });
+
+  it('still refuses a file where another binding named like the alias keeps member accesses', async () => {
+    const { contents, manual } = await migrateSource([
+      "const admin = require('firebase-admin');",
+      'admin.initializeApp();',
+      'function role() { const admin = { name: "ops" }; return admin.name; }',
+      'module.exports = { role };',
+      '',
+    ].join('\n'));
+    expect(manual.some((item) => /still has references after migration/.test(item.reason))).toBe(true);
+    expect(contents).toBeUndefined();
+  });
+
   it.each([
     ['a member that is not a static export', "const { DocumentSnapshot } = admin.firestore;"],
     ['a rest element', "const { FieldValue, ...rest } = admin.firestore;"],
