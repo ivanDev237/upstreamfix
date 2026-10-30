@@ -5,6 +5,11 @@ series are experimental; review proposed migrations before applying them.
 
 ## Unreleased
 
+## 0.5.1
+
+- firebase-admin 14: CommonJS destructuring of a service's static exports is now migrated in place, for example `const { FieldValue, FieldPath: FP } = admin.firestore;` or `const { FieldPath } = require('firebase-admin').firestore;` become `require('firebase-admin/firestore')`, keeping scope, aliases and lazy loading. Rest elements, defaults, nested or computed names, members that are not static exports, ESM destructuring and assigned requires stay manual.
+- firebase-admin 14: the final check that no namespace reference remains now reads the migrated code instead of its text, so a comment such as `~/.secrets/project-admin.json` or a string no longer blocks a file.
+
 ## 0.5.0
 
 - **Dependency-bot follow-ups.** When Dependabot or Renovate opens a major-upgrade pull request for a catalog SDK, the client workflow can now prepare the matching code changes. The new `bot-pr-followup` dispatch revalidates the pull request through the GitHub API (bot author, same-repository head, current head commit, real major bump) before checking it out; no token reaches the step that runs client code. Fixes land on a separate `upstreamfix/*` branch with a single comment on the bot pull request; the bot branch itself is never modified. `migrate --source-major` migrates code on a head whose manifest and lockfile are already upgraded, without touching them.
