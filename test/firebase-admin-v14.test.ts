@@ -748,6 +748,28 @@ describe('firebase-admin v14 static destructuring', () => {
     expect(contents).not.toContain("require(\"firebase-admin\")");
   });
 
+  it('rewrites a template-literal inline require like a string require', async () => {
+    const { contents, manual } = await migrateSource("function stamp() {\n  const { Timestamp } = require(`firebase-admin`).firestore;\n  return Timestamp.now();\n}\nmodule.exports = { stamp };\n");
+    expect(manual).toEqual([]);
+    expect(contents).toContain("const { Timestamp } = require('firebase-admin/firestore');");
+  });
+
+  it('migrates a file that combines a namespace alias and an inline require destructuring', async () => {
+    const { contents, manual } = await migrateSource([
+      "const admin = require('firebase-admin');",
+      'admin.initializeApp();',
+      'function a() { const { FieldValue } = admin.firestore; return FieldValue.delete(); }',
+      "function b() { const { FieldPath } = require('firebase-admin').firestore; return FieldPath.documentId(); }",
+      'module.exports = { a, b };',
+      '',
+    ].join('\n'));
+    expect(manual).toEqual([]);
+    expect(contents).toContain("function a() { const { FieldValue } = require('firebase-admin/firestore');");
+    expect(contents).toContain("function b() { const { FieldPath } = require('firebase-admin/firestore');");
+    expect(contents).toContain('initializeApp();');
+    expect(contents).not.toMatch(/require\('firebase-admin'\)/);
+  });
+
   it.each([
     ['a member that is not a static export', "const { DocumentSnapshot } = admin.firestore;"],
     ['a rest element', "const { FieldValue, ...rest } = admin.firestore;"],

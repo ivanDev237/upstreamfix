@@ -699,7 +699,8 @@ function declaredNames(sourceFile: SourceFile): Set<string> {
 /**
  * CommonJS `const { FieldPath, FieldValue: FV } = admin.firestore;` reads static values that the
  * modular entry point still exports. Every destructured property must be one of them; rest
- * elements, defaults and nested patterns stay manual. Returns the modular module to require.
+ * elements, defaults, nested patterns and computed names stay manual. Returns the modular module
+ * to require.
  */
 function staticDestructuringModule(access: PropertyAccessExpression): string | undefined {
   const service = Object.hasOwn(SERVICES, access.getName()) ? SERVICES[access.getName()] : undefined;
