@@ -43,6 +43,8 @@ export interface VerificationResult {
 
 export interface VerificationOptions {
   timeoutMs?: number;
+  /** The unmigrated copy already has the breaking upgrade (a bot PR head): its failures prove nothing. */
+  requirePassingChecks?: boolean;
   /** Client-selected commands run only inside the disposable verification copy. */
   customCommands?: readonly string[];
   /** Package whose installed version makes this migration applicable. Defaults to firebase-admin for compatibility. */
@@ -240,7 +242,7 @@ export async function verifyProposedMigration(
       if (smoke) checks.push(smoke);
     }
 
-    const failedControls = executedControls.filter(({ check }) => check.status === 'failed');
+    const failedControls = options.requirePassingChecks ? [] : executedControls.filter(({ check }) => check.status === 'failed');
     let preExistingFailuresConfirmed = false;
     if (failedControls.length > 0) {
       const baselineCopy = path.join(temporaryRoot, 'baseline');
@@ -673,7 +675,8 @@ async function runSmokeCheck(
       return { name, command: 'node --check; resolve migrated package imports', status: 'failed',
         durationMs: Date.now() - started, output: `Unsafe changed JavaScript path: ${relative}` };
     }
-    const syntax = await runCheck(name, process.execPath, ['--check', absolute], path.dirname(absolute), env, timeoutMs, execute);
+    // The runner's own Node path does not exist inside the verification container.
+    const syntax = await runCheck(name, execute ? 'node' : process.execPath, ['--check', absolute], path.dirname(absolute), env, timeoutMs, execute);
     if (syntax.status !== 'passed') return { ...syntax, command: 'node --check; resolve migrated package imports',
       output: truncate(`${relative}: ${syntax.output}`) };
     try {
@@ -719,6 +722,7 @@ async function runSmokeCheck(
 function parseTypeScriptDiagnostics(output: string, root: string, changedFiles: Set<string>): Map<string, string> | undefined {
   if (!output || output.includes('[middle of command output omitted]') || output.includes('Timed out.')) return undefined;
   const diagnostics = new Map<string, string>();
+  const occurrences = new Map<string, number>();
   const clean = output.replace(/\x1b\[[0-9;]*m/g, '');
   let totalCodes = 0;
   let parsedCodes = 0;
@@ -732,8 +736,11 @@ function parseTypeScriptDiagnostics(output: string, root: string, changedFiles: 
     if (filename === '..' || filename.startsWith('../') || path.isAbsolute(filename)) return undefined;
     const location = changedFiles.has(filename) ? '' : `:${match[2]}:${match[3]}`;
     const message = match[5]!.replace(/\s+/g, ' ').trim();
+    // Changed files have no stable position, so repeated errors are told apart by their occurrence.
     const key = `${filename}${location} ${match[4]} ${message}`;
-    diagnostics.set(key, `${filename}${location}: ${match[4]}: ${message}`);
+    const occurrence = (occurrences.get(key) ?? 0) + 1;
+    occurrences.set(key, occurrence);
+    diagnostics.set(`${key} #${occurrence}`, `${filename}${location}: ${match[4]}: ${message}`);
   }
   return diagnostics.size > 0 && parsedCodes === totalCodes ? diagnostics : undefined;
 }
