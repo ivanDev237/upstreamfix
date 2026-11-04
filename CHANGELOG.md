@@ -5,6 +5,8 @@ series are experimental; review proposed migrations before applying them.
 
 ## Unreleased
 
+## 0.5.2
+
 - Action: the publish job no longer fails on `@getbrevo/brevo@6`, whose migrate and publish steps disagreed on the branch name. This failed client runs even in repositories without Brevo.
 - Dependabot follow-up: typecheck, build and test failures now block the fix. The bot PR head already has the new version, so comparing with it hid the errors the upgrade caused.
 - Dependabot follow-up: `.upstreamfix.yml` is honored (`ignore`, `exclude`, `verify`), reports are quoted so test output cannot mention users, and two bot PRs no longer share one queue slot.
