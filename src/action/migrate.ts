@@ -3,7 +3,7 @@ import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { parseActionConfig, shouldRunOnSchedule } from './config.js';
+import { parseActionConfig, proposalBranch, shouldRunOnSchedule } from './config.js';
 import type { Proposal } from './publish.js';
 import { escapeUntrustedMarkdownCell, renderMarkdownReport } from '../core/report.js';
 import { runMigration } from '../core/runner.js';
@@ -49,7 +49,7 @@ export async function prepareProposals(projectRoot: string, outputRoot: string, 
   const proposals: Proposal[] = [];
   const registryBefore = new Date().toISOString();
   for (const migration of migrations) {
-    const branch = `upstreamfix/${migration.id.replace(/[^A-Za-z0-9._-]+/g, '-')}`;
+    const branch = proposalBranch(migration.id);
     const common = {
       schema: 1 as const, migration: migration.id, base, branch, registryBefore,
       reviewers: config.reviewers, labels: config.labels,

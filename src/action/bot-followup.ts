@@ -1,5 +1,5 @@
 import { execFile as callback } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { runMigration } from '../core/runner.js';
@@ -7,6 +7,7 @@ import { writeMigrationOnBranch } from '../core/write-branch.js';
 import { renderMarkdownReport } from '../core/report.js';
 import { firebaseAdminV14 } from '../migrations/firebase-admin-v14/index.js';
 import { executeClientCommand } from './docker-execute.js';
+import { parseActionConfig } from './config.js';
 
 const execFile = promisify(callback);
 const SHA = /^[a-f0-9]{40}$/;
@@ -120,9 +121,18 @@ export async function prepareBotFollowup(project: string, output: string, valida
   const branch = `upstreamfix/firebase-admin-14-followup-${validated.prNumber}`;
   const common = { schema: 1 as const, repository: validated.repository, prNumber: validated.prNumber,
     headSha: validated.headSha, headRef: validated.headRef, sourceMajor: validated.sourceMajor, branch };
-  const preview = await runMigration(firebaseAdminV14, { cwd: project, dryRun: true, sourceMajor: validated.sourceMajor });
-  const report = renderMarkdownReport(firebaseAdminV14, preview, true);
+  const configFile = path.join(project, '.upstreamfix.yml');
+  const configInfo = await lstat(configFile).catch(() => undefined);
+  if (configInfo && !configInfo.isFile()) throw new Error('.upstreamfix.yml must be a regular file.');
+  const config = parseActionConfig(configInfo ? await readFile(configFile, 'utf8') : '');
   await mkdir(output, { recursive: true, mode: 0o700 });
+  if (config.ignore.includes(firebaseAdminV14.id)) {
+    const ignored: BotFollowupArtifact = { ...common, status: 'none', files: [], report: 'This migration is ignored by .upstreamfix.yml.' };
+    await writeFile(path.join(output, 'bot-followup.json'), JSON.stringify(ignored) + '\n', { mode: 0o600 });
+    return ignored;
+  }
+  const preview = await runMigration(firebaseAdminV14, { cwd: project, dryRun: true, sourceMajor: validated.sourceMajor, excludedDirectories: config.exclude });
+  const report = renderMarkdownReport(firebaseAdminV14, preview, true);
   let artifact: BotFollowupArtifact;
   if (preview.manual.length) artifact = { ...common, status: 'manual', files: [], report };
   else if (!preview.proposedFiles.length) artifact = { ...common, status: 'none', files: [], report };
@@ -130,6 +140,7 @@ export async function prepareBotFollowup(project: string, output: string, valida
     try {
       const result = await writeMigrationOnBranch(firebaseAdminV14, { cwd: project,
         sourceMajor: validated.sourceMajor, followupPullNumber: validated.prNumber,
+        excludedDirectories: config.exclude, customCommands: config.verify,
         timeoutMs: 10 * 60_000,
         ...(process.env.UPSTREAMFIX_CONTAINER_VERIFY === '1' ? { verificationOptions: { execute: executeClientCommand } } : {}) });
       if (result.outcome.proposedFiles.some((file) => !/\.(?:[cm]?[jt]sx?)$/.test(file.relativePath)))

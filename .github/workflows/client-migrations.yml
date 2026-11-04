@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: upstreamfix-${{ github.repository }}-${{ github.ref }}
+  group: upstreamfix-${{ github.repository }}-${{ github.ref }}-${{ github.event.client_payload.pr_number || 'default' }}
   cancel-in-progress: false
 
 jobs:

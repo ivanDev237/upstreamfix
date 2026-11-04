@@ -214,7 +214,7 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
     const nameNode = declaration.getNameNode();
     if (!Node.isCallExpression(initializer) || !Node.isIdentifier(nameNode)) continue;
     const factory = initializer.getExpression();
-    if (!Node.isPropertyAccessExpression(factory) || factory.getName() !== 'app') continue;
+    if (!Node.isPropertyAccessExpression(factory) || !['app', 'initializeApp'].includes(factory.getName())) continue;
     const root = factory.getExpression();
     if (!Node.isIdentifier(root) || !aliasNames.has(root.getText())) continue;
     for (const reference of localReferences(nameNode)) {
@@ -223,7 +223,7 @@ function migrateFile(sourceFile: SourceFile, result: MigrationResult): boolean {
       if (!Node.isPropertyAccessExpression(access) || access.getExpression() !== reference) continue;
       const service = access.getName();
       if (!Object.hasOwn(SERVICES, service) && !Object.hasOwn(REMOVED_SERVICES, service)) continue;
-      result.manual.push({ file, line: access.getStartLineNumber(), reason: `Stored admin.app() result calls app.${service}; choose the modular service getter manually.`, snippet: snippetOf(access) });
+      result.manual.push({ file, line: access.getStartLineNumber(), reason: `Stored admin.${factory.getName()}() result calls ${nameNode.getText()}.${service}; choose the modular service getter manually.`, snippet: snippetOf(access) });
     }
   }
   if (result.manual.length > manualBefore) {

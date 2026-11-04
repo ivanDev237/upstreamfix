@@ -102,6 +102,7 @@ export async function writeMigrationOnBranch(
       fileChanges: outcome.proposedFiles,
       timeoutMs: options.timeoutMs,
       ...options.verificationOptions,
+      requirePassingChecks: options.sourceMajor !== undefined,
       customCommands: options.customCommands,
     });
     if (requiresNodeTypesTypecheck(outcome.proposedFiles)

@@ -8,6 +8,13 @@ describe('lockfile updater isolation', () => {
     delete process.env.npm_execpath;
   });
 
+  it('checks a crafted hyphen range in linear time', () => {
+    const started = Date.now();
+    expect(hasUnsafeDependencySpecs({ dependencies: { a: `1.0.0${'-1.0.0'.repeat(30)} ^2` } })).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(hasUnsafeDependencySpecs({ dependencies: { a: '1.0.0 - 2.0.0' } })).toBe(false);
+  });
+
   it('accepts registry semver and tags while rejecting alternate dependency sources and overrides', () => {
     expect(hasUnsafeDependencySpecs({ dependencies: { a: '^1.2.3', b: 'latest', c: '>=2.0.0 <3.0.0' } })).toBe(false);
     for (const manifest of [

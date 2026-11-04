@@ -5,6 +5,15 @@ series are experimental; review proposed migrations before applying them.
 
 ## Unreleased
 
+## 0.5.2
+
+- Action: the publish job no longer fails on `@getbrevo/brevo@6`, whose migrate and publish steps disagreed on the branch name. This failed client runs even in repositories without Brevo.
+- Dependabot follow-up: typecheck, build and test failures now block the fix. The bot PR head already has the new version, so comparing with it hid the errors the upgrade caused.
+- Dependabot follow-up: `.upstreamfix.yml` is honored (`ignore`, `exclude`, `verify`), reports are quoted so test output cannot mention users, and two bot PRs no longer share one queue slot.
+- Verification: the smoke check works inside the container, and a repeated TypeScript error in a changed file now counts as new.
+- firebase-admin 14: `const app = admin.initializeApp(); app.firestore()` is now reported as manual instead of being left broken.
+- Security: dependency range checks no longer backtrack exponentially on a crafted range.
+
 ## 0.5.1
 
 - firebase-admin 14: CommonJS destructuring of a service's static exports is now migrated in place, for example `const { FieldValue, FieldPath: FP } = admin.firestore;` or `const { FieldPath } = require('firebase-admin').firestore;` become `require('firebase-admin/firestore')`, keeping scope, aliases and lazy loading. Rest elements, defaults, nested or computed names, members that are not static exports, ESM destructuring and assigned requires stay manual.

@@ -204,14 +204,15 @@ function hasLikelyStripeSdkUsage(sourcePath: string): boolean {
 const registryIdentifier = String.raw`[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*`;
 const registryVersion = String.raw`(?:v?\d+\.\d+\.\d+(?:-${registryIdentifier}(?:\+${registryIdentifier})?|\+${registryIdentifier})|v?\d+(?:\.(?:\d+|x|\*)){0,2})`;
 const registryComparator = String.raw`(?:\^|~|>=?|<=?|=)?\s*${registryVersion}`;
-const registryRange = new RegExp(String.raw`^${registryComparator}(?:\s*(?:\|\|\s*${registryComparator}|-\s*${registryVersion}|\s+(?:<|>|<=|>=)\s*${registryVersion}))*$`);
+// A hyphen range needs surrounding spaces: a bare `-` also starts a prerelease, and that overlap backtracks exponentially.
+const registryRange = new RegExp(String.raw`^${registryComparator}(?:\s*\|\|\s*${registryComparator}|\s+-\s+${registryVersion}|\s+(?:<|>|<=|>=)\s*${registryVersion})*$`);
 
 function isRegistryVersionSpec(spec: string): boolean {
   // A deliberately narrow subset: registry dist-tags or ordinary semver ranges,
   // including complete versions with prerelease/build identifiers.
   // Anything that can name a path, URL, Git host, workspace, alias, or patch is manual.
   if (/^(?:latest|next|beta|canary|rc)$/i.test(spec)) return true;
-  return registryRange.test(spec.trim());
+  return spec.length <= 1024 && registryRange.test(spec.trim());
 }
 
 export function hasUnsafeDependencySpecs(manifest: PackageManifest): boolean {

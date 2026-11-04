@@ -145,7 +145,7 @@ export function createProgram(): Command {
       const outcome = writeResult?.outcome ?? await runMigration(migration, { cwd, dryRun: true, nodeRuntime: options.nodeRuntime,
         sourceMajor: options.sourceMajor, allowYarnLockInstall: options.allowYarnLockInstall });
       const verification = writeResult?.verification ?? (options.verify
-        ? await verifyProposedMigration(cwd, outcome.proposedDiff, { packageName: migration.targetPackageName ?? migration.packageName, removedPackageName: migration.targetPackageName ? migration.packageName : undefined, fileChanges: outcome.proposedFiles, timeoutMs: (options.verifyTimeout ?? 300) * 1000 })
+        ? await verifyProposedMigration(cwd, outcome.proposedDiff, { packageName: migration.targetPackageName ?? migration.packageName, removedPackageName: migration.targetPackageName ? migration.packageName : undefined, fileChanges: outcome.proposedFiles, timeoutMs: (options.verifyTimeout ?? 300) * 1000, requirePassingChecks: options.sourceMajor !== undefined })
         : undefined);
       const report = renderMarkdownReport(migration, outcome, !options.write, verification);
 

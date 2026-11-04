@@ -14,6 +14,11 @@ const defaults: ActionConfig = {
 const lists = new Set<keyof ActionConfig>(['ignore', 'exclude', 'verify', 'reviewers', 'labels', 'experimental']);
 
 /** A deliberately small, auditable YAML subset. Unsupported YAML features fail closed. */
+/** Both the migrate and the publish steps must agree on this name; `@scope/name@N` has a leading separator. */
+export function proposalBranch(migrationId: string): string {
+  return `upstreamfix/${migrationId.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')}`;
+}
+
 export function parseActionConfig(source: string): ActionConfig {
   if (source.length > 16_384) throw new Error('.upstreamfix.yml exceeds 16 KiB.');
   const config: ActionConfig = { ...defaults, ignore: [], exclude: [], verify: [], reviewers: [], labels: [], experimental: [] };
