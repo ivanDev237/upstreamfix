@@ -716,6 +716,11 @@ describe('firebase-admin v14 static destructuring', () => {
     return { contents, manual };
   }
 
+  it('reports a stored initializeApp() result that still calls a namespaced service', async () => {
+    const { manual } = await migrateSource("import * as admin from 'firebase-admin';\nconst app = admin.initializeApp();\nexport const db = app.firestore();\n");
+    expect(manual.map((item) => item.reason)).toContain('Stored admin.initializeApp() result calls app.firestore; choose the modular service getter manually.');
+  });
+
   it('rewrites CommonJS destructuring of a namespace service in place, keeping aliases and scope', async () => {
     const { contents, manual } = await migrateSource([
       "const admin = require('firebase-admin');",

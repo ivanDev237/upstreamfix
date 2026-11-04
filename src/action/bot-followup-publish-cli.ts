@@ -6,7 +6,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { githubReadApi, parseBotFollowupPayload, validateBotPullRequest,
   type BotFollowupArtifact } from './bot-followup.js';
-import { parseCommitParents, parseExactRemoteHead, parseSafeRawDiff,
+import { parseCommitParents, parseExactRemoteHead, parseSafeRawDiff, quotedUntrustedReport,
   validatePublishableBundle, type Proposal } from './publish.js';
 import { sanitizeTerminalText } from '../core/report.js';
 
@@ -81,7 +81,7 @@ const safeReport = sanitizeTerminalText(artifact.report);
 const boundedReport = safeReport.length > 50_000
   ? `${safeReport.slice(0, 50_000)}\n\nReport truncated; inspect the workflow artifact for the complete findings.`
   : safeReport;
-const body = `${marker}\n\nThis follows dependency update #${artifact.prNumber} at \`${artifact.headSha}\`.\n\n${boundedReport}`;
+const body = `${marker}\n\nThis follows dependency update #${artifact.prNumber} at \`${artifact.headSha}\`.\n\n${quotedUntrustedReport(boundedReport)}`;
 
 if (artifact.status === 'ready') {
   const root = await mkdtemp(path.join(os.tmpdir(), 'upstreamfix-bot-publish-'));
@@ -161,7 +161,7 @@ if (!commentsExhausted) throw new Error('Bot PR comment pagination exceeded the 
 const message = artifact.status === 'ready'
   ? `${marker}\n\nThis major update breaks the old firebase-admin namespace calls. A verified source fix is available in #${followupNumber}. Please review that PR instead of merging this dependency-only update.`
   : artifact.status === 'manual'
-    ? `${marker}\n\nThe firebase-admin 14 update needs manual review.\n\n${boundedReport}`
+    ? `${marker}\n\nThe firebase-admin 14 update needs manual review.\n\n${quotedUntrustedReport(boundedReport)}`
     : `${marker}\n\nThe current bot PR no longer needs a source follow-up.`;
 if (comment) {
   if (comment.body !== message) await api(`/issues/comments/${comment.id}`, 'PATCH', { body: message });

@@ -1,6 +1,7 @@
 import { maskSecrets, sanitizeTerminalText } from '../core/report.js';
 import { migrations } from '../migrations/index.js';
 import type { ActionConfig } from './config.js';
+import { proposalBranch } from './config.js';
 import { isDeepStrictEqual } from 'node:util';
 import { Project, ts } from 'ts-morph';
 import { guaranteesNodeMajor } from '../core/node-range.js';
@@ -144,7 +145,7 @@ export function validateProposalEnvelope(proposal: Proposal, expectedBase: strin
     throw new Error('A ready npm lockfile proposal requires a registry cutoff time.');
   }
   if (!sha.test(proposal.base) || proposal.base !== expectedBase) throw new Error('Proposal base does not match the reviewed default-branch commit.');
-  const expectedBranch = `upstreamfix/${proposal.migration.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')}`;
+  const expectedBranch = proposalBranch(proposal.migration);
   if (proposal.branch !== expectedBranch) throw new Error('Proposal branch is outside the approved upstreamfix namespace.');
   if (!['ready', 'manual', 'none'].includes(proposal.status) || !['passed', 'failed', 'skipped'].includes(proposal.verification)) throw new Error('Invalid proposal status.');
   if (!Array.isArray(proposal.files) || !proposal.files.every((file) => typeof file === 'string')
@@ -422,7 +423,7 @@ function sameList(left: string[], right: string[]): boolean {
 }
 
 /** A fenced block prevents GitHub from parsing mentions, autolinks, HTML or client Markdown. */
-function quotedUntrustedReport(report: string): string {
+export function quotedUntrustedReport(report: string): string {
   const safe = maskSecrets(sanitizeTerminalText(report)).replace(/&#(91|93|124|96|33);/g, (_entity, code: string) => String.fromCharCode(Number(code)));
   let longest = 0;
   for (const [run] of safe.matchAll(/~+/g)) longest = Math.max(longest, run.length);
