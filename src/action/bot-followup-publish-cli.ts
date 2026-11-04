@@ -6,10 +6,9 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { githubReadApi, parseBotFollowupPayload, validateBotPullRequest,
   type BotFollowupArtifact } from './bot-followup.js';
-import { parseCommitParents, parseExactRemoteHead, parseSafeRawDiff,
+import { parseCommitParents, parseExactRemoteHead, parseSafeRawDiff, quotedUntrustedReport,
   validatePublishableBundle, type Proposal } from './publish.js';
 import { sanitizeTerminalText } from '../core/report.js';
-import { quotedUntrustedReport } from './publish.js';
 
 const execFile = promisify(callback);
 const token = process.env.GITHUB_TOKEN ?? '';

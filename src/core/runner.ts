@@ -212,7 +212,7 @@ function isRegistryVersionSpec(spec: string): boolean {
   // including complete versions with prerelease/build identifiers.
   // Anything that can name a path, URL, Git host, workspace, alias, or patch is manual.
   if (/^(?:latest|next|beta|canary|rc)$/i.test(spec)) return true;
-  return spec.length <= 256 && registryRange.test(spec.trim());
+  return spec.length <= 1024 && registryRange.test(spec.trim());
 }
 
 export function hasUnsafeDependencySpecs(manifest: PackageManifest): boolean {
