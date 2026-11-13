@@ -22,6 +22,8 @@ npx --yes upstreamfix@latest migrate firebase-admin@14 --cwd /path/to/your/proje
 
 The report path is explicit; preview commands do not create report files unless `--report` is supplied. The Firebase Admin migration currently targets projects using the namespaced API and proposes modular API changes. Review the diff and manual findings against the [official migration guide](https://firebase.google.com/docs/admin/migrate-node-v10).
 
+Prefer not to run the workflow yourself? The hosted GitHub App is free on public repositories; Team covers private ones: https://upstreamfix.dev/pricing
+
 ## GitHub Action
 
 ### Install in under five minutes
